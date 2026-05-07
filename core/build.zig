@@ -235,4 +235,18 @@ pub fn build(b: *std.Build) void {
     executor_module.addImport("handler", handler_module);
     executor_module.addImport("precompile", precompile_module);
     executor_module.addImport("accelerators", accelerators_module);
+
+    // runner: SSZ stream execution entry point.
+    // Reads SSZ input via the injected `zkvm_io` module, executes the block,
+    // and returns the serialized output bytes + success flag.
+    // "zkvm_io" is NOT wired here — the consumer must inject a platform-specific
+    // implementation (e.g. memory-mapped I/O for ZisK, stdin/env for native).
+    const runner_module = b.addModule("runner", .{
+        .root_source_file = b.path("../src/stateless/stateless/run.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    runner_module.addImport("executor", executor_module);
+    runner_module.addImport("ssz_decode", ssz_decode_module);
+    runner_module.addImport("ssz_output", ssz_output_module);
 }

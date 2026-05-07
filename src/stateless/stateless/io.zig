@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const input_mod = @import("input");
-const ssz = @import("ssz.zig");
+const ssz = @import("ssz_decode");
 const zkvm_io = @import("zkvm_io");
 
 /// SSZ from zkvm_io.read_input().

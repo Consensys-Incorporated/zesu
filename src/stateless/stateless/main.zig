@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
     // Derive pre-state root from parent block header in witness.
     const pre_state_root = rlp_decode.findPreStateRoot(si.witness.headers, ep.block_number) orelse ep.state_root;
 
-    std.debug.print("=== zevm-stateless: block #{d} ===\n\n", .{ep.block_number});
+    std.debug.print("=== zesu: block #{d} ===\n\n", .{ep.block_number});
 
     std.debug.print(
         "pre_state_root = 0x{x}\n" ++
@@ -188,6 +188,7 @@ pub fn main(init: std.process.Init) !void {
     switch (source) {
         .ssz_stream, .ssz_file => {
             const ssz_bytes = try ssz_output.serialize(allocator, si.new_payload_request, si.chain_config.chain_id, true);
+            std.debug.print("  new_payload_request_root = 0x{x}\n", .{ssz_bytes[0..32].*});
             zkvm_io.write_output(&ssz_bytes);
         },
         .json => {
