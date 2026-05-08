@@ -660,7 +660,6 @@ pub fn transitionWithContext(
         } else {
             return error.MissingSenderSignature;
         }
-
         // 1b. Validate tx type is supported by the current fork
         {
             const type_supported = switch (tx.type) {

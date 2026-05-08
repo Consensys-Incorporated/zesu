@@ -285,7 +285,19 @@ pub fn build(b: *std.Build) void {
     ssz_output_module.addImport("input", input_module);
     ssz_output_module.addImport("accelerators", accelerators_module);
 
-    // ── zevm_stateless binary ─────────────────────────────────────────────────
+    // runner: SSZ stream execution entry point (platform-independent execution core).
+    // Wire the native zkvm_io so `runStateless` reads from stdin/env.
+    const runner_module = b.createModule(.{
+        .root_source_file = b.path("src/stateless/stateless/run.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    runner_module.addImport("executor", executor_module);
+    runner_module.addImport("ssz_decode", ssz_decode_module);
+    runner_module.addImport("ssz_output", ssz_output_module);
+    runner_module.addImport("zkvm_io", zkvm_io_module);
+
+    // ── zesu binary ─────────────────────────────────────────────────
 
     const stateless_exe = b.addExecutable(.{
         .name = "zesu",
@@ -301,10 +313,11 @@ pub fn build(b: *std.Build) void {
     stateless_exe.root_module.addImport("executor", executor_module);
     stateless_exe.root_module.addImport("zesu_allocator", zesu_allocator_module);
     stateless_exe.root_module.addImport("zkvm_io", zkvm_io_module);
+    stateless_exe.root_module.addImport("ssz_decode", ssz_decode_module);
     stateless_exe.root_module.addImport("accelerators", accelerators_module);
     addCryptoLibraries(stateless_exe, crypto_include, libblst_path, libmcl_path, is_linux);
     b.installArtifact(stateless_exe);
-    addRunStep(b, "run", "Run the zevm_stateless app", stateless_exe, &.{});
+    addRunStep(b, "run", "Run the zesu app", stateless_exe, &.{});
 
     // ── t8n: Ethereum State Transition Tool ───────────────────────────────────
 
