@@ -660,7 +660,6 @@ pub fn transitionWithContext(
         } else {
             return error.MissingSenderSignature;
         }
-
         // 1b. Validate tx type is supported by the current fork
         {
             const type_supported = switch (tx.type) {
@@ -1052,6 +1051,7 @@ pub fn transitionWithContext(
         ctx.tx.authorization_list = null;
 
         // 5. Build receipt
+        std.log.info("tx[{d}] gas_used={d} cumulative={d} status={s}", .{ tx_idx, exec_result.block_gas_used, cumulative_gas + exec_result.block_gas_used, if (exec_result.status == .Success) "ok" else "fail" });
         cumulative_gas += exec_result.block_gas_used;
         // Amsterdam+: block_gas_used = max(regular, state), which is only known
         // post-execution. Reject the block immediately if this tx overflows the limit.

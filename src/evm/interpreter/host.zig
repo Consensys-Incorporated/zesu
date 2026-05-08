@@ -857,7 +857,9 @@ fn finalizeCreateCore(
         return .{ .success = false, .is_revert = (result == .revert), .address = [_]u8{0} ** 20, .gas_remaining = gas_rem, .return_data = rd, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = gas_reservoir };
     }
 
-    const deployed_raw = return_data;
+    // SELFDESTRUCT in init code: no code is deployed (account is deleted).
+    // return_data may contain stale call return data from STATICCALLs; ignore it.
+    const deployed_raw: []const u8 = if (result == .selfdestruct) &[_]u8{} else return_data;
     if (deployed_raw.len > MAX_CODE_SIZE) {
         js.checkpointRevert(checkpoint);
         return .{ .success = false, .is_revert = false, .address = [_]u8{0} ** 20, .gas_remaining = 0, .return_data = &[_]u8{}, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = gas_reservoir };

@@ -297,7 +297,7 @@ pub fn build(b: *std.Build) void {
     runner_module.addImport("ssz_output", ssz_output_module);
     runner_module.addImport("zkvm_io", zkvm_io_module);
 
-    // ── zevm_stateless binary ─────────────────────────────────────────────────
+    // ── zesu binary ─────────────────────────────────────────────────
 
     const stateless_exe = b.addExecutable(.{
         .name = "zesu",
@@ -317,7 +317,7 @@ pub fn build(b: *std.Build) void {
     stateless_exe.root_module.addImport("accelerators", accelerators_module);
     addCryptoLibraries(stateless_exe, crypto_include, libblst_path, libmcl_path, is_linux);
     b.installArtifact(stateless_exe);
-    addRunStep(b, "run", "Run the zevm_stateless app", stateless_exe, &.{});
+    addRunStep(b, "run", "Run the zesu app", stateless_exe, &.{});
 
     // ── t8n: Ethereum State Transition Tool ───────────────────────────────────
 

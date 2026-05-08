@@ -712,8 +712,14 @@ fn executeIterative(
                     frame.interp.return_data.data
                 else
                     &[_]u8{};
-                return_data_buf.clearRetainingCapacity();
-                return_data_buf.appendSlice(alloc_mod.get(), rd_raw) catch {};
+                // rd_raw may already be return_data_buf.items (parent frame's return_data
+                // points into the same buffer). Detect self-copy and skip it.
+                if (rd_raw.len == 0 or rd_raw.ptr != return_data_buf.items.ptr) {
+                    return_data_buf.clearRetainingCapacity();
+                    return_data_buf.appendSlice(alloc_mod.get(), rd_raw) catch {};
+                } else {
+                    return_data_buf.items.len = rd_raw.len;
+                }
                 // defer fires here, deiniting frames[0].interp — return_data_buf is safe.
                 return IterativeResult{
                     .raw_result = raw,
@@ -735,8 +741,12 @@ fn executeIterative(
                 frame.interp.return_data.data
             else
                 &[_]u8{};
-            return_data_buf.clearRetainingCapacity();
-            return_data_buf.appendSlice(alloc_mod.get(), rd_raw) catch {};
+            if (rd_raw.len == 0 or rd_raw.ptr != return_data_buf.items.ptr) {
+                return_data_buf.clearRetainingCapacity();
+                return_data_buf.appendSlice(alloc_mod.get(), rd_raw) catch {};
+            } else {
+                return_data_buf.items.len = rd_raw.len;
+            }
 
             const cause = frame.cause orelse unreachable;
             const sub_ptr = frame.interp;
