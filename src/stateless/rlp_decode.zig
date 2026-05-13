@@ -18,6 +18,18 @@ pub const MinimalHeader = struct {
     state_root: [32]u8,
 };
 
+/// Subset of header fields needed to populate Env.parent_* before execution
+/// (gas/basefee for EIP-1559 base-fee check, blob-gas pair for EIP-4844
+/// excess-blob-gas check). All optionals are `null` for pre-fork parents.
+pub const ParentHeader = struct {
+    gas_limit: u64,
+    gas_used: u64,
+    timestamp: u64,
+    base_fee_per_gas: ?u64,
+    blob_gas_used: ?u64,
+    excess_blob_gas: ?u64,
+};
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Decode all block header fields from a bare RLP list payload (no outer wrapper).
@@ -90,6 +102,71 @@ pub fn decodeBlockHeader(allocator: std.mem.Allocator, payload: []const u8) !inp
     if (rest.len > 0) hdr.slot_number = try nextUint64(&rest); // [22]
 
     return hdr;
+}
+
+/// Decode the subset of header fields needed for Env.parent_* population
+/// (gas_limit, gas_used, timestamp, base_fee_per_gas, blob_gas_used,
+/// excess_blob_gas). Returns null for absent post-London/Cancun fields.
+/// No heap allocation — extra_data, bloom etc. are skipped.
+pub fn decodeParentHeader(raw: []const u8) error{InvalidBlock}!ParentHeader {
+    const hdr_r = mpt.rlp.decodeItem(raw) catch return error.InvalidBlock;
+    const hdr_payload = switch (hdr_r.item) {
+        .list => |p| p,
+        .bytes => return error.InvalidBlock,
+    };
+    var rest = hdr_payload;
+
+    // Skip fields [0]..[8]: parent_hash, ommers, beneficiary, state_root,
+    // tx_root, receipts_root, logs_bloom, difficulty, number.
+    var i: usize = 0;
+    while (i < 9) : (i += 1) {
+        if (rest.len == 0) return error.InvalidBlock;
+        const r = mpt.rlp.decodeItem(rest) catch return error.InvalidBlock;
+        rest = rest[r.consumed..];
+    }
+
+    const gas_limit = try nextUint64(&rest); // [9]
+    const gas_used = try nextUint64(&rest); // [10]
+    const timestamp = try nextUint64(&rest); // [11]
+
+    // Skip [12] extra_data, [13] mix_hash, [14] nonce.
+    var j: usize = 0;
+    while (j < 3) : (j += 1) {
+        if (rest.len == 0) {
+            return .{
+                .gas_limit = gas_limit,
+                .gas_used = gas_used,
+                .timestamp = timestamp,
+                .base_fee_per_gas = null,
+                .blob_gas_used = null,
+                .excess_blob_gas = null,
+            };
+        }
+        const r = mpt.rlp.decodeItem(rest) catch return error.InvalidBlock;
+        rest = rest[r.consumed..];
+    }
+
+    // [15] base_fee_per_gas (London+).
+    const base_fee_per_gas: ?u64 = if (rest.len == 0) null else try nextUint64(&rest);
+
+    // Skip [16] withdrawals_root (Shanghai+).
+    if (rest.len > 0) {
+        const r = mpt.rlp.decodeItem(rest) catch return error.InvalidBlock;
+        rest = rest[r.consumed..];
+    }
+
+    // [17] blob_gas_used, [18] excess_blob_gas (Cancun+).
+    const blob_gas_used: ?u64 = if (rest.len == 0) null else try nextUint64(&rest);
+    const excess_blob_gas: ?u64 = if (rest.len == 0) null else try nextUint64(&rest);
+
+    return .{
+        .gas_limit = gas_limit,
+        .gas_used = gas_used,
+        .timestamp = timestamp,
+        .base_fee_per_gas = base_fee_per_gas,
+        .blob_gas_used = blob_gas_used,
+        .excess_blob_gas = excess_blob_gas,
+    };
 }
 
 /// Find the pre-execution state root for `block_number` by scanning `headers`
@@ -687,4 +764,61 @@ test "decodeBlockHeader: Amsterdam header decodes block_access_list_hash and slo
     try std.testing.expect(hdr.block_access_list_hash != null);
     try std.testing.expectEqualSlices(u8, &bal_hash, &hdr.block_access_list_hash.?);
     try std.testing.expectEqual(@as(?u64, 4242), hdr.slot_number);
+}
+
+test "decodeParentHeader: cancun header populates blob-gas fields" {
+    const alloc = std.testing.allocator;
+    const zero_hash: [32]u8 = @splat(0);
+
+    var trailers: std.ArrayListUnmanaged(u8) = .empty;
+    defer trailers.deinit(alloc);
+    try appendUint(&trailers, alloc, 7); // [15] base_fee_per_gas
+    try appendBytes(&trailers, alloc, &zero_hash); // [16] withdrawals_root
+    try appendUint(&trailers, alloc, 131_072); // [17] blob_gas_used (1 blob)
+    try appendUint(&trailers, alloc, 524_288); // [18] excess_blob_gas (4 blobs)
+
+    const payload = try buildHeaderPayload(alloc, trailers.items);
+    defer alloc.free(payload);
+
+    const p = try decodeParentHeader(payload);
+    try std.testing.expectEqual(@as(u64, 30_000_000), p.gas_limit);
+    try std.testing.expectEqual(@as(u64, 21_000), p.gas_used);
+    try std.testing.expectEqual(@as(u64, 1_700_000_000), p.timestamp);
+    try std.testing.expectEqual(@as(?u64, 7), p.base_fee_per_gas);
+    try std.testing.expectEqual(@as(?u64, 131_072), p.blob_gas_used);
+    try std.testing.expectEqual(@as(?u64, 524_288), p.excess_blob_gas);
+}
+
+test "decodeParentHeader: pre-London header leaves trailing fields null" {
+    const alloc = std.testing.allocator;
+
+    // No optional trailing fields → pre-London.
+    const payload = try buildHeaderPayload(alloc, &.{});
+    defer alloc.free(payload);
+
+    const p = try decodeParentHeader(payload);
+    try std.testing.expectEqual(@as(u64, 30_000_000), p.gas_limit);
+    try std.testing.expectEqual(@as(u64, 21_000), p.gas_used);
+    try std.testing.expectEqual(@as(u64, 1_700_000_000), p.timestamp);
+    try std.testing.expectEqual(@as(?u64, null), p.base_fee_per_gas);
+    try std.testing.expectEqual(@as(?u64, null), p.blob_gas_used);
+    try std.testing.expectEqual(@as(?u64, null), p.excess_blob_gas);
+}
+
+test "decodeParentHeader: shanghai header has base_fee but no blob fields" {
+    const alloc = std.testing.allocator;
+    const zero_hash: [32]u8 = @splat(0);
+
+    var trailers: std.ArrayListUnmanaged(u8) = .empty;
+    defer trailers.deinit(alloc);
+    try appendUint(&trailers, alloc, 13); // [15] base_fee_per_gas
+    try appendBytes(&trailers, alloc, &zero_hash); // [16] withdrawals_root
+
+    const payload = try buildHeaderPayload(alloc, trailers.items);
+    defer alloc.free(payload);
+
+    const p = try decodeParentHeader(payload);
+    try std.testing.expectEqual(@as(?u64, 13), p.base_fee_per_gas);
+    try std.testing.expectEqual(@as(?u64, null), p.blob_gas_used);
+    try std.testing.expectEqual(@as(?u64, null), p.excess_blob_gas);
 }
