@@ -648,6 +648,18 @@ fn appendShortBytes(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, 
     try buf.appendSlice(alloc, b);
 }
 
+// Writes the RLP long-form length header: one byte of (base + number-of-length-bytes),
+// followed by the big-endian length with leading zeros stripped.
+fn appendLongHeader(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, base: u8, len: usize) !void {
+    var be: [8]u8 = undefined;
+    std.mem.writeInt(u64, &be, len, .big);
+    var i: usize = 0;
+    while (i < 8 and be[i] == 0) : (i += 1) {}
+    const compact = be[i..];
+    try buf.append(alloc, base + @as(u8, @intCast(compact.len)));
+    try buf.appendSlice(alloc, compact);
+}
+
 /// Append an RLP-encoded byte string of any length.
 fn appendBytes(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, b: []const u8) !void {
     if (b.len == 0) {
@@ -657,13 +669,7 @@ fn appendBytes(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, b: []
     } else if (b.len <= 55) {
         try appendShortBytes(buf, alloc, b);
     } else {
-        var len_be: [8]u8 = undefined;
-        std.mem.writeInt(u64, &len_be, b.len, .big);
-        var i: usize = 0;
-        while (i < 8 and len_be[i] == 0) : (i += 1) {}
-        const compact = len_be[i..];
-        try buf.append(alloc, 0xb7 + @as(u8, @intCast(compact.len)));
-        try buf.appendSlice(alloc, compact);
+        try appendLongHeader(buf, alloc, 0xb7, b.len);
         try buf.appendSlice(alloc, b);
     }
 }
@@ -679,6 +685,19 @@ fn appendUint(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, v: u64
     var i: usize = 0;
     while (i < 8 and be[i] == 0) : (i += 1) {}
     try appendBytes(buf, alloc, be[i..]);
+}
+
+/// Wrap a raw payload in an RLP list prefix, producing a fully-encoded RLP list.
+fn wrapRlpList(alloc: std.mem.Allocator, payload: []const u8) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(alloc);
+    if (payload.len <= 55) {
+        try buf.append(alloc, 0xc0 + @as(u8, @intCast(payload.len)));
+    } else {
+        try appendLongHeader(&buf, alloc, 0xf7, payload.len);
+    }
+    try buf.appendSlice(alloc, payload);
+    return buf.toOwnedSlice(alloc);
 }
 
 /// Build a header RLP payload with the given list of optional trailing fields appended
@@ -777,7 +796,9 @@ test "decodeParentHeader: cancun header populates blob-gas fields" {
     try appendUint(&trailers, alloc, 131_072); // [17] blob_gas_used (1 blob)
     try appendUint(&trailers, alloc, 524_288); // [18] excess_blob_gas (4 blobs)
 
-    const payload = try buildHeaderPayload(alloc, trailers.items);
+    const inner = try buildHeaderPayload(alloc, trailers.items);
+    defer alloc.free(inner);
+    const payload = try wrapRlpList(alloc, inner);
     defer alloc.free(payload);
 
     const p = try decodeParentHeader(payload);
@@ -793,7 +814,9 @@ test "decodeParentHeader: pre-London header leaves trailing fields null" {
     const alloc = std.testing.allocator;
 
     // No optional trailing fields → pre-London.
-    const payload = try buildHeaderPayload(alloc, &.{});
+    const inner = try buildHeaderPayload(alloc, &.{});
+    defer alloc.free(inner);
+    const payload = try wrapRlpList(alloc, inner);
     defer alloc.free(payload);
 
     const p = try decodeParentHeader(payload);
@@ -814,7 +837,9 @@ test "decodeParentHeader: shanghai header has base_fee but no blob fields" {
     try appendUint(&trailers, alloc, 13); // [15] base_fee_per_gas
     try appendBytes(&trailers, alloc, &zero_hash); // [16] withdrawals_root
 
-    const payload = try buildHeaderPayload(alloc, trailers.items);
+    const inner = try buildHeaderPayload(alloc, trailers.items);
+    defer alloc.free(inner);
+    const payload = try wrapRlpList(alloc, inner);
     defer alloc.free(payload);
 
     const p = try decodeParentHeader(payload);

@@ -109,7 +109,10 @@ pub fn main(init: std.process.Init) !void {
     for (si.witness.headers) |hdr_rlp| {
         const hash = mpt.keccak256(hdr_rlp);
         if (std.mem.eql(u8, &hash, &ep.parent_hash)) {
-            parent_header = rlp_decode.decodeParentHeader(hdr_rlp) catch null;
+            parent_header = rlp_decode.decodeParentHeader(hdr_rlp) catch {
+                std.debug.print("error: failed to decode parent header from witness\n", .{});
+                std.process.exit(1);
+            };
         }
         const outer = mpt.rlp.decodeItem(hdr_rlp) catch continue;
         var rest = switch (outer.item) {
