@@ -101,10 +101,19 @@ pub fn main(init: std.process.Init) !void {
     var node_index = try mpt.buildNodeIndex(allocator, si.witness.nodes);
     defer node_index.deinit();
 
-    // Decode block-hash table from witness headers.
+    // Decode block-hash table from witness headers, and identify the parent
+    // header (the one whose keccak256 equals EP.parent_hash) so the executor
+    // can populate Env.parent_* for EIP-1559 / EIP-4844 header checks.
     var block_hashes = std.ArrayListUnmanaged(executor.BlockHashEntry).empty;
+    var parent_header: ?rlp_decode.ParentHeader = null;
     for (si.witness.headers) |hdr_rlp| {
         const hash = mpt.keccak256(hdr_rlp);
+        if (std.mem.eql(u8, &hash, &ep.parent_hash)) {
+            parent_header = rlp_decode.decodeParentHeader(hdr_rlp) catch {
+                std.debug.print("error: failed to decode parent header from witness\n", .{});
+                std.process.exit(1);
+            };
+        }
         const outer = mpt.rlp.decodeItem(hdr_rlp) catch continue;
         var rest = switch (outer.item) {
             .list => |p| p,
@@ -150,6 +159,7 @@ pub fn main(init: std.process.Init) !void {
         si.new_payload_request,
         si.witness.codes,
         block_hashes.items,
+        parent_header,
         fork_name orelse si.chain_config.fork_name,
         si.chain_config.chain_id,
         si.public_keys,
