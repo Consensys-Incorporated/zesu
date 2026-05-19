@@ -99,42 +99,42 @@ fn decodeWithdrawal(bytes: *const [WITHDRAWAL_SIZE]u8) input_mod.Withdrawal {
 const EP_FIXED_SIZE: usize = 540;
 
 /// Decode an SSZ-serialized SszStatelessInput into a StatelessInput.
+///
+/// bal-devnet-7 / zkevm@v0.4.1 layout (2-byte big-endian schema id + SSZ container):
+///   [0..2]    schema_id (big-endian uint16, expected 0x0001)
+///   ── then the SSZ container ─────────────────────────────────────────────────
+///   [0..4]    offset → new_payload_request
+///   [4..8]    offset → witness
+///   [8..12]   offset → chain_config        (now variable; was fixed uint64 inline)
+///   [12..16]  offset → public_keys
 pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessInput {
-    // ── SszStatelessInput fixed region ────────────────────────────────────────
-    // Base layout (20 bytes, off_npr == 20):
-    //   [0..4]   offset → new_payload_request (variable)
-    //   [4..8]   offset → witness (variable)
-    //   [8..16]  chain_config.chain_id (uint64, fixed inline)
-    //   [16..20] offset → public_keys (variable)
-    //
-    // Extended layout (24 bytes, off_npr == 24) — adds fork_name field:
-    //   [0..4]   offset → new_payload_request (variable)
-    //   [4..8]   offset → witness (variable)
-    //   [8..16]  chain_config.chain_id (uint64, fixed inline)
-    //   [16..20] offset → public_keys (variable)
-    //   [20..24] offset → fork_name (ByteList, variable)
-    if (data.len < 20) return error.InvalidSsz;
-    const off_npr: usize = readU32(data, 0);
-    const off_witness: usize = readU32(data, 4);
-    const chain_id: u64 = readU64(data, 8);
-    const off_pubkeys: usize = readU32(data, 16);
+    // Schema id prefix
+    if (data.len < 2) return error.InvalidSsz;
+    const schema_id: u16 = (@as(u16, data[0]) << 8) | @as(u16, data[1]);
+    if (schema_id != 0x0001) return error.InvalidSsz;
+    const body = data[2..];
 
-    // Detect extended layout: off_npr == 24 signals the fork_name field is present.
-    const has_fork_name = (off_npr == 24);
-    const min_fixed: usize = if (has_fork_name) 24 else 20;
-    if (data.len < min_fixed) return error.InvalidSsz;
+    // ── SszStatelessInput fixed region (16 bytes — all 4 fields variable) ─────
+    if (body.len < 16) return error.InvalidSsz;
+    const off_npr: usize = readU32(body, 0);
+    const off_witness: usize = readU32(body, 4);
+    const off_chain_config: usize = readU32(body, 8);
+    const off_pubkeys: usize = readU32(body, 12);
 
-    const off_fork_name: usize = if (has_fork_name) readU32(data, 20) else data.len;
+    if (off_npr != 16 or off_witness > body.len or off_chain_config > body.len or off_pubkeys > body.len) return error.InvalidSsz;
+    if (off_npr > off_witness or off_witness > off_chain_config or off_chain_config > off_pubkeys) return error.InvalidSsz;
 
-    if (off_npr < min_fixed or off_witness > data.len or off_pubkeys > data.len) return error.InvalidSsz;
-    if (has_fork_name and off_fork_name > data.len) return error.InvalidSsz;
-    if (off_npr >= off_witness or off_witness > off_pubkeys) return error.InvalidSsz;
-    if (has_fork_name and off_pubkeys > off_fork_name) return error.InvalidSsz;
+    const npr_data = body[off_npr..off_witness];
+    const witness_data = body[off_witness..off_chain_config];
+    const chain_config_data = body[off_chain_config..off_pubkeys];
+    const pubkeys_data = body[off_pubkeys..];
 
-    const npr_data = data[off_npr..off_witness];
-    const witness_data = data[off_witness..off_pubkeys];
-    const pubkeys_data = if (has_fork_name) data[off_pubkeys..off_fork_name] else data[off_pubkeys..];
-    const fork_name_bytes = if (has_fork_name) data[off_fork_name..] else &[_]u8{};
+    // ── SszChainConfig: { chain_id: uint64, active_fork: SszForkConfig (var) }
+    // chain_id is the first 8 bytes; active_fork is variable but we don't need it
+    // for execution — the fork is determined from the test fixture's `network` field.
+    if (chain_config_data.len < 8) return error.InvalidSsz;
+    const chain_id: u64 = readU64(chain_config_data, 0);
+    const fork_name_bytes: []const u8 = &[_]u8{};
 
     // ── SszNewPayloadRequest fixed region (44 bytes) ──────────────────────────
     // [0..4]   offset → execution_payload (variable)
@@ -257,13 +257,19 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     const codes = try decodeByteListList(alloc, witness_data[off_codes..off_headers]);
     const headers = try decodeByteListList(alloc, witness_data[off_headers..]);
 
-    // ── Public keys: List[ByteList[48], N] ────────────────────────────────────
+    // ── Public keys: List[ByteVector[65], N] (bal-devnet-7 / zkevm@v0.4.1) ────
     // Pre-recovered secp256k1 public keys, one per transaction in order.
-    // SSZ schema declares ByteList[48] as the element type (legacy bound from the spec),
-    // but Amsterdam keys are 64 bytes (uncompressed, no 0x04 prefix). The decoder returns
-    // whatever bytes are present; transition.zig accepts only 64-byte entries.
-    // Empty list = no pre-recovered keys supplied.
-    const public_keys = try decodeByteListList(alloc, pubkeys_data);
+    // SSZ schema is now SszList[ByteVector[PUBLIC_KEY_BYTES=65], MAX_PUBLIC_KEYS],
+    // i.e. fixed-size elements → encoded as packed 65-byte chunks (no offset table).
+    // Each key is uncompressed (0x04 || X || Y, 65 bytes). transition.zig peels the
+    // 0x04 prefix to derive the 64-byte form used for address recovery.
+    const PUBKEY_SIZE: usize = 65;
+    if (pubkeys_data.len % PUBKEY_SIZE != 0) return error.InvalidSsz;
+    const pubkey_count = pubkeys_data.len / PUBKEY_SIZE;
+    const public_keys = try alloc.alloc([]const u8, pubkey_count);
+    for (0..pubkey_count) |i| {
+        public_keys[i] = pubkeys_data[i * PUBKEY_SIZE ..][0..PUBKEY_SIZE];
+    }
 
     // ── Assemble StatelessInput ───────────────────────────────────────────────
     return input_mod.StatelessInput{

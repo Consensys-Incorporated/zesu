@@ -658,12 +658,14 @@ pub fn transitionWithContext(
         var sender: input.Address = undefined;
         const maybe_sender: ?input.Address = blk: {
             // Use pre-recovered public key (Amsterdam spec optimization) when provided.
-            // Each public key is 64 bytes (uncompressed secp256k1, no 0x04 prefix).
-            // sender = keccak256(pubkey_64_bytes)[12:]
+            // bal-devnet-7 SSZ schema: ByteVector[65] = full uncompressed secp256k1 key
+            // (0x04 || X || Y). Older snapshots used 64 bytes (X || Y, no 0x04 prefix).
+            // sender = keccak256(X || Y)[12:] — peel the 0x04 prefix if present.
             if (tx_idx < public_keys.len) {
                 const pk = public_keys[tx_idx];
-                if (pk.len == 64) {
-                    const h = rlp.keccak256(pk);
+                const xy: ?[]const u8 = if (pk.len == 64) pk else if (pk.len == 65 and pk[0] == 0x04) pk[1..] else null;
+                if (xy) |bytes| {
+                    const h = rlp.keccak256(bytes);
                     var addr: input.Address = undefined;
                     @memcpy(&addr, h[12..32]);
                     break :blk addr;
