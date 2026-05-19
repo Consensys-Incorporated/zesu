@@ -21,6 +21,13 @@ const TX_EIP7702_AUTH_COST_AMSTERDAM: u64 = 7500;
 // EIP-7623: token costs (different from calldata gas costs)
 const FLOOR_ZERO_TOKEN_COST: u64 = 1;
 const FLOOR_NONZERO_TOKEN_COST: u64 = 4;
+// EIP-7623 (Prague) and EIP-7976 (Amsterdam): per-token floor cost.
+const FLOOR_TOKEN_GAS_PRAGUE: u64 = 10;
+const FLOOR_TOKEN_GAS_AMSTERDAM: u64 = 16;
+// EIP-7981 (Amsterdam): access list bytes also count as 4 floor tokens per byte.
+// 20-byte address = 80 floor tokens; 32-byte storage key = 128 floor tokens.
+const ACCESS_LIST_ADDRESS_FLOOR_TOKENS: u64 = 20 * FLOOR_NONZERO_TOKEN_COST;
+const ACCESS_LIST_STORAGE_KEY_FLOOR_TOKENS: u64 = 32 * FLOOR_NONZERO_TOKEN_COST;
 
 /// Validation utilities
 pub const Validation = struct {
@@ -139,7 +146,7 @@ pub const Validation = struct {
             if (tx.kind == .Create) {
                 initial_state_gas += gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * cpsb;
             }
-            // EIP-7702: auth list state gas — 135*cpsb per auth (base 23 + new-account 112)
+            // EIP-7702: auth list state gas — (STATE_BYTES_PER_AUTH_BASE + STATE_BYTES_PER_NEW_ACCOUNT) * cpsb per auth.
             if (tx.authorization_list) |auth_list| {
                 const num_auths: u64 = @intCast(auth_list.items.len);
                 initial_state_gas += num_auths * ((gas_costs.STATE_BYTES_PER_AUTH_BASE + gas_costs.STATE_BYTES_PER_NEW_ACCOUNT) * cpsb);
@@ -330,11 +337,18 @@ pub const Validation = struct {
         }
 
         // EIP-2930 / EIP-2929: Access list gas
+        // EIP-7981 (Amsterdam+): additional surcharge equal to floor_tokens(access_list) * 16.
+        var access_list_floor_tokens: u64 = 0;
         if (tx.access_list.items) |items| {
             for (items.items) |item| {
                 gas += ACCESS_LIST_ADDRESS_COST;
                 gas += @as(u64, item.storage_keys.items.len) * ACCESS_LIST_STORAGE_KEY_COST;
+                access_list_floor_tokens += ACCESS_LIST_ADDRESS_FLOOR_TOKENS;
+                access_list_floor_tokens += @as(u64, item.storage_keys.items.len) * ACCESS_LIST_STORAGE_KEY_FLOOR_TOKENS;
             }
+        }
+        if (primitives.isEnabledIn(spec, .amsterdam)) {
+            gas += access_list_floor_tokens * FLOOR_TOKEN_GAS_AMSTERDAM;
         }
 
         // EIP-4844: blob gas is a SEPARATE fee market paid from sender balance,
@@ -429,28 +443,44 @@ pub const Validation = struct {
         }
     }
 
-    /// Calculates the EIP-7623 floor gas exec-portion (tokens * 10).
+    /// Floor gas exec-portion (excludes the 21000 base; receipt code adds it).
     ///
-    /// Returns only the exec-portion of floor gas (excludes 21000 base).
-    /// Used in postExecution to enforce minimum exec gas spent.
-    /// Token costs: 1 per zero byte, 4 per nonzero byte (EIP-7623 token definition).
+    /// Prague (EIP-7623): floor_tokens = sum(1 per zero byte, 4 per nonzero byte) over calldata; gas = tokens * 10.
+    /// Amsterdam (EIP-7976): all calldata bytes count uniformly as 4 floor tokens; gas = tokens * 16.
+    /// Amsterdam (EIP-7981): access list bytes also contribute floor tokens (20*4 per address, 32*4 per key).
     pub fn calculateFloorGas(tx: *const context.TxEnv, spec: primitives.SpecId) u64 {
         if (!primitives.isEnabledIn(spec, .prague)) {
             return 0;
         }
 
-        // EIP-7623: tokens = sum(1 per zero byte, 4 per nonzero byte); floor_exec = tokens * 10
+        const is_amsterdam = primitives.isEnabledIn(spec, .amsterdam);
+
         var tokens: u64 = 0;
         if (tx.data) |data| {
-            for (data.items) |byte| {
-                if (byte == 0) {
-                    tokens += FLOOR_ZERO_TOKEN_COST;
-                } else {
-                    tokens += FLOOR_NONZERO_TOKEN_COST;
+            if (is_amsterdam) {
+                tokens += @as(u64, data.items.len) * FLOOR_NONZERO_TOKEN_COST;
+            } else {
+                for (data.items) |byte| {
+                    if (byte == 0) {
+                        tokens += FLOOR_ZERO_TOKEN_COST;
+                    } else {
+                        tokens += FLOOR_NONZERO_TOKEN_COST;
+                    }
                 }
             }
         }
-        return tokens * 10;
+
+        if (is_amsterdam) {
+            if (tx.access_list.items) |items| {
+                for (items.items) |item| {
+                    tokens += ACCESS_LIST_ADDRESS_FLOOR_TOKENS;
+                    tokens += @as(u64, item.storage_keys.items.len) * ACCESS_LIST_STORAGE_KEY_FLOOR_TOKENS;
+                }
+            }
+        }
+
+        const token_gas: u64 = if (is_amsterdam) FLOOR_TOKEN_GAS_AMSTERDAM else FLOOR_TOKEN_GAS_PRAGUE;
+        return tokens * token_gas;
     }
 };
 

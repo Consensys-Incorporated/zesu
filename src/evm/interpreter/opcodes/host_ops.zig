@@ -384,6 +384,11 @@ pub fn opSstore(ctx: *InstructionContext) void {
         }
     }
 
+    // EIP-8037 (Amsterdam+): state gas refund returns to reservoir (not regular refund counter).
+    if (sstore_gas.state_gas_refund > 0) {
+        ctx.interpreter.gas.refundStateGas(sstore_gas.state_gas_refund);
+    }
+
     // Apply gas refund (can be positive or negative)
     if (sstore_gas.gas_refund > 0) {
         ctx.interpreter.gas.recordRefund(@intCast(sstore_gas.gas_refund));

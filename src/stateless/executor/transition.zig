@@ -80,6 +80,10 @@ const BaTracker = struct {
     slot_chg: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, std.ArrayListUnmanaged(bal_mod.SlotBaiValue))),
     // Storage slots written then wiped by same-tx SELFDESTRUCT → appear as storage_reads, no changes.
     selfdestruct_reads: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, void)),
+    // bal-devnet-7: SYSTEM_ADDRESS is included in BAL iff it was touched by USER tx code
+    // (BALANCE/EXTCODE*/CALL etc.). Touches solely from pre/post-block system calls must
+    // not pull it into the BAL. Set in detectAndRecord(bai) when bai is in user-tx range.
+    system_address_user_touched: bool = false,
 
     fn initFromPreAlloc(a: std.mem.Allocator, pre: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount)) BaTracker {
         var self = BaTracker{
@@ -91,6 +95,7 @@ const BaTracker = struct {
             .code_chg = .empty,
             .slot_chg = .empty,
             .selfdestruct_reads = .empty,
+            .system_address_user_touched = false,
         };
         var it = pre.iterator();
         while (it.next()) |e| {
@@ -112,6 +117,20 @@ const BaTracker = struct {
             }
         }
         return self;
+    }
+
+    /// bal-devnet-7: detect whether the just-finished user tx warmed SYSTEM_ADDRESS.
+    /// Called after each user tx (post-commitTx). transaction_id was incremented during
+    /// commitTx; an account warmed in the just-finished tx has acct.transaction_id ==
+    /// current transaction_id - 1.
+    fn checkUserTxTouchedSystemAddress(self: *BaTracker, ctx: anytype) void {
+        if (self.system_address_user_touched) return;
+        const acct = ctx.journaled_state.inner.evm_state.getPtr(SYSTEM_ADDRESS) orelse return;
+        const current_tx_id = ctx.journaled_state.inner.transaction_id;
+        if (current_tx_id == 0) return;
+        if (acct.transaction_id == current_tx_id - 1) {
+            self.system_address_user_touched = true;
+        }
     }
 
     fn detectAndRecord(self: *BaTracker, bai: u64, ctx: anytype) void {
@@ -354,16 +373,16 @@ const BaTracker = struct {
         while (addr_it.next()) |addr_ptr| {
             const addr = addr_ptr.*;
 
-            // Exclude SYSTEM_ADDRESS if it has no actual changes or reads.
-            // The pre-block system call bumps its nonce then patches it back — that
-            // "touch" must not make it appear in the BAL. But if it receives a
-            // withdrawal (or any other state change), it should be included.
+            // bal-devnet-7: SYSTEM_ADDRESS is included if a user tx touched it
+            // (BALANCE/EXTCODE*/CALL etc.) OR if it has real state changes / storage
+            // reads. Touches solely from pre/post-block system calls are excluded
+            // (the system call nonce bump/patch-back must not pull it into the BAL).
             if (std.mem.eql(u8, &addr, &SYSTEM_ADDRESS)) {
                 const has_changes = self.bal_chg.contains(addr) or
                     self.nonce_chg.contains(addr) or
                     self.code_chg.contains(addr) or
                     self.slot_chg.contains(addr);
-                if (!has_changes and storage_reads.get(addr) == null) continue;
+                if (!has_changes and storage_reads.get(addr) == null and !self.system_address_user_touched) continue;
             }
 
             // Build storage_changes sorted by slot
@@ -1124,7 +1143,10 @@ pub fn transitionWithContext(
 
         exec_result.deinit();
 
-        if (tracker) |*t| t.detectAndRecord(tx_idx + 1, ctx);
+        if (tracker) |*t| {
+            t.checkUserTxTouchedSystemAddress(ctx);
+            t.detectAndRecord(tx_idx + 1, ctx);
+        }
 
         // Pre-Byzantium (EIP-658 not yet active): compute per-tx intermediate state root.
         if (!primitives.isEnabledIn(spec, .byzantium)) {

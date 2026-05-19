@@ -393,6 +393,9 @@ pub const PendingCreateData = struct {
     inputs: CreateInputs,
     new_addr: primitives.Address,
     checkpoint: JournalCheckpoint,
+    /// EIP-8037 (Amsterdam+): state gas charged for new account creation.
+    /// On child CREATE halt/invalid, this is returned to the parent's reservoir.
+    new_account_state_gas: u64 = 0,
 };
 
 /// Pending sub-call state: set by CALL/CREATE opcodes, cleared by frame runner.

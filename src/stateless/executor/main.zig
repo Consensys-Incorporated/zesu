@@ -133,17 +133,6 @@ fn buildAccessedEntries(
     var addr_iter = access_log.accounts.iterator();
     while (addr_iter.next()) |acc_kv| {
         const address = acc_kv.key_ptr.*;
-        // The EIP system caller address is a virtual address used to invoke system
-        // contracts.  It is excluded from the BAL UNLESS ETH was actually sent to it
-        // by a user transaction (in which case it has a real balance change and IS
-        // included — e.g., test_selfdestruct_to_system_address).
-        if (std.mem.eql(u8, &address, &SYSTEM_ADDRESS)) {
-            if (post_alloc.get(address)) |p| {
-                // Include only if balance genuinely changed (ETH was sent to SYSTEM_ADDRESS).
-                if (p.balance == 0) continue;
-                // Otherwise fall through: SYSTEM_ADDRESS has a real balance and belongs in BAL.
-            } else continue;
-        }
         const pre = acc_kv.value_ptr.*;
 
         const post_acct = post_alloc.get(address);

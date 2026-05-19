@@ -9,11 +9,20 @@ pub const Gas = struct {
     remaining: u64,
     /// Refunded gas. This is used only at the end of execution.
     refunded: i64,
-    /// EIP-8037 (Amsterdam+): total state gas charged during this frame.
+    /// EIP-8037 (Amsterdam+): total state gas charged during this frame (net of refunds, saturating).
     state_gas_used: u64,
     /// EIP-8037 (Amsterdam+): state gas reservoir (state_gas_left).
     /// State gas charges draw from here first, then spill into `remaining`.
     reservoir: u64,
+    /// EIP-8037 (Amsterdam+): gross state gas spent (never decremented by refunds).
+    /// Used together with state_gas_refunded to compute "ancestor refund" — refunds
+    /// in this subtree that exceed subtree spends were claimed against ancestor SSTOREs
+    /// and must be discarded on revert (the ancestor SSTOREs stay committed).
+    state_gas_spent: u64,
+    /// EIP-8037 (Amsterdam+): total state gas returned to reservoir via refundStateGas
+    /// in this frame's subtree. Tracked separately so the credits can be discarded if
+    /// a frame reverts — descendant SSTORE clear credits must not survive revert.
+    state_gas_refunded: u64,
     /// Memoisation of values for memory expansion cost.
     memory: MemoryGas,
 
@@ -25,6 +34,8 @@ pub const Gas = struct {
             .refunded = 0,
             .state_gas_used = 0,
             .reservoir = 0,
+            .state_gas_spent = 0,
+            .state_gas_refunded = 0,
             .memory = MemoryGas.new(),
         };
     }
@@ -37,6 +48,8 @@ pub const Gas = struct {
             .refunded = 0,
             .state_gas_used = 0,
             .reservoir = 0,
+            .state_gas_spent = 0,
+            .state_gas_refunded = 0,
             .memory = MemoryGas.new(),
         };
     }
@@ -101,7 +114,16 @@ pub const Gas = struct {
             return false;
         }
         self.state_gas_used +|= amount;
+        self.state_gas_spent +|= amount;
         return true;
+    }
+
+    /// EIP-8037 (Amsterdam+): Refund state gas back to the reservoir.
+    /// Used when a storage slot is restored to zero (SSTORE 0→x→0 within a tx).
+    pub fn refundStateGas(self: *Gas, amount: u64) void {
+        self.reservoir += amount;
+        self.state_gas_used -|= amount;
+        self.state_gas_refunded += amount;
     }
 
     /// EIP-8037: Add state gas from a successful sub-frame.

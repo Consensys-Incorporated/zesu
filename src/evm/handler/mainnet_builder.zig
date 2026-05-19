@@ -210,6 +210,7 @@ pub const MainnetHandler = struct {
                                     // delegation designator may re-delegate.
                                     // Code with EF 01 00 prefix is treated as a delegation designator
                                     // regardless of total length (handles pre-state test fixtures).
+                                    var authority_had_delegation = false;
                                     if (journaled.account.info.code) |existing_code| {
                                         const is_delegation = switch (existing_code) {
                                             .eip7702 => true,
@@ -219,6 +220,7 @@ pub const MainnetHandler = struct {
                                             },
                                         };
                                         if (!is_delegation and !existing_code.isEmpty()) continue;
+                                        authority_had_delegation = is_delegation;
                                     }
 
                                     // Nonce must match exactly — skip if stale
@@ -239,6 +241,16 @@ pub const MainnetHandler = struct {
                                             initial_gas.auth_state_refund += interpreter_mod.gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * amsterdam_cpsb;
                                         } else {
                                             initial_gas.auth_refund += 12500;
+                                        }
+                                    }
+                                    // EIP-7702 (v7.1.0, Amsterdam+): refund STATE_BYTES_PER_AUTH_BASE * cpsb
+                                    // when no new code storage is allocated for the delegation pointer:
+                                    //   - authority already held a delegation indicator (overwrite, no new slot), OR
+                                    //   - clearing delegation (auth.address == 0x0, no code is set).
+                                    if (primitives.isEnabledIn(spec, .amsterdam)) {
+                                        const auth_address_is_zero = std.mem.eql(u8, &auth.address, &[_]u8{0} ** 20);
+                                        if (authority_had_delegation or auth_address_is_zero) {
+                                            initial_gas.auth_state_refund += interpreter_mod.gas_costs.STATE_BYTES_PER_AUTH_BASE * amsterdam_cpsb;
                                         }
                                     }
 
@@ -300,7 +312,14 @@ pub const MainnetHandler = struct {
                         const status: main.ExecutionStatus = if (r.is_revert) .Revert else .Halt;
                         var exec_result = main.ExecutionResult.new(status, exec_gas - r.gas_remaining);
                         exec_result.return_data = alloc_mod.get().dupe(u8, r.return_data) catch @constCast(&[_]u8{});
-                        return main.FrameResult.new(exec_result, r.gas_remaining, r.gas_refunded);
+                        // EIP-8037 (Amsterdam, bal-devnet-7): top-level CREATE tx halt/revert refunds
+                        // the intrinsic NEW_ACCOUNT*CPSB state gas to the reservoir. setupCreate
+                        // failures (collision/balance/nonce) burn regular gas but not state gas.
+                        var fr = main.FrameResult.new(exec_result, r.gas_remaining, r.gas_refunded);
+                        if (primitives.isEnabledIn(spec, .amsterdam)) {
+                            fr.reservoir_remaining = initial.initial_state_gas;
+                        }
+                        return fr;
                     },
                     .ready => |s| {
                         const init_bytecode = bytecode.Bytecode.newRaw(calldata);
@@ -334,6 +353,13 @@ pub const MainnetHandler = struct {
                         exec_result.return_data = alloc_mod.get().dupe(u8, cr.return_data) catch @constCast(&[_]u8{});
                         var fr = main.FrameResult.new(exec_result, cr.gas_remaining, cr.gas_refunded);
                         fr.reservoir_remaining = cr.state_gas_remaining;
+                        // EIP-8037 (Amsterdam, bal-devnet-7): on top-level CREATE-tx exceptional
+                        // halt or revert, refund the spilled state_gas_used plus the intrinsic
+                        // NEW_ACCOUNT*CPSB charge — the account was never created.
+                        if (primitives.isEnabledIn(spec, .amsterdam) and !cr.success) {
+                            fr.reservoir_remaining += ir.state_gas_used + initial.initial_state_gas;
+                            exec_result.state_gas_used = 0;
+                        }
                         return fr;
                     },
                 }
@@ -443,11 +469,20 @@ pub const MainnetHandler = struct {
                     .revert => .Revert,
                     else => .Halt,
                 };
+                // EIP-8037 (Amsterdam, bal-devnet-7): on top-level non-success (halt or revert),
+                // refund the full state_gas_used (including any portion that spilled into gas_left)
+                // back to the reservoir — the journal was rolled back, so no state was grown.
+                var top_state_gas_used = ir.state_gas_used;
+                var top_reservoir = ir.reservoir_remaining;
+                if (primitives.isEnabledIn(spec, .amsterdam) and status != .Success) {
+                    top_reservoir += top_state_gas_used;
+                    top_state_gas_used = 0;
+                }
                 var exec_result = main.ExecutionResult.new(status, 0);
-                exec_result.state_gas_used = ir.state_gas_used;
+                exec_result.state_gas_used = top_state_gas_used;
                 exec_result.return_data = alloc_mod.get().dupe(u8, ir.return_data) catch @constCast(&[_]u8{});
                 var fr = main.FrameResult.new(exec_result, ir.gas_remaining, ir.gas_refunded);
-                fr.reservoir_remaining = ir.reservoir_remaining;
+                fr.reservoir_remaining = top_reservoir;
                 return fr;
             },
         }
@@ -560,13 +595,17 @@ pub const MainnetHandler = struct {
             // auth_state_refund IS deducted as it is a pre-payment correction, not an SSTORE reward).
             const block_base = final_cost + capped_refund;
             if (result.result.status == .Success) {
-                const total_state_gross = initial_gas.initial_state_gas + result.result.state_gas_used;
-                const total_state = if (total_state_gross > auth_state_refund)
-                    total_state_gross - auth_state_refund
+                // bal-devnet-7: block_gas_used is the 2D max(regular, state). Intrinsic state
+                // gas is pre-paid via balance and excluded from the block accounting — only
+                // EXECUTION state gas (SSTORE etc., spends via spendStateGas) counts toward
+                // the block-level state lane.
+                const state_for_block = if (result.result.state_gas_used > auth_state_refund)
+                    result.result.state_gas_used - auth_state_refund
                 else
                     0;
-                const regular_for_block = if (block_base > total_state) block_base - total_state else 0;
-                result.result.block_gas_used = @max(regular_for_block, total_state);
+                const total_state_pricing = initial_gas.initial_state_gas + state_for_block;
+                const regular_for_block = if (block_base > total_state_pricing) block_base - total_state_pricing else 0;
+                result.result.block_gas_used = @max(regular_for_block, state_for_block);
             } else {
                 // EIP-8037 (Amsterdam+): failed tx block gas capped at TX_MAX_GAS_LIMIT (1<<24).
                 // Txs with gas > TX_MAX are allowed but contribute at most TX_MAX to block capacity on failure.
@@ -737,6 +776,15 @@ fn executeIterative(
             const sub_gas_ref = frame.interp.gas.refunded;
             const sub_state_gas = frame.interp.gas.state_gas_used;
             const sub_reservoir = frame.interp.gas.reservoir;
+            const sub_state_spent = frame.interp.gas.state_gas_spent;
+            const sub_state_refunded = frame.interp.gas.state_gas_refunded;
+            // EIP-8037: on revert, parent's reservoir should be restored to call_reservoir
+            // (the value passed to the child). Derived as:
+            //   call_reservoir = sub_reservoir + sub_state_spent - sub_state_refunded
+            // - sub_state_spent (gross) gives credit back for SSTOREs reverted in subtree.
+            // - sub_state_refunded discards descendant clear-credits (whether for ancestor
+            //   or same-subtree spends — the matching spend's own revert refunds it via spent).
+            const sub_call_reservoir: u64 = (sub_reservoir +| sub_state_spent) -| sub_state_refunded;
             const rd_raw: []const u8 = if (sub_result.isSuccess() or sub_result == .revert)
                 frame.interp.return_data.data
             else
@@ -760,30 +808,55 @@ fn executeIterative(
                 .call => |pc| {
                     var r = host.finalizeCall(pc.checkpoint, sub_result, pc.inputs.gas_limit, sub_gas_rem, sub_gas_ref, return_data_buf.items);
                     // EIP-8037: on success, propagate child's state gas and remaining reservoir.
-                    // On any failure, state is rolled back so state gas returns to parent reservoir.
+                    // On any failure, state is rolled back so state gas returns to parent reservoir,
+                    // MINUS any state_gas_refunded — SSTORE-clear credits from the rolled-back subtree
+                    // must be discarded (the underlying SSTOREs are reverted via the journal).
                     // Exception: invalid_static — CREATE charges state gas before the static check
                     // fires, so that state gas is forfeited even though no account was created.
                     if (r.success) {
                         r.state_gas_used = sub_state_gas;
                         r.state_gas_remaining = sub_reservoir;
+                        parent.interp.gas.state_gas_spent += sub_state_spent;
+                        parent.interp.gas.state_gas_refunded += sub_state_refunded;
                     } else if (sub_result == .invalid_static) {
+                        // invalid_static: opCreate charged state gas before the static check
+                        // fires. State gas is forfeited (account was being created in a static
+                        // context — invalid). reservoir is what was left when static triggered.
                         r.state_gas_used = 0;
                         r.state_gas_remaining = sub_reservoir;
                     } else {
+                        // Revert/halt: restore parent.reservoir to call_reservoir.
                         r.state_gas_used = 0;
-                        r.state_gas_remaining = sub_state_gas + sub_reservoir;
+                        r.state_gas_remaining = sub_call_reservoir;
                     }
                     call_ops.resumeCall(parent.interp, r, pc.ret_off, pc.ret_size);
                 },
                 .create => |pc| {
                     var r = host.finalizeCreate(pc.checkpoint, pc.new_addr, sub_result, sub_gas_rem, sub_gas_ref, return_data_buf.items, parent_spec, true, sub_reservoir);
                     // EIP-8037: on success, add child's accumulated state gas (from nested ops in initcode).
-                    // On failure, finalizeCreate already sets state_gas_remaining = sub_reservoir;
-                    // add sub_state_gas so all child state gas is returned to parent's reservoir.
+                    // On failure, return all child state gas + the new_account_state_gas charged in opCreate
+                    // (the account was never created, so that state gas is released back to the reservoir).
+                    // Also unwind the new_account_state_gas from parent.state_gas_used: opCreate's
+                    // spendStateGas bumped it eagerly, but the account was never created, so it must
+                    // not appear in the parent's reported state-gas — otherwise create-chain reverts
+                    // double-count it when propagated upward via addStateGasFromChild.
                     if (r.success) {
+                        // finalizeCreate's state_gas_used = code_deposit_state_gas (charged
+                        // directly, not via child.spendStateGas). It must be added to
+                        // state_gas_spent so the gross-spend counter stays consistent for
+                        // any later revert that would credit code_deposit back via the
+                        // (sub_reservoir + sub_state_spent - sub_state_refunded) formula.
+                        const code_deposit_state_gas = r.state_gas_used;
                         r.state_gas_used += sub_state_gas;
+                        parent.interp.gas.state_gas_spent += code_deposit_state_gas + sub_state_spent;
+                        parent.interp.gas.state_gas_refunded += sub_state_refunded;
                     } else {
-                        r.state_gas_remaining += sub_state_gas;
+                        // finalizeCreate set state_gas_remaining = sub_reservoir; adjust to
+                        // call_reservoir + new_account_state_gas (the latter wasn't actually
+                        // consumed since no account was created).
+                        r.state_gas_remaining = sub_call_reservoir + pc.new_account_state_gas;
+                        parent.interp.gas.state_gas_used -|= pc.new_account_state_gas;
+                        parent.interp.gas.state_gas_spent -|= pc.new_account_state_gas;
                     }
                     call_ops.resumeCreate(parent.interp, r);
                 },

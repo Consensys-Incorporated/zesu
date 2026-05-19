@@ -21,6 +21,17 @@ const input = @import("executor_types");
 const context_mod = @import("context");
 const handler_mod = @import("handler");
 const alloc_mod = @import("zesu_allocator");
+const gas_costs = @import("interpreter").gas_costs;
+
+/// EIP-8037 (Amsterdam+): SYSTEM_CALL_GAS_LIMIT = 30M + STATE_BYTES_PER_STORAGE_SET * CPSB * SYSTEM_MAX_SSTORES_PER_CALL.
+/// The extra portion is intended as the system call state-gas reservoir.
+/// Pre-Amsterdam: spec gives each system contract a flat 30M.
+fn systemCallGasLimit(spec: primitives.SpecId) u64 {
+    const base: u64 = 30_000_000 + 21_000; // 30M + intrinsic 21k (deducted before frame start)
+    if (!primitives.isEnabledIn(spec, .amsterdam)) return base;
+    const cpsb = gas_costs.costPerStateByte(0);
+    return base + gas_costs.STATE_BYTES_PER_STORAGE_SET * cpsb * gas_costs.SYSTEM_MAX_SSTORES_PER_CALL;
+}
 
 // ─── Well-known addresses ─────────────────────────────────────────────────────
 
@@ -65,9 +76,7 @@ fn runSystemCall(
     calldata: []const u8,
     chain_id: u64,
 ) void {
-    // The spec gives each system contract exactly 30M execution gas.
-    // zevm deducts the 21,000 intrinsic base before the frame starts.
-    const SYSTEM_CALL_GAS: u64 = 30_000_000 + 21_000;
+    const SYSTEM_CALL_GAS: u64 = systemCallGasLimit(ctx.cfg.spec);
 
     // Skip if the contract has no code (also covers non-existing accounts).
     // Call discardTx so that the loadAccount call does not leave the target
@@ -236,7 +245,7 @@ fn runSystemCallCapture(
     calldata: []const u8,
     chain_id: u64,
 ) error{SystemContractCallFailed}![]const u8 {
-    const SYSTEM_CALL_GAS: u64 = 30_000_000 + 21_000;
+    const SYSTEM_CALL_GAS: u64 = systemCallGasLimit(ctx.cfg.spec);
 
     const account_load = ctx.journaled_state.loadAccount(target) catch {
         ctx.journaled_state.discardTx();
