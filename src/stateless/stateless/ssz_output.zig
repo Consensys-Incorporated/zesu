@@ -324,8 +324,9 @@ fn htTransactionList(alloc: std.mem.Allocator, raw_txs: []const []const u8) !([3
 }
 
 fn htWithdrawalList(alloc: std.mem.Allocator, withdrawals: []const input.Withdrawal) !([32]u8) {
-    // List[SszWithdrawal, 2^16]: list limit = 2^16, depth = 16.
-    const list_depth = 16;
+    // bal-devnet-7 / zkevm@v0.4.1: MAX_WITHDRAWALS_PER_PAYLOAD = 2**4 (was 2**16
+    // in v0.3.x — re-aligned with the consensus-layer limit).
+    const list_depth = 4;
 
     if (withdrawals.len == 0) return mixInLength(zeroHash(list_depth), 0);
 

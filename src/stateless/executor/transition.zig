@@ -45,6 +45,11 @@ pub const TransitionResult = struct {
     chain_id: u64,
     bal_hash: ?[32]u8 = null,
     requests_hash: [32]u8 = [_]u8{0} ** 32,
+    /// EIP-7928 (bal-devnet-7): true iff a user tx touched SYSTEM_ADDRESS
+    /// (BALANCE / CALL / EXTCODE* etc.). buildAccessedEntries uses this to
+    /// decide whether SYSTEM_ADDRESS belongs in the BAL — pre/post-block
+    /// system-call touches alone must NOT pull it in.
+    system_address_user_touched: bool = false,
 };
 
 // ─── Dummy block hash ─────────────────────────────────────────────────────────
@@ -1226,6 +1231,7 @@ pub fn transitionWithContext(
         .chain_id = chain_id,
         .bal_hash = bal_hash,
         .requests_hash = requests_hash,
+        .system_address_user_touched = if (tracker) |t| t.system_address_user_touched else false,
     };
 }
 
