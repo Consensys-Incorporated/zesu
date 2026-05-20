@@ -8,7 +8,6 @@ const std = @import("std");
 ///
 /// This module satisfies the `@import("zkvm_io")` in runner.zig with the
 /// same pub function signatures as src/io/interface.zig and zkvm_io.zig.
-
 /// C-ABI: void read_input(const uint8_t** buf_ptr, size_t* buf_size)
 pub extern fn read_input(buf_ptr: *[*]const u8, buf_size: *usize) void;
 
