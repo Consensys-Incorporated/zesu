@@ -612,6 +612,15 @@ fn setupCallCore(js: anytype, host: *Host, inputs: CallInputs, frame_depth: usiz
     // 2. Precompile dispatch
     if (host.precompiles) |pcs| {
         if (pcs.get(inputs.callee)) |pc| {
+            // EIP-7928 (Amsterdam+): record the precompile callee in the BAL.
+            // Precompiles have no account state, so this records an empty pre-state
+            // entry — matching how EELS includes invoked precompiles in the BAL.
+            // Without this, the post-execution BAL comparison fails because the
+            // declared BAL contains the precompile address but the computed one
+            // doesn't (precompile dispatch normally skips loadAccount).
+            _ = js.loadAccount(inputs.callee) catch {
+                return .{ .failed = CallResult.preExecFailure(inputs.gas_limit) };
+            };
             const cp = js.getCheckpoint();
             if (inputs.value > 0 and inputs.scheme != .delegatecall) {
                 const xfer_err = js.transfer(inputs.caller, inputs.target, inputs.value) catch {

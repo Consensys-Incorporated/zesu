@@ -429,6 +429,7 @@ pub fn build(b: *std.Build) void {
         .{ .m = interpreter_module, .name = "interpreter" },
         .{ .m = handler_module, .name = "handler" },
         .{ .m = mpt_module, .name = "mpt" },
+        .{ .m = rlp_decode_module, .name = "rlp_decode" },
     }) |t| {
         const tst = b.addTest(.{ .root_module = t.m });
         _ = t.name;

@@ -403,6 +403,9 @@ pub const MainnetHandler = struct {
 
                 // Precompile dispatch for top-level TX targeting a precompile.
                 if (evm.precompiles.get(target)) |precompile_fn| {
+                    // EIP-7928 (Amsterdam+): record the precompile callee in the BAL.
+                    // Mirrors the per-frame setupCallCore handling — see host.zig.
+                    _ = try ctx.journaled_state.loadAccount(target);
                     const pc_result = precompile_fn.execute(calldata, tx_regular_exec_gas);
                     switch (pc_result) {
                         .success => |out| {

@@ -49,7 +49,12 @@ fn mapWithdrawals(alloc: std.mem.Allocator, withdrawals: []const input.Withdrawa
     return out;
 }
 
-fn buildEnv(req: input.NewPayloadRequest, block_hashes: []types.BlockHashEntry, withdrawals: []types.Withdrawal) types.Env {
+fn buildEnv(
+    req: input.NewPayloadRequest,
+    block_hashes: []types.BlockHashEntry,
+    withdrawals: []types.Withdrawal,
+    parent: ?rlp_decode.ParentHeader,
+) types.Env {
     const ep = &req.execution_payload;
     return .{
         .coinbase = ep.fee_recipient,
@@ -67,6 +72,12 @@ fn buildEnv(req: input.NewPayloadRequest, block_hashes: []types.BlockHashEntry, 
         .slot_number = ep.slot_number,
         .gas_used_header = ep.gas_used,
         .blob_gas_used_header = ep.blob_gas_used,
+        .parent_gas_limit = if (parent) |p| p.gas_limit else null,
+        .parent_gas_used = if (parent) |p| p.gas_used else null,
+        .parent_timestamp = if (parent) |p| p.timestamp else null,
+        .parent_base_fee = if (parent) |p| p.base_fee_per_gas else null,
+        .parent_blob_gas_used = if (parent) |p| p.blob_gas_used else null,
+        .parent_excess_blob_gas = if (parent) |p| p.excess_blob_gas else null,
     };
 }
 
@@ -348,7 +359,7 @@ pub fn executeBlock(
     else
         fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
 
-    const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals));
+    const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals), null);
     try block_validation.validateBlock(env, spec);
     const txs = try tx_decode.decodeTxsFromInput(alloc, ep.transactions);
     const result = try transition_mod.transition(alloc, pre_alloc, env, txs, spec, 1, fork_mod.blockReward(spec));
@@ -358,6 +369,11 @@ pub fn executeBlock(
 
 /// Stateless block execution: serves all account/storage reads from the MPT witness
 /// via `WitnessDatabase` (no pre-built pre_alloc needed).
+///
+/// `parent_header`: parent block's gas/basefee/blob-gas fields, decoded by the caller
+/// from the witness header whose hash equals `ep.parent_hash`. Used to enforce the
+/// EIP-1559 basefee and EIP-4844 excess-blob-gas checks. Pass `null` to skip them
+/// (e.g. when the parent is the genesis block and no header is in the witness).
 pub fn executeBlockStateless(
     alloc: std.mem.Allocator,
     pre_state_root: [32]u8,
@@ -365,6 +381,7 @@ pub fn executeBlockStateless(
     req: input.NewPayloadRequest,
     witness_codes: []const []const u8,
     block_hashes: []types.BlockHashEntry,
+    parent_header: ?rlp_decode.ParentHeader,
     fork_name: ?[]const u8,
     chain_id: u64,
     public_keys: []const []const u8,
@@ -376,7 +393,7 @@ pub fn executeBlockStateless(
     else
         fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
 
-    const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals));
+    const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals), parent_header);
     try block_validation.validateBlock(env, spec);
     const txs = try tx_decode.decodeTxsFromInput(alloc, ep.transactions);
 
@@ -468,6 +485,9 @@ pub fn executeStatelessInput(
     // (each header's keccak256 must equal the next header's parent_hash), and the
     // last header's hash must match EP.parent_hash (chain anchor). Out-of-order
     // headers (e.g. reversed) break the hash-linkage check and are rejected.
+    // After chain validation, the last header IS the parent block — decode its
+    // gas/basefee/blob-gas fields so executeBlockStateless can populate Env.parent_*.
+    var parent_header: ?rlp_decode.ParentHeader = null;
     if (header_infos.items.len > 0) {
         for (0..header_infos.items.len - 1) |k| {
             if (!std.mem.eql(u8, &header_infos.items[k].hash, &header_infos.items[k + 1].parent_hash)) {
@@ -478,6 +498,8 @@ pub fn executeStatelessInput(
         if (!std.mem.eql(u8, &last.hash, &ep.parent_hash)) {
             return error.InvalidWitness;
         }
+        parent_header = rlp_decode.decodeParentHeader(si.witness.headers[si.witness.headers.len - 1]) catch
+            return error.InvalidWitness;
     }
 
     return executeBlockStateless(
@@ -487,6 +509,7 @@ pub fn executeStatelessInput(
         si.new_payload_request,
         si.witness.codes,
         block_hashes.items,
+        parent_header,
         fork_name,
         si.chain_config.chain_id,
         si.public_keys,
