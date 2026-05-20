@@ -24,6 +24,43 @@ inline fn readU64(data: []const u8, off: usize) u64 {
     return std.mem.readInt(u64, data[off..][0..8], .little);
 }
 
+// ── Fork enum (bal-devnet-7 / zkevm@v0.4.1) ──────────────────────────────────
+
+/// ProtocolFork enum values from execution-specs amsterdam stateless.py.
+/// Indices are assigned by PROTOCOL_FORKS = tuple(ProtocolFork) and used by
+/// SszForkConfig.fork in the SSZ-encoded SszChainConfig. The string returned
+/// here matches what zesu's spec resolver (fork.specForBlock) expects.
+fn forkNameFromIndex(idx: u64) []const u8 {
+    return switch (idx) {
+        0 => "Frontier",
+        1 => "Homestead",
+        2 => "DAOFork",
+        3 => "TangerineWhistle",
+        4 => "SpuriousDragon",
+        5 => "Byzantium",
+        6 => "Constantinople",
+        7 => "ConstantinopleFix",
+        8 => "Istanbul",
+        9 => "MuirGlacier",
+        10 => "Berlin",
+        11 => "London",
+        12 => "ArrowGlacier",
+        13 => "GrayGlacier",
+        14 => "Paris",
+        15 => "Shanghai",
+        16 => "Cancun",
+        17 => "Prague",
+        18 => "Osaka",
+        19 => "BPO1",
+        20 => "BPO2",
+        21 => "BPO3",
+        22 => "BPO4",
+        23 => "BPO5",
+        24 => "Amsterdam",
+        else => "",
+    };
+}
+
 // ── List[ByteList] decoder ────────────────────────────────────────────────────
 
 /// Decode SSZ `List[ByteList[...], N]` from raw bytes.
@@ -130,11 +167,19 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     const pubkeys_data = body[off_pubkeys..];
 
     // ── SszChainConfig: { chain_id: uint64, active_fork: SszForkConfig (var) }
-    // chain_id is the first 8 bytes; active_fork is variable but we don't need it
-    // for execution — the fork is determined from the test fixture's `network` field.
-    if (chain_config_data.len < 8) return error.InvalidSsz;
+    //   [0..8]   chain_id (uint64 LE)
+    //   [8..12]  offset → active_fork (uint32 LE)
+    //   [12..]   active_fork = SszForkConfig
+    //     [0..8] fork (uint64 LE) — ProtocolFork enum index, see PROTOCOL_FORKS
+    //     ...    activation + blob_schedule (skipped — only `fork` is needed
+    //            for execution; the rest matches mainnet/Amsterdam for all
+    //            v0.4.1 fixtures)
+    if (chain_config_data.len < 12) return error.InvalidSsz;
     const chain_id: u64 = readU64(chain_config_data, 0);
-    const fork_name_bytes: []const u8 = &[_]u8{};
+    const off_active_fork: usize = readU32(chain_config_data, 8);
+    if (off_active_fork + 8 > chain_config_data.len) return error.InvalidSsz;
+    const fork_idx: u64 = readU64(chain_config_data, off_active_fork);
+    const fork_name_bytes = forkNameFromIndex(fork_idx);
 
     // ── SszNewPayloadRequest fixed region (44 bytes) ──────────────────────────
     // [0..4]   offset → execution_payload (variable)
