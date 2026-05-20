@@ -6,15 +6,28 @@ It takes an SSZ-encoded stateless block bundle (execution payload + witness), re
 
 ## Architecture
 
-Zesu builds a **position-independent ELF** that is then linked by each target zkVM's linker script to produce the final guest binary.  Bespoke builds for specific proving systems live in [zesu-zkvm](https://github.com/consensys/zesu-zkvm), which depends on this repo and overrides three injection points:
+Zesu produces a **relocatable rv64im ELF object** (`zesu.rv64im.o`) with all EVM and stateless execution logic. All platform symbols are left as unresolved extern references:
 
-| Injection point | Purpose |
+| Extern symbol(s) | Purpose |
 |---|---|
-| `accel_impl` → `accelerators` module | zkVM-native crypto (keccak, ecrecover, BN254, …) |
-| `precompile_implementations` → `precompile` module | Per-precompile function overrides |
-| `zevm_allocator` (all EVM modules) | Bump / arena allocator for the prover heap |
+| `read_input`, `write_output` | zkvm-standards IO interface |
+| `zkvm_keccak256` … `zkvm_secp256r1_verify` | 19 cryptographic accelerators |
+| `zkvm_log`, `zkvm_exit` | Logging and termination |
+| `ZISK_BUMP_HEAP_POS`, `ZISK_BUMP_HEAP_TOP` | Bump heap region (initialized by host before `main`) |
 
-The `core/build.zig` library exposes all named modules (`executor`, `runner`, `ssz_decode`, `ssz_output`, `input`, `mpt`, …) so that a zkVM consumer can depend on zesu via `build.zig.zon` and wire the overrides without touching zesu source.
+Each zkVM target in [zesu-zkvm](https://github.com/consensys/zesu-zkvm) provides a host object that satisfies these references using platform-native circuits or software fallbacks, then links it against `zesu.rv64im.o` to produce the final guest binary. This decouples EVM logic from zkVM specifics at the ELF/ABI level.
+
+`core/build.zig` exposes the `"zkvm_root"` named module for freestanding targets, which wires the bump allocator, extern IO, and extern accelerator bridge automatically:
+
+```zig
+// In zesu-zkvm/*/build.zig
+const zesu_obj = b.addObject(.{
+    .name = "zesu",
+    .root_module = zesu_core_dep.module("zkvm_root"),
+});
+```
+
+Pre-built `zesu.rv64im.o` artifacts are published as GitHub Releases so zkVM consumers can avoid a source dependency on this repo.
 
 ## Input formats
 
@@ -97,7 +110,11 @@ src/
   evm/          EVM interpreter, state, precompiles, handler
   stateless/    Block executor, SSZ codec, MPT, witness DB
   io/           Platform-neutral I/O interface (overridden per zkVM)
-  crypto/       Accelerator dispatch layer
+  crypto/       Accelerator dispatch layer (extern_bridge.zig for zkVM builds)
+  zkvm/
+    root.zig        — rv64im object root: std_options, panic, export fn main
+    bump_alloc.zig  — bump allocator over ZISK_BUMP_HEAP_POS/TOP extern vars
+    extern_io.zig   — read_input/write_output as C-ABI extern refs
 core/           Module library build.zig (consumed by zesu-zkvm)
 tools/          Spec-test runners, Hive adapter, t8n tool
 spec-tests/     Downloaded execution-spec-tests fixtures (gitignored)
