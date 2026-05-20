@@ -99,7 +99,19 @@ fn decodeWithdrawal(bytes: *const [WITHDRAWAL_SIZE]u8) input_mod.Withdrawal {
 const EP_FIXED_SIZE: usize = 540;
 
 /// Decode an SSZ-serialized SszStatelessInput into a StatelessInput.
+/// Accepts both raw SSZ and Ere-prefixed SSZ (4-byte u32 LE length prefix
+/// prepended by `Input::with_prefixed_stdin`). The prefix is stripped when
+/// its declared length matches the remaining byte count.
 pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessInput {
+    // Auto-detect Ere's 4-byte LE length prefix. The first 4 bytes of raw SSZ
+    // are always a small offset (~20-24), so a match against data.len-4 is
+    // unambiguous for any real payload.
+    const payload = if (data.len >= 4 and
+        std.mem.readInt(u32, data[0..4], .little) == data.len - 4)
+        data[4..]
+    else
+        data;
+
     // ── SszStatelessInput fixed region ────────────────────────────────────────
     // Base layout (20 bytes, off_npr == 20):
     //   [0..4]   offset → new_payload_request (variable)
@@ -113,28 +125,28 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     //   [8..16]  chain_config.chain_id (uint64, fixed inline)
     //   [16..20] offset → public_keys (variable)
     //   [20..24] offset → fork_name (ByteList, variable)
-    if (data.len < 20) return error.InvalidSsz;
-    const off_npr: usize = readU32(data, 0);
-    const off_witness: usize = readU32(data, 4);
-    const chain_id: u64 = readU64(data, 8);
-    const off_pubkeys: usize = readU32(data, 16);
+    if (payload.len < 20) return error.InvalidSsz;
+    const off_npr: usize = readU32(payload, 0);
+    const off_witness: usize = readU32(payload, 4);
+    const chain_id: u64 = readU64(payload, 8);
+    const off_pubkeys: usize = readU32(payload, 16);
 
     // Detect extended layout: off_npr == 24 signals the fork_name field is present.
     const has_fork_name = (off_npr == 24);
     const min_fixed: usize = if (has_fork_name) 24 else 20;
-    if (data.len < min_fixed) return error.InvalidSsz;
+    if (payload.len < min_fixed) return error.InvalidSsz;
 
-    const off_fork_name: usize = if (has_fork_name) readU32(data, 20) else data.len;
+    const off_fork_name: usize = if (has_fork_name) readU32(payload, 20) else payload.len;
 
-    if (off_npr < min_fixed or off_witness > data.len or off_pubkeys > data.len) return error.InvalidSsz;
-    if (has_fork_name and off_fork_name > data.len) return error.InvalidSsz;
+    if (off_npr < min_fixed or off_witness > payload.len or off_pubkeys > payload.len) return error.InvalidSsz;
+    if (has_fork_name and off_fork_name > payload.len) return error.InvalidSsz;
     if (off_npr >= off_witness or off_witness > off_pubkeys) return error.InvalidSsz;
     if (has_fork_name and off_pubkeys > off_fork_name) return error.InvalidSsz;
 
-    const npr_data = data[off_npr..off_witness];
-    const witness_data = data[off_witness..off_pubkeys];
-    const pubkeys_data = if (has_fork_name) data[off_pubkeys..off_fork_name] else data[off_pubkeys..];
-    const fork_name_bytes = if (has_fork_name) data[off_fork_name..] else &[_]u8{};
+    const npr_data = payload[off_npr..off_witness];
+    const witness_data = payload[off_witness..off_pubkeys];
+    const pubkeys_data = if (has_fork_name) payload[off_pubkeys..off_fork_name] else payload[off_pubkeys..];
+    const fork_name_bytes = if (has_fork_name) payload[off_fork_name..] else &[_]u8{};
 
     // ── SszNewPayloadRequest fixed region (44 bytes) ──────────────────────────
     // [0..4]   offset → execution_payload (variable)
@@ -175,8 +187,12 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
         .consolidations = er_data[off_consolidations..],
     };
 
-    // ── SszExecutionPayload fixed region (540 bytes) ──────────────────────────
-    if (ep_data.len < EP_FIXED_SIZE) return error.InvalidSsz;
+    // ── SszExecutionPayload fixed region ─────────────────────────────────────────
+    // V3 EP (Prague/Osaka): 528B fixed, off_extra_data == 528. No block_access_list or slot_number.
+    // V4 EP (Amsterdam+):  540B fixed, off_extra_data == 540. Adds both fields.
+    // Detect by the extra_data offset value, which always equals the fixed-region size.
+    const EP_V3_FIXED_SIZE: usize = 528;
+    if (ep_data.len < EP_V3_FIXED_SIZE) return error.InvalidSsz;
 
     var parent_hash: [32]u8 = undefined;
     @memcpy(&parent_hash, ep_data[0..32]);
@@ -211,13 +227,20 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     const off_withdrawals: usize = readU32(ep_data, 508);
     const blob_gas_used: u64 = readU64(ep_data, 512);
     const excess_blob_gas: u64 = readU64(ep_data, 520);
-    const off_block_access_list: usize = readU32(ep_data, 528);
-    const slot_number: u64 = readU64(ep_data, 532);
+
+    // V4-specific fields (Amsterdam+); use sentinel/null for V3.
+    const ep_is_amsterdam = (off_extra_data == EP_FIXED_SIZE);
+    const ep_is_v3 = (off_extra_data == EP_V3_FIXED_SIZE);
+    if (!ep_is_amsterdam and !ep_is_v3) return error.InvalidSsz;
+    if (ep_is_amsterdam and ep_data.len < EP_FIXED_SIZE) return error.InvalidSsz;
+    // For V3, sentinel points past all variable data so block_access_list comes out empty.
+    const off_block_access_list: usize = if (ep_is_amsterdam) readU32(ep_data, 528) else ep_data.len;
+    const slot_number: ?u64 = if (ep_is_amsterdam) readU64(ep_data, 532) else null;
 
     // Validate variable-field offsets (must be ascending and in range)
-    if (off_extra_data < EP_FIXED_SIZE or off_block_access_list > ep_data.len) return error.InvalidSsz;
     if (off_extra_data > off_transactions or off_transactions > off_withdrawals or
         off_withdrawals > off_block_access_list) return error.InvalidSsz;
+    if (off_block_access_list > ep_data.len) return error.InvalidSsz;
 
     // extra_data: ByteList[32] — raw bytes (not an offset-table list)
     const extra_data = try alloc.dupe(u8, ep_data[off_extra_data..off_transactions]);
@@ -229,10 +252,11 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
         transactions[i] = try rlp_decode.decodeSingleTx(alloc, raw_tx);
     }
 
-    // block_access_list: ByteList[2^24] — raw bytes (last variable field in EP)
+    // block_access_list: last variable field (V4 only; empty for V3 via sentinel offset).
     const block_access_list = try alloc.dupe(u8, ep_data[off_block_access_list..]);
 
-    // withdrawals: List[SszWithdrawal, N] — packed fixed-size items (no offset table)
+    // withdrawals: List[SszWithdrawal, N] — packed fixed-size items (no offset table).
+    // off_block_access_list acts as the end sentinel for V3 (== ep_data.len).
     const wd_bytes = ep_data[off_withdrawals..off_block_access_list];
     if (wd_bytes.len % WITHDRAWAL_SIZE != 0) return error.InvalidSsz;
     const wcount = wd_bytes.len / WITHDRAWAL_SIZE;
