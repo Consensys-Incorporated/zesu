@@ -4,7 +4,7 @@
 //! All container offsets are relative to the start of each container's byte slice.
 //!
 //! Container layouts (fixed region sizes):
-//!   SszStatelessInput:    20 bytes  [4+4+8+4]
+//!   SszStatelessInput:    16 bytes  [4+4+4+4] all-variable (v0.4.1)
 //!   SszNewPayloadRequest: 44 bytes  [4+4+32+4]
 //!   SszExecutionPayload: 540 bytes  (see EP_FIXED_SIZE)
 //!   SszExecutionWitness:  12 bytes  [4+4+4]
@@ -137,7 +137,7 @@ const EP_FIXED_SIZE: usize = 540;
 
 /// Decode an SSZ-serialized SszStatelessInput into a StatelessInput.
 ///
-/// Supports three input layouts, detected in order:
+/// Supports two input layouts, detected in order:
 ///
 /// 1. Ere-prefixed (4-byte u32 LE length prefix prepended by `Input::with_prefixed_stdin`):
 ///    stripped when declared length matches remaining bytes, then format re-detected.
@@ -148,13 +148,6 @@ const EP_FIXED_SIZE: usize = 540;
 ///    [6..10]  offset → witness
 ///    [10..14] offset → chain_config (SszChainConfig: chain_id + SszForkConfig)
 ///    [14..18] offset → public_keys (packed ByteVector[65])
-///
-/// 3. Legacy layout (20/24-byte fixed region, chain_id inline):
-///    [0..4]   offset → new_payload_request (20 = base, 24 = extended with fork_name)
-///    [4..8]   offset → witness
-///    [8..16]  chain_id (uint64 LE, inline)
-///    [16..20] offset → public_keys
-///    [20..24] offset → fork_name (extended only)
 pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessInput {
     // Strip Ere's 4-byte LE length prefix when present. The first 4 bytes of
     // raw SSZ are always a small offset value, so matching against data.len-4
@@ -165,81 +158,34 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     else
         data;
 
-    // Detect format by inspecting the first two bytes:
-    //   0x00 0x01 → v0.4.1 schema_id prefix
-    //   anything else → legacy 20/24-byte layout
-    const is_v041 = payload.len >= 2 and payload[0] == 0x00 and payload[1] == 0x01;
+    // Require v0.4.1 schema_id prefix (0x00 0x01 big-endian).
+    if (payload.len < 2 or payload[0] != 0x00 or payload[1] != 0x01) return error.InvalidSsz;
 
-    const Parsed = struct {
-        chain_id: u64,
-        fork_name_bytes: []const u8,
-        npr_data: []const u8,
-        witness_data: []const u8,
-        pubkeys_data: []const u8,
-    };
-    const parsed: Parsed = blk: {
-        if (is_v041) {
-            // ── v0.4.1: schema_id prefix + 16-byte all-variable container ────
-            const body = payload[2..];
-            if (body.len < 16) return error.InvalidSsz;
-            const off_npr: usize = readU32(body, 0);
-            const off_witness: usize = readU32(body, 4);
-            const off_chain_config: usize = readU32(body, 8);
-            const off_pubkeys: usize = readU32(body, 12);
+    // ── v0.4.1: schema_id prefix + 16-byte all-variable container ────────────
+    const body = payload[2..];
+    if (body.len < 16) return error.InvalidSsz;
+    const off_npr: usize = readU32(body, 0);
+    const off_witness: usize = readU32(body, 4);
+    const off_chain_config: usize = readU32(body, 8);
+    const off_pubkeys: usize = readU32(body, 12);
 
-            if (off_npr != 16 or off_witness > body.len or off_chain_config > body.len or off_pubkeys > body.len) return error.InvalidSsz;
-            if (off_npr > off_witness or off_witness > off_chain_config or off_chain_config > off_pubkeys) return error.InvalidSsz;
+    if (off_npr != 16 or off_witness > body.len or off_chain_config > body.len or off_pubkeys > body.len) return error.InvalidSsz;
+    if (off_npr > off_witness or off_witness > off_chain_config or off_chain_config > off_pubkeys) return error.InvalidSsz;
 
-            const chain_config_data = body[off_chain_config..off_pubkeys];
+    const chain_config_data = body[off_chain_config..off_pubkeys];
 
-            // SszChainConfig: chain_id (uint64 LE) + offset → active_fork + SszForkConfig
-            //   active_fork[0..8] = fork enum index (ProtocolFork, see forkNameFromIndex)
-            if (chain_config_data.len < 12) return error.InvalidSsz;
-            const chain_id = readU64(chain_config_data, 0);
-            const off_active_fork: usize = readU32(chain_config_data, 8);
-            if (off_active_fork + 8 > chain_config_data.len) return error.InvalidSsz;
-            const fork_idx: u64 = readU64(chain_config_data, off_active_fork);
+    // SszChainConfig: chain_id (uint64 LE) + offset → active_fork + SszForkConfig
+    //   active_fork[0..8] = fork enum index (ProtocolFork, see forkNameFromIndex)
+    if (chain_config_data.len < 12) return error.InvalidSsz;
+    const chain_id = readU64(chain_config_data, 0);
+    const off_active_fork: usize = readU32(chain_config_data, 8);
+    if (off_active_fork + 8 > chain_config_data.len) return error.InvalidSsz;
+    const fork_idx: u64 = readU64(chain_config_data, off_active_fork);
 
-            break :blk .{
-                .chain_id = chain_id,
-                .fork_name_bytes = forkNameFromIndex(fork_idx),
-                .npr_data = body[off_npr..off_witness],
-                .witness_data = body[off_witness..off_chain_config],
-                .pubkeys_data = body[off_pubkeys..],
-            };
-        } else {
-            // ── Legacy 20/24-byte layout (chain_id inline, optional fork_name) ──
-            if (payload.len < 20) return error.InvalidSsz;
-            const off_npr: usize = readU32(payload, 0);
-            const off_witness: usize = readU32(payload, 4);
-            const chain_id: u64 = readU64(payload, 8);
-            const off_pubkeys: usize = readU32(payload, 16);
-
-            const has_fork_name = (off_npr == 24);
-            const min_fixed: usize = if (has_fork_name) 24 else 20;
-            if (payload.len < min_fixed) return error.InvalidSsz;
-
-            const off_fork_name: usize = if (has_fork_name) readU32(payload, 20) else payload.len;
-
-            if (off_npr < min_fixed or off_witness > payload.len or off_pubkeys > payload.len) return error.InvalidSsz;
-            if (has_fork_name and off_fork_name > payload.len) return error.InvalidSsz;
-            if (off_npr >= off_witness or off_witness > off_pubkeys) return error.InvalidSsz;
-            if (has_fork_name and off_pubkeys > off_fork_name) return error.InvalidSsz;
-
-            break :blk .{
-                .chain_id = chain_id,
-                .fork_name_bytes = if (has_fork_name) payload[off_fork_name..] else &[_]u8{},
-                .npr_data = payload[off_npr..off_witness],
-                .witness_data = payload[off_witness..off_pubkeys],
-                .pubkeys_data = if (has_fork_name) payload[off_pubkeys..off_fork_name] else payload[off_pubkeys..],
-            };
-        }
-    };
-    const chain_id = parsed.chain_id;
-    const fork_name_bytes = parsed.fork_name_bytes;
-    const npr_data = parsed.npr_data;
-    const witness_data = parsed.witness_data;
-    const pubkeys_data = parsed.pubkeys_data;
+    const fork_name_bytes = forkNameFromIndex(fork_idx);
+    const npr_data = body[off_npr..off_witness];
+    const witness_data = body[off_witness..off_chain_config];
+    const pubkeys_data = body[off_pubkeys..];
 
     // ── SszNewPayloadRequest fixed region (44 bytes) ──────────────────────────
     // [0..4]   offset → execution_payload (variable)
