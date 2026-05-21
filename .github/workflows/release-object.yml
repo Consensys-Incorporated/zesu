@@ -1,0 +1,65 @@
+name: Release rv64im Object
+
+# Builds the relocatable zesu.rv64im.o ELF artifact and opens a draft GitHub
+# Release so it can be consumed by zesu-zkvm targets without a source dependency.
+#
+# Trigger manually from Actions → "Release rv64im Object" → Run workflow.
+# Provide the version tag (e.g. v0.2.0); the release is created as a draft so
+# it can be reviewed and published manually.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (e.g. v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build zesu.rv64im.o and create draft release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@abea47f85e598557f500fa1fd2ab7464fcb39406 # v2.2.1
+        with:
+          version: "0.16.0"
+
+      - name: Build rv64im relocatable object
+        run: zig build rv64im-object -Doptimize=ReleaseFast
+
+      - name: Stage artifact
+        run: |
+          mkdir -p output
+          cp zig-out/lib/zesu.o output/zesu.rv64im.o
+
+      - name: Verify artifact
+        run: |
+          file output/zesu.rv64im.o
+          nm output/zesu.rv64im.o | grep " U " | sort
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zesu.rv64im.o
+          path: output/zesu.rv64im.o
+          if-no-files-found: error
+
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.version }}"
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --generate-notes \
+            --draft \
+            output/zesu.rv64im.o
