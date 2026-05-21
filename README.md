@@ -6,14 +6,47 @@ It takes an SSZ-encoded stateless block bundle (execution payload + witness), re
 
 ## Architecture
 
-Zesu produces a **relocatable rv64im ELF object** (`zesu.rv64im.o`) with all EVM and stateless execution logic. All platform symbols are left as unresolved extern references:
+Zesu produces a **relocatable rv64im ELF object** (`zesu.rv64im.o`) with all EVM and stateless execution logic. All platform symbols are left as unresolved extern references that each zkVM host must satisfy.
 
-| Extern symbol(s) | Purpose |
-|---|---|
-| `read_input`, `write_output` | zkvm-standards IO interface |
-| `zkvm_keccak256` … `zkvm_secp256r1_verify` | 19 cryptographic accelerators |
-| `zkvm_log`, `zkvm_exit` | Logging and termination |
-| `ZISK_BUMP_HEAP_POS`, `ZISK_BUMP_HEAP_TOP` | Bump heap region (initialized by host before `main`) |
+**IO**
+
+| Symbol | Signature | Description |
+|---|---|---|
+| `read_input` | `(*[*]const u8, *usize) void` | Fill pointer + length with the zkVM private input |
+| `write_output` | `([*]const u8, usize) void` | Emit public output bytes |
+
+**Runtime**
+
+| Symbol | Signature | Description |
+|---|---|---|
+| `zkvm_log` | `(u8, [*]const u8, usize) void` | Log a message at the given level |
+| `zkvm_exit` | `(i32) noreturn` | Terminate execution with exit code |
+| `ZKVM_HEAP_POS` | `usize` (var) | Bump heap cursor; allocator advances this |
+| `ZKVM_HEAP_TOP` | `usize` (var) | Heap upper bound; allocator checks against this |
+
+**Accelerators** — all return `i32` (0 = success, −1 = failure)
+
+| Symbol | Precompile | Description |
+|---|---|---|
+| `zkvm_keccak256` | — | Keccak-256 hash |
+| `zkvm_sha256` | `0x02` | SHA-256 hash |
+| `zkvm_secp256k1_ecrecover` | `0x01` | secp256k1 signature recovery |
+| `zkvm_secp256k1_verify` | — | secp256k1 signature verification |
+| `zkvm_ripemd160` | `0x03` | RIPEMD-160 hash |
+| `zkvm_modexp` | `0x05` | Modular exponentiation (EIP-198) |
+| `zkvm_bn254_g1_add` | `0x06` | BN254 G1 point addition (EIP-196) |
+| `zkvm_bn254_g1_mul` | `0x07` | BN254 G1 scalar multiplication (EIP-196) |
+| `zkvm_bn254_pairing` | `0x08` | BN254 pairing check (EIP-197) |
+| `zkvm_blake2f` | `0x09` | BLAKE2f compression (EIP-152) |
+| `zkvm_kzg_point_eval` | `0x0a` | KZG point evaluation (EIP-4844) |
+| `zkvm_bls12_g1_add` | `0x0b` | BLS12-381 G1 addition (EIP-2537) |
+| `zkvm_bls12_g1_msm` | `0x0c` | BLS12-381 G1 multi-scalar multiplication (EIP-2537) |
+| `zkvm_bls12_g2_add` | `0x0d` | BLS12-381 G2 addition (EIP-2537) |
+| `zkvm_bls12_g2_msm` | `0x0e` | BLS12-381 G2 multi-scalar multiplication (EIP-2537) |
+| `zkvm_bls12_pairing` | `0x0f` | BLS12-381 pairing check (EIP-2537) |
+| `zkvm_bls12_map_fp_to_g1` | `0x10` | BLS12-381 Fp → G1 map (EIP-2537) |
+| `zkvm_bls12_map_fp2_to_g2` | `0x11` | BLS12-381 Fp2 → G2 map (EIP-2537) |
+| `zkvm_secp256r1_verify` | `0x100` | P-256 signature verification (EIP-7212) |
 
 Each zkVM target in [zesu-zkvm](https://github.com/consensys/zesu-zkvm) provides a host object that satisfies these references using platform-native circuits or software fallbacks, then links it against `zesu.rv64im.o` to produce the final guest binary. This decouples EVM logic from zkVM specifics at the ELF/ABI level.
 
@@ -113,7 +146,7 @@ src/
   crypto/       Accelerator dispatch layer (extern_bridge.zig for zkVM builds)
   zkvm/
     root.zig        — rv64im object root: std_options, panic, export fn main
-    bump_alloc.zig  — bump allocator over ZISK_BUMP_HEAP_POS/TOP extern vars
+    bump_alloc.zig  — bump allocator over ZKVM_HEAP_POS/TOP extern vars
     extern_io.zig   — read_input/write_output as C-ABI extern refs
 core/           Module library build.zig (consumed by zesu-zkvm)
 tools/          Spec-test runners, Hive adapter, t8n tool
