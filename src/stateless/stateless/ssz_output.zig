@@ -297,11 +297,12 @@ fn htExecutionPayload(alloc: std.mem.Allocator, ep: input.ExecutionPayload) !([3
     chunks[15] = htU64(ep.blob_gas_used);
     chunks[16] = htU64(ep.excess_blob_gas);
 
-    // f17: block_access_list: ByteList[2^24]
-    chunks[17] = htByteList2_24(ep.block_access_list);
-
-    // f18: slot_number: uint64
-    chunks[18] = htU64(ep.slot_number orelse 0);
+    // f17..f18: Amsterdam+ only. V3 EP (Prague/Osaka) has slot_number == null;
+    // leave chunks[17..31] as zero to match Reth's 17-field ExecutionPayloadV3 hash.
+    if (ep.slot_number != null) {
+        chunks[17] = htByteList2_24(ep.block_access_list);
+        chunks[18] = htU64(ep.slot_number.?);
+    }
 
     // f19..f31: zero (already zero-initialized above)
 

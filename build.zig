@@ -470,6 +470,272 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(tst).step);
     }
 
+    // ── rv64im relocatable object ─────────────────────────────────────────────
+    //
+    // Produces zig-out/lib/zesu.o: a relocatable rv64im ELF with all EVM and
+    // stateless execution logic compiled in, but IO, crypto accelerators, heap,
+    // and logging left as unresolved extern references per zkvm-standards.
+    //
+    // Build with: zig build rv64im-object
+    // Verify undefined refs: llvm-nm zig-out/lib/zesu.o | grep ' U '
+    {
+        const rv64im_target = b.resolveTargetQuery(.{
+            .cpu_arch = .riscv64,
+            .cpu_model = .{ .explicit = &std.Target.riscv.cpu.baseline_rv64 },
+            .cpu_features_add = std.Target.riscv.featureSet(&.{ .m, .zicclsm }),
+            .cpu_features_sub = std.Target.riscv.featureSet(&.{ .a, .c, .d, .f, .zicsr, .zaamo, .zalrsc }),
+            .os_tag = .freestanding,
+            .abi = .none,
+        });
+
+        // ── Overridden foundation modules (rv64im) ────────────────────────────
+
+        const rv64_alloc_mod = b.createModule(.{
+            .root_source_file = b.path("src/zkvm/bump_alloc.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+
+        const rv64_primitives_mod = b.createModule(.{
+            .root_source_file = b.path("src/evm/primitives/main.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+
+        // accel_impl: extern_bridge.zig — declares extern fn zkvm_* symbols.
+        const rv64_extern_bridge_mod = b.createModule(.{
+            .root_source_file = b.path("src/crypto/extern_bridge.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+
+        const rv64_accelerators_mod = b.createModule(.{
+            .root_source_file = b.path("src/crypto/accelerators.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_accelerators_mod.addImport("accel_impl", rv64_extern_bridge_mod);
+
+        const rv64_precompile_types_mod = b.createModule(.{
+            .root_source_file = b.path("src/evm/precompile/types.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+
+        // ── EVM modules (rv64im) ──────────────────────────────────────────────
+
+        const rv64_bytecode_mod = b.createModule(.{
+            .root_source_file = b.path("src/evm/bytecode/main.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_bytecode_mod.addImport("primitives", rv64_primitives_mod);
+        rv64_bytecode_mod.addImport("zesu_allocator", rv64_alloc_mod);
+        rv64_bytecode_mod.addImport("accelerators", rv64_accelerators_mod);
+
+        const rv64_state_mod = b.createModule(.{
+            .root_source_file = b.path("src/evm/state/main.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_state_mod.addImport("primitives", rv64_primitives_mod);
+        rv64_state_mod.addImport("bytecode", rv64_bytecode_mod);
+        rv64_state_mod.addImport("zesu_allocator", rv64_alloc_mod);
+
+        const rv64_database_mod = b.createModule(.{
+            .root_source_file = b.path("src/evm/database/main.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_database_mod.addImport("primitives", rv64_primitives_mod);
+        rv64_database_mod.addImport("state", rv64_state_mod);
+        rv64_database_mod.addImport("bytecode", rv64_bytecode_mod);
+
+        const rv64_context_mod = b.createModule(.{
+            .root_source_file = b.path("src/evm/context/main.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_context_mod.addImport("primitives", rv64_primitives_mod);
+        rv64_context_mod.addImport("bytecode", rv64_bytecode_mod);
+        rv64_context_mod.addImport("state", rv64_state_mod);
+        rv64_context_mod.addImport("database", rv64_database_mod);
+        rv64_context_mod.addImport("zesu_allocator", rv64_alloc_mod);
+
+        const rv64_precompile_mod = b.createModule(.{
+            .root_source_file = b.path("src/evm/precompile/main.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_precompile_mod.addImport("primitives", rv64_primitives_mod);
+        rv64_precompile_mod.addImport("zesu_allocator", rv64_alloc_mod);
+        rv64_precompile_mod.addImport("precompile_types", rv64_precompile_types_mod);
+        rv64_precompile_mod.addImport("accelerators", rv64_accelerators_mod);
+
+        const rv64_interpreter_mod = b.createModule(.{
+            .root_source_file = b.path("src/evm/interpreter/main.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_interpreter_mod.addImport("primitives", rv64_primitives_mod);
+        rv64_interpreter_mod.addImport("bytecode", rv64_bytecode_mod);
+        rv64_interpreter_mod.addImport("context", rv64_context_mod);
+        rv64_interpreter_mod.addImport("database", rv64_database_mod);
+        rv64_interpreter_mod.addImport("state", rv64_state_mod);
+        rv64_interpreter_mod.addImport("precompile", rv64_precompile_mod);
+        rv64_interpreter_mod.addImport("zesu_allocator", rv64_alloc_mod);
+        rv64_interpreter_mod.addImport("accelerators", rv64_accelerators_mod);
+
+        const rv64_handler_mod = b.createModule(.{
+            .root_source_file = b.path("src/evm/handler/main.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_handler_mod.addImport("primitives", rv64_primitives_mod);
+        rv64_handler_mod.addImport("bytecode", rv64_bytecode_mod);
+        rv64_handler_mod.addImport("state", rv64_state_mod);
+        rv64_handler_mod.addImport("database", rv64_database_mod);
+        rv64_handler_mod.addImport("interpreter", rv64_interpreter_mod);
+        rv64_handler_mod.addImport("context", rv64_context_mod);
+        rv64_handler_mod.addImport("precompile", rv64_precompile_mod);
+        rv64_handler_mod.addImport("zesu_allocator", rv64_alloc_mod);
+
+        // ── Stateless modules (rv64im) ────────────────────────────────────────
+
+        const rv64_input_mod = b.createModule(.{
+            .root_source_file = b.path("src/stateless/input.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_input_mod.addImport("primitives", rv64_primitives_mod);
+
+        const rv64_output_mod = b.createModule(.{
+            .root_source_file = b.path("src/stateless/output.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_output_mod.addImport("primitives", rv64_primitives_mod);
+
+        const rv64_hardfork_mod = b.createModule(.{
+            .root_source_file = b.path("src/stateless/hardfork.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_hardfork_mod.addImport("primitives", rv64_primitives_mod);
+
+        const rv64_rlp_decode_mod = b.createModule(.{
+            .root_source_file = b.path("src/stateless/rlp_decode.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_rlp_decode_mod.addImport("primitives", rv64_primitives_mod);
+        rv64_rlp_decode_mod.addImport("input", rv64_input_mod);
+
+        const rv64_mpt_mod = b.createModule(.{
+            .root_source_file = b.path("src/stateless/mpt/main.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_mpt_mod.addImport("primitives", rv64_primitives_mod);
+        rv64_mpt_mod.addImport("input", rv64_input_mod);
+        rv64_mpt_mod.addImport("accelerators", rv64_accelerators_mod);
+
+        rv64_rlp_decode_mod.addImport("mpt", rv64_mpt_mod);
+
+        const rv64_executor_types_mod = b.createModule(.{
+            .root_source_file = b.path("src/stateless/executor/types.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+
+        const rv64_db_mod = b.createModule(.{
+            .root_source_file = b.path("src/stateless/db/main.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_db_mod.addImport("primitives", rv64_primitives_mod);
+        rv64_db_mod.addImport("state", rv64_state_mod);
+        rv64_db_mod.addImport("bytecode", rv64_bytecode_mod);
+        rv64_db_mod.addImport("mpt", rv64_mpt_mod);
+        rv64_db_mod.addImport("executor_types", rv64_executor_types_mod);
+
+        const rv64_executor_mod = b.createModule(.{
+            .root_source_file = b.path("src/stateless/executor/main.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_executor_mod.addImport("executor_types", rv64_executor_types_mod);
+        rv64_executor_mod.addImport("zesu_allocator", rv64_alloc_mod);
+        rv64_executor_mod.addImport("primitives", rv64_primitives_mod);
+        rv64_executor_mod.addImport("input", rv64_input_mod);
+        rv64_executor_mod.addImport("output", rv64_output_mod);
+        rv64_executor_mod.addImport("mpt", rv64_mpt_mod);
+        rv64_executor_mod.addImport("rlp_decode", rv64_rlp_decode_mod);
+        rv64_executor_mod.addImport("hardfork", rv64_hardfork_mod);
+        rv64_executor_mod.addImport("db", rv64_db_mod);
+        rv64_executor_mod.addImport("context", rv64_context_mod);
+        rv64_executor_mod.addImport("state", rv64_state_mod);
+        rv64_executor_mod.addImport("bytecode", rv64_bytecode_mod);
+        rv64_executor_mod.addImport("database", rv64_database_mod);
+        rv64_executor_mod.addImport("handler", rv64_handler_mod);
+        rv64_executor_mod.addImport("precompile", rv64_precompile_mod);
+        rv64_executor_mod.addImport("accelerators", rv64_accelerators_mod);
+
+        const rv64_ssz_decode_mod = b.createModule(.{
+            .root_source_file = b.path("src/stateless/stateless/ssz.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_ssz_decode_mod.addImport("input", rv64_input_mod);
+        rv64_ssz_decode_mod.addImport("rlp_decode", rv64_rlp_decode_mod);
+
+        const rv64_ssz_output_mod = b.createModule(.{
+            .root_source_file = b.path("src/stateless/stateless/ssz_output.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_ssz_output_mod.addImport("input", rv64_input_mod);
+        rv64_ssz_output_mod.addImport("accelerators", rv64_accelerators_mod);
+
+        // zkvm_io: extern_io — declares read_input/write_output as C-ABI externs.
+        const rv64_zkvm_io_mod = b.createModule(.{
+            .root_source_file = b.path("src/zkvm/extern_io.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+
+        const rv64_runner_mod = b.createModule(.{
+            .root_source_file = b.path("src/stateless/stateless/run.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_runner_mod.addImport("executor", rv64_executor_mod);
+        rv64_runner_mod.addImport("ssz_decode", rv64_ssz_decode_mod);
+        rv64_runner_mod.addImport("ssz_output", rv64_ssz_output_mod);
+        rv64_runner_mod.addImport("zkvm_io", rv64_zkvm_io_mod);
+
+        // ── Relocatable object ────────────────────────────────────────────────
+
+        const rv64_root_mod = b.createModule(.{
+            .root_source_file = b.path("src/zkvm/root.zig"),
+            .target = rv64im_target,
+            .optimize = optimize,
+        });
+        rv64_root_mod.addImport("runner", rv64_runner_mod);
+        rv64_root_mod.addImport("zkvm_io", rv64_zkvm_io_mod);
+        rv64_root_mod.addImport("zesu_allocator", rv64_alloc_mod);
+
+        const rv64_obj = b.addObject(.{
+            .name = "zesu",
+            .root_module = rv64_root_mod,
+        });
+        rv64_obj.root_module.code_model = .medium;
+
+        const obj_step = b.step("rv64im-object", "Build relocatable rv64im ELF object (zesu.o)");
+        const install_obj = b.addInstallFile(rv64_obj.getEmittedBin(), "lib/zesu.o");
+        obj_step.dependOn(&install_obj.step);
+    }
+
     // ── Fixture fetch steps ───────────────────────────────────────────────────
 
     const spec_test_version = "tests-bal@v7.2.0";

@@ -249,4 +249,53 @@ pub fn build(b: *std.Build) void {
     runner_module.addImport("executor", executor_module);
     runner_module.addImport("ssz_decode", ssz_decode_module);
     runner_module.addImport("ssz_output", ssz_output_module);
+
+    // ── Freestanding (zkvm) build: relocatable rv64im object ─────────────────
+    //
+    // When this package is consumed with a freestanding target (e.g.
+    //   b.dependency("zesu_core", .{ .target = rv64im_target })
+    // ), produce a relocatable ELF object with unresolved extern refs that
+    // satisfy the zkvm-standards ABI.  Consumers retrieve it via:
+    //   zesu_core_dep.artifact("zesu")
+    if (target.result.os.tag == .freestanding) {
+        const bump_alloc_mod = b.createModule(.{
+            .root_source_file = b.path("../src/zkvm/bump_alloc.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        // Override zesu_allocator (std.heap.c_allocator → bump allocator)
+        for ([_]*std.Build.Module{
+            bytecode_module,
+            state_module,
+            context_module,
+            precompile_module,
+            interpreter_module,
+            handler_module,
+            executor_module,
+        }) |mod| {
+            mod.addImport("zesu_allocator", bump_alloc_mod);
+        }
+
+        // zkvm_io: extern_io — read_input/write_output as C-ABI extern refs
+        const extern_io_mod = b.createModule(.{
+            .root_source_file = b.path("../src/zkvm/extern_io.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        runner_module.addImport("zkvm_io", extern_io_mod);
+
+        // Named public module so consumers can build the rv64im object:
+        //   const zesu_obj = b.addObject(.{
+        //       .name = "zesu",
+        //       .root_module = zesu_core_dep.module("zkvm_root"),
+        //   });
+        const zkvm_root_mod = b.addModule("zkvm_root", .{
+            .root_source_file = b.path("../src/zkvm/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        zkvm_root_mod.addImport("runner", runner_module);
+        zkvm_root_mod.addImport("zkvm_io", extern_io_mod);
+        zkvm_root_mod.addImport("zesu_allocator", bump_alloc_mod);
+    }
 }

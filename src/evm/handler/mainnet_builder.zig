@@ -358,7 +358,7 @@ pub const MainnetHandler = struct {
                         // NEW_ACCOUNT*CPSB charge — the account was never created.
                         if (primitives.isEnabledIn(spec, .amsterdam) and !cr.success) {
                             fr.reservoir_remaining += ir.state_gas_used + initial.initial_state_gas;
-                            exec_result.state_gas_used = 0;
+                            fr.result.state_gas_used = 0;
                         }
                         return fr;
                     },
