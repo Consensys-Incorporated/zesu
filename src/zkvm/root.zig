@@ -10,7 +10,7 @@
 ///   zkvm_exit(code) noreturn           — halt/exit (e.g. ecall a7=93)
 ///   read_input / write_output          — from zkvm-standards io-interface
 ///   zkvm_keccak256 … zkvm_secp256r1_verify — from zkvm-standards accelerators
-///   ZISK_BUMP_HEAP_POS / ZISK_BUMP_HEAP_TOP — heap region (from linker/libziskos)
+///   ZKVM_HEAP_POS / ZKVM_HEAP_TOP — heap region (defined by each host object)
 const std = @import("std");
 const runner = @import("runner");
 const zkvm_io = @import("zkvm_io");

@@ -1,29 +1,27 @@
 /// zesu_allocator module for the relocatable rv64im object.
 ///
-/// Bump allocator over the same ZISK_BUMP_HEAP_POS / ZISK_BUMP_HEAP_TOP
-/// extern vars shared with libziskos.a. libziskos's init_sys_alloc() (called
-/// from _zisk_main before main()) initializes ZISK_BUMP_HEAP_POS to
-/// _kernel_heap_bottom and ZISK_BUMP_HEAP_TOP to _kernel_heap_top.
+/// Bump allocator backed by ZKVM_HEAP_POS / ZKVM_HEAP_TOP extern vars.
+/// Each zkVM host object (zisk-host.o, openvm-host.o, linea-host.o) exports
+/// these vars and initializes them before calling main(). For ZisK, the vars
+/// are aliased onto libziskos.a's ZISK_BUMP_HEAP_POS/TOP via zisk.ld.
 ///
-/// After this refactor, only zesu's allocator advances ZISK_BUMP_HEAP_POS —
-/// the old ZiskAllocator.init() in zisk's main() is gone. free/resize/remap
-/// are no-ops (bump allocator semantics).
+/// free/resize/remap are no-ops (bump allocator semantics).
 ///
 /// This module satisfies the `@import("zesu_allocator")` interface expected
 /// by all EVM modules: pub fn get() std.mem.Allocator.
 const std = @import("std");
 
-extern var ZISK_BUMP_HEAP_POS: usize;
-extern var ZISK_BUMP_HEAP_TOP: usize;
+extern var ZKVM_HEAP_POS: usize;
+extern var ZKVM_HEAP_TOP: usize;
 
 fn sysAllocAligned(bytes: usize, alignment: usize) ?[*]u8 {
-    const offset = ZISK_BUMP_HEAP_POS & (alignment - 1);
+    const offset = ZKVM_HEAP_POS & (alignment - 1);
     if (offset != 0) {
-        ZISK_BUMP_HEAP_POS += alignment - offset;
+        ZKVM_HEAP_POS += alignment - offset;
     }
-    if (ZISK_BUMP_HEAP_POS + bytes > ZISK_BUMP_HEAP_TOP) return null;
-    const ptr: [*]u8 = @ptrFromInt(ZISK_BUMP_HEAP_POS);
-    ZISK_BUMP_HEAP_POS += bytes;
+    if (ZKVM_HEAP_POS + bytes > ZKVM_HEAP_TOP) return null;
+    const ptr: [*]u8 = @ptrFromInt(ZKVM_HEAP_POS);
+    ZKVM_HEAP_POS += bytes;
     return ptr;
 }
 
