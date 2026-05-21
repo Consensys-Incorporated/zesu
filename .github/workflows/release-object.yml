@@ -43,10 +43,10 @@ jobs:
       - name: Verify artifact
         run: |
           file output/zesu.rv64im.o
-          nm output/zesu.rv64im.o | grep " U " | sort
+          nm output/zesu.rv64im.o | grep " U " | sort || true
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: zesu.rv64im.o
           path: output/zesu.rv64im.o
@@ -55,11 +55,12 @@ jobs:
       - name: Create draft GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.version }}
         run: |
-          TAG="${{ inputs.version }}"
-          gh release create "$TAG" \
+          gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "$TAG" \
+            --title "$RELEASE_TAG" \
+            --target "$GITHUB_SHA" \
             --generate-notes \
             --draft \
             output/zesu.rv64im.o
