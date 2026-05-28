@@ -594,21 +594,23 @@ pub const MainnetHandler = struct {
         //   - receipt cumulativeGasUsed = final_cost (= regular_after_refunds + state)
         //   - block gasUsed = max(regular_before_refunds, state_gas) (no refunds deducted)
         if (is_amsterdam) {
-            // block_base = total_gas_spent - auth_state_refund (SSTORE refunds NOT deducted per EIP-7778;
-            // auth_state_refund IS deducted as it is a pre-payment correction, not an SSTORE reward).
+            // block_base = final_cost + capped_refund. SSTORE refunds are NOT deducted per EIP-7778;
+            // auth_state_refund is a pre-payment correction applied against initial_state_gas below.
             const block_base = final_cost + capped_refund;
             if (result.result.status == .Success) {
                 // bal-devnet-7: block_gas_used is the 2D max(regular, state). Intrinsic state
                 // gas is pre-paid via balance and excluded from the block accounting — only
                 // EXECUTION state gas (SSTORE etc., spends via spendStateGas) counts toward
                 // the block-level state lane.
-                const state_for_block = if (result.result.state_gas_used > auth_state_refund)
-                    result.result.state_gas_used - auth_state_refund
+                // auth_state_refund corrects intrinsic overcharges (STATE_BYTES_PER_NEW_ACCOUNT /
+                // STATE_BYTES_PER_AUTH_BASE), so it reduces initial_state_gas, not the execution lane.
+                const initial_after_auth_refund = if (initial_gas.initial_state_gas > auth_state_refund)
+                    initial_gas.initial_state_gas - auth_state_refund
                 else
                     0;
-                const total_state_pricing = initial_gas.initial_state_gas + state_for_block;
+                const total_state_pricing = initial_after_auth_refund + result.result.state_gas_used;
                 const regular_for_block = if (block_base > total_state_pricing) block_base - total_state_pricing else 0;
-                result.result.block_gas_used = @max(regular_for_block, state_for_block);
+                result.result.block_gas_used = @max(regular_for_block, result.result.state_gas_used);
             } else {
                 // EIP-8037 (Amsterdam+): failed tx block gas capped at TX_MAX_GAS_LIMIT (1<<24).
                 // Txs with gas > TX_MAX are allowed but contribute at most TX_MAX to block capacity on failure.
