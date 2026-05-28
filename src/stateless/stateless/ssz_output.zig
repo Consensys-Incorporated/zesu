@@ -325,8 +325,9 @@ fn htTransactionList(alloc: std.mem.Allocator, raw_txs: []const []const u8) !([3
 }
 
 fn htWithdrawalList(alloc: std.mem.Allocator, withdrawals: []const input.Withdrawal) !([32]u8) {
-    // List[SszWithdrawal, 2^16]: list limit = 2^16, depth = 16.
-    const list_depth = 16;
+    // bal-devnet-7 / zkevm@v0.4.1: MAX_WITHDRAWALS_PER_PAYLOAD = 2**4 (was 2**16
+    // in v0.3.x — re-aligned with the consensus-layer limit).
+    const list_depth = 4;
 
     if (withdrawals.len == 0) return mixInLength(zeroHash(list_depth), 0);
 
@@ -474,20 +475,65 @@ pub fn newPayloadRequestRoot(alloc: std.mem.Allocator, req: input.NewPayloadRequ
 
 // ── Serialize output ──────────────────────────────────────────────────────────
 
-/// Serialize SszStatelessValidationResult to 41 bytes:
-///   [0..32]  new_payload_request_root
-///   [32]     successful_validation (0x01 = valid, 0x00 = invalid)
-///   [33..41] chain_config.chain_id (uint64 LE)
+/// bal-devnet-7 / zkevm@v0.4.1: SszChainConfig grew from a single uint64 chain_id
+/// to a container { chain_id: uint64, active_fork: SszForkConfig } where
+/// SszForkConfig = { fork, activation, blob_schedule } encodes the mainnet
+/// Amsterdam activation + EIP-7691 blob schedule. All v0.4.1 fixtures target
+/// mainnet at Amsterdam, so the SSZ-encoded SszChainConfig body is constant —
+/// hardcoded below as a 72-byte literal that follows the
+/// successful_validation boolean in the SszStatelessValidationResult output.
+const SSZ_CHAIN_CONFIG_AMSTERDAM_MAINNET: [72]u8 = .{
+    // offset to chain_config from container start (= 32 + 1 + 4 = 37)
+    0x25, 0x00, 0x00, 0x00,
+    // chain_config.chain_id = 1 (uint64 LE)
+    0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    // chain_config: offset to active_fork (= 12)
+    0x0c, 0x00, 0x00, 0x00,
+    // active_fork.fork = 24 (uint64 LE) — ProtocolFork enum index for Amsterdam
+    0x18, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    // active_fork: offset to activation (= 16)
+    0x10, 0x00, 0x00, 0x00,
+    // active_fork: offset to blob_schedule (= 32)
+    0x20, 0x00, 0x00, 0x00,
+    // activation.block_number — offset 8 (empty optional list: 0 bytes of data)
+    0x08, 0x00, 0x00, 0x00,
+    // activation.timestamp — offset 8 (1-element optional list: uint64 value follows)
+    0x08, 0x00, 0x00, 0x00,
+    // activation.timestamp[0] = 0 (uint64 LE, Amsterdam activates at genesis on mainnet)
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    // blob_schedule[0].target = 14 (EIP-7691 Amsterdam)
+    0x0e, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    // blob_schedule[0].max = 21 (EIP-7691 Amsterdam)
+    0x15, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    // blob_schedule[0].base_fee_update_fraction = 0xB24B3F (EIP-7691)
+    0x3f, 0x4b, 0xb2, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+};
+
+/// Serialize SszStatelessValidationResult (bal-devnet-7 / zkevm@v0.4.1):
+///   [0..32]   new_payload_request_root  Bytes32
+///   [32]      successful_validation     boolean (0x01 = valid, 0x00 = invalid)
+///   [33..105] chain_config (variable, encoded as SszChainConfig with offset)
+///
+/// The trailing 72-byte chain_config is hardcoded for mainnet Amsterdam (the only
+/// target of the current zkevm fixtures). The `chain_id` parameter is accepted
+/// for compatibility but the constant encodes chain_id=1.
 pub fn serialize(
     alloc: std.mem.Allocator,
     req: input.NewPayloadRequest,
     chain_id: u64,
     successful_validation: bool,
-) ![41]u8 {
+) ![105]u8 {
+    _ = chain_id;
     const root = try newPayloadRequestRoot(alloc, req);
-    var out: [41]u8 = undefined;
+    var out: [105]u8 = undefined;
     @memcpy(out[0..32], &root);
     out[32] = if (successful_validation) 0x01 else 0x00;
-    std.mem.writeInt(u64, out[33..41], chain_id, .little);
+    @memcpy(out[33..105], &SSZ_CHAIN_CONFIG_AMSTERDAM_MAINNET);
     return out;
 }

@@ -138,21 +138,20 @@ fn buildAccessedEntries(
     access_log: context_mod.AccessLog,
     post_alloc: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
     deleted_accounts: []const types.Address,
+    system_address_user_touched: bool,
 ) ![]types.AccessedEntry {
     var entries = std.ArrayListUnmanaged(types.AccessedEntry).empty;
 
     var addr_iter = access_log.accounts.iterator();
     while (addr_iter.next()) |acc_kv| {
         const address = acc_kv.key_ptr.*;
-        // The EIP system caller address is a virtual address used to invoke system
-        // contracts.  It is excluded from the BAL UNLESS ETH was actually sent to it
-        // by a user transaction (in which case it has a real balance change and IS
-        // included — e.g., test_selfdestruct_to_system_address).
-        if (std.mem.eql(u8, &address, &SYSTEM_ADDRESS)) {
+        // EIP-7928 (bal-devnet-7): SYSTEM_ADDRESS only appears in the BAL if a user
+        // tx touched it OR it received ETH (balance change). Pre/post-block system
+        // calls warm SYSTEM_ADDRESS (it is the caller) but those touches alone do
+        // NOT belong in the BAL.
+        if (std.mem.eql(u8, &address, &SYSTEM_ADDRESS) and !system_address_user_touched) {
             if (post_alloc.get(address)) |p| {
-                // Include only if balance genuinely changed (ETH was sent to SYSTEM_ADDRESS).
                 if (p.balance == 0) continue;
-                // Otherwise fall through: SYSTEM_ADDRESS has a real balance and belongs in BAL.
             } else continue;
         }
         const pre = acc_kv.value_ptr.*;
@@ -421,7 +420,7 @@ pub fn executeBlockStateless(
     if (ctx.ctx_error != .ok) return error.InvalidWitness;
     var access_log = ctx.journaled_state.takeAccessLog();
     defer access_log.deinit();
-    const accessed = try buildAccessedEntries(alloc, access_log, result.alloc, result.deleted_accounts);
+    const accessed = try buildAccessedEntries(alloc, access_log, result.alloc, result.deleted_accounts, result.system_address_user_touched);
     try block_validation.validatePostExecution(alloc, env, spec, result.cumulative_gas, result.blob_gas_used, ep.block_access_list, accessed);
     return finalizeOutput(alloc, pre_state_root, result, node_index, spec, ctx.getDb());
 }

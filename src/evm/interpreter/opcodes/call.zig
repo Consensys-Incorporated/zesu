@@ -492,9 +492,11 @@ pub fn opCreate(ctx: *InstructionContext) void {
 
     // EIP-8037 (Amsterdam+): charge state gas for new account creation.
     // Charged BEFORE forwarded gas is computed so `remaining` reflects the state gas cost.
+    var new_account_state_gas: u64 = 0;
     if (primitives.isEnabledIn(spec, .amsterdam)) {
         const cpsb = gas_costs.costPerStateByte(h.block.gas_limit);
-        if (!ctx.interpreter.gas.spendStateGas(gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * cpsb)) {
+        new_account_state_gas = gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * cpsb;
+        if (!ctx.interpreter.gas.spendStateGas(new_account_state_gas)) {
             ctx.interpreter.halt(.out_of_gas);
             return;
         }
@@ -537,9 +539,13 @@ pub fn opCreate(ctx: *InstructionContext) void {
     const setup = h.setupCreate(caller, value, init_code, forwarded, false, 0, false, ctx.interpreter.input.depth, true);
     switch (setup) {
         .failed => |r| {
-            // EIP-8037: restore reservoir on pre-exec failure.
+            // EIP-8037: restore reservoir on pre-exec failure (including new_account_state_gas).
+            // Also unwind new_account_state_gas from state_gas_used / state_gas_spent since the
+            // account was never created.
             var result = r;
-            result.state_gas_remaining = create_reservoir;
+            result.state_gas_remaining = create_reservoir + new_account_state_gas;
+            ctx.interpreter.gas.state_gas_used -|= new_account_state_gas;
+            ctx.interpreter.gas.state_gas_spent -|= new_account_state_gas;
             resumeCreate(ctx.interpreter, result);
         },
         .ready => |s| {
@@ -555,6 +561,7 @@ pub fn opCreate(ctx: *InstructionContext) void {
                 },
                 .new_addr = s.new_addr,
                 .checkpoint = s.checkpoint,
+                .new_account_state_gas = new_account_state_gas,
             } };
         },
     }
@@ -644,9 +651,11 @@ pub fn opCreate2(ctx: *InstructionContext) void {
 
     // EIP-8037 (Amsterdam+): charge state gas for new account creation.
     // Charged BEFORE forwarded gas is computed so `remaining` reflects the state gas cost.
+    var new_account_state_gas: u64 = 0;
     if (primitives.isEnabledIn(spec, .amsterdam)) {
         const cpsb = gas_costs.costPerStateByte(h.block.gas_limit);
-        if (!ctx.interpreter.gas.spendStateGas(gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * cpsb)) {
+        new_account_state_gas = gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * cpsb;
+        if (!ctx.interpreter.gas.spendStateGas(new_account_state_gas)) {
             ctx.interpreter.halt(.out_of_gas);
             return;
         }
@@ -690,9 +699,13 @@ pub fn opCreate2(ctx: *InstructionContext) void {
     const setup = h.setupCreate(caller, value, init_code, forwarded, true, salt, false, ctx.interpreter.input.depth, true);
     switch (setup) {
         .failed => |r| {
-            // EIP-8037: restore reservoir on pre-exec failure.
+            // EIP-8037: restore reservoir on pre-exec failure (including new_account_state_gas).
+            // Also unwind new_account_state_gas from state_gas_used / state_gas_spent since the
+            // account was never created.
             var result = r;
-            result.state_gas_remaining = create_reservoir;
+            result.state_gas_remaining = create_reservoir + new_account_state_gas;
+            ctx.interpreter.gas.state_gas_used -|= new_account_state_gas;
+            ctx.interpreter.gas.state_gas_spent -|= new_account_state_gas;
             resumeCreate(ctx.interpreter, result);
         },
         .ready => |s| {
@@ -708,6 +721,7 @@ pub fn opCreate2(ctx: *InstructionContext) void {
                 },
                 .new_addr = s.new_addr,
                 .checkpoint = s.checkpoint,
+                .new_account_state_gas = new_account_state_gas,
             } };
         },
     }

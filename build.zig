@@ -258,6 +258,7 @@ pub fn build(b: *std.Build) void {
     executor_module.addImport("bytecode", bytecode_module);
     executor_module.addImport("database", database_module);
     executor_module.addImport("handler", handler_module);
+    executor_module.addImport("interpreter", interpreter_module);
     executor_module.addImport("precompile", precompile_module);
     executor_module.addImport("accelerators", accelerators_module);
 
@@ -737,30 +738,30 @@ pub fn build(b: *std.Build) void {
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
 
-    const spec_test_version = "bal@v5.6.1";
-    const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-spec-tests " ++ spec_test_version ++ " fixtures");
+    const spec_test_version = "tests-bal@v7.2.0";
+    const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-specs " ++ spec_test_version ++ " fixtures");
     fetch_fixtures_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
         "marker=spec-tests/.fixtures-" ++ spec_test_version ++ " && " ++
             "[ -f \"$marker\" ] && echo 'Fixtures already up to date.' && exit 0; " ++
-            "echo 'Downloading execution-spec-tests " ++ spec_test_version ++ " fixtures...' && " ++
+            "echo 'Downloading execution-specs " ++ spec_test_version ++ " fixtures...' && " ++
             "rm -rf spec-tests/fixtures && mkdir -p spec-tests/fixtures && " ++
             "encoded=$(printf '%s' '" ++ spec_test_version ++ "' | sed 's/@/%40/g') && " ++
-            "curl -fL \"https://github.com/ethereum/execution-spec-tests/releases/download/${encoded}/fixtures_bal.tar.gz\" " ++
+            "curl -fL \"https://github.com/ethereum/execution-specs/releases/download/${encoded}/fixtures_bal.tar.gz\" " ++
             "| tar xz --strip-components=1 -C spec-tests/fixtures/ && " ++
             "touch \"$marker\" && " ++
             "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
     }).step);
 
-    const zkevm_version = "zkevm@v0.3.4";
-    const fetch_zkevm_step = b.step("fetch-zkevm-fixtures", "Download " ++ zkevm_version ++ " execution-spec-tests fixtures");
+    const zkevm_version = "tests-zkevm@v0.4.1";
+    const fetch_zkevm_step = b.step("fetch-zkevm-fixtures", "Download " ++ zkevm_version ++ " execution-specs fixtures");
     fetch_zkevm_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
         "rm -rf spec-tests/fixtures/zkevm && " ++
             "mkdir -p spec-tests/fixtures/zkevm && " ++
             "echo 'Downloading " ++ zkevm_version ++ " fixtures...' && " ++
             "encoded=$(printf '%s' '" ++ zkevm_version ++ "' | sed 's/@/%40/g') && " ++
-            "curl -fL \"https://github.com/ethereum/execution-spec-tests/releases/download/${encoded}/fixtures_zkevm.tar.gz\" " ++
+            "curl -fL \"https://github.com/ethereum/execution-specs/releases/download/${encoded}/fixtures_zkevm.tar.gz\" " ++
             "| tar xz --strip-components=1 -C spec-tests/fixtures/zkevm/ && " ++
             "echo 'Done. Fixtures extracted to spec-tests/fixtures/zkevm/'",
     }).step);

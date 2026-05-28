@@ -1,12 +1,14 @@
-/// zkevm-blockchain-test-runner — runner for zkevm execution-spec-tests fixtures.
+/// zkevm-blockchain-test-runner — runner for zkevm execution-specs fixtures.
 ///
-/// Fixture format (zkevm@v0.3.2):
+/// Fixture format (zkevm@v0.4.1 — under `blockchain_tests/`):
 ///   { "test_name": { "network": "Amsterdam", "blocks": [
 ///       { "statelessInputBytes": "0x...", "statelessOutputBytes": "0x...", ... }
 ///   ] } }
 ///
 /// For each block, decodes the SSZ input, runs stateless execution, serializes
-/// the 41-byte SSZ output and asserts it matches `statelessOutputBytes`.
+/// the 105-byte SSZ output and asserts it matches `statelessOutputBytes`.
+/// (zkevm@v0.4.1's `blockchain_tests_engine/` directory uses a different JSON
+///  engine-API layout and is NOT consumed by this runner.)
 ///
 /// Usage:
 ///   zkevm-blockchain-test-runner [--fixtures DIR] [--file FILE] [-q] [-x]
@@ -187,8 +189,10 @@ fn runBlock(
     const input_bytes = try alloc.alloc(u8, in_stripped.len / 2);
     _ = try std.fmt.hexToBytes(input_bytes, in_stripped);
 
-    if (out_stripped.len != 82) return error.BadOutputLength;
-    var expected: [41]u8 = undefined;
+    // bal-devnet-7 / zkevm@v0.4.1: SszStatelessValidationResult grew from 41 to 105 bytes
+    // (SszChainConfig now embeds the full active_fork + blob_schedule).
+    if (out_stripped.len != 210) return error.BadOutputLength;
+    var expected: [105]u8 = undefined;
     _ = try std.fmt.hexToBytes(&expected, out_stripped);
 
     const si = try ssz_decode.decode(alloc, input_bytes);

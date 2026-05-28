@@ -13,7 +13,10 @@ const ssz_output = @import("ssz_output");
 const zkvm_io = @import("zkvm_io");
 
 pub const Result = struct {
-    out: [41]u8,
+    /// bal-devnet-7 / zkevm@v0.4.1: SszStatelessValidationResult is now 105 bytes
+    /// (32-byte new_payload_request_root + 1-byte success + 72-byte SszChainConfig
+    /// trailer). See ssz_output.serialize.
+    out: [105]u8,
     success: bool,
 };
 
