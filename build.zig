@@ -678,6 +678,7 @@ pub fn build(b: *std.Build) void {
         rv64_executor_mod.addImport("bytecode", rv64_bytecode_mod);
         rv64_executor_mod.addImport("database", rv64_database_mod);
         rv64_executor_mod.addImport("handler", rv64_handler_mod);
+        rv64_executor_mod.addImport("interpreter", rv64_interpreter_mod);
         rv64_executor_mod.addImport("precompile", rv64_precompile_mod);
         rv64_executor_mod.addImport("accelerators", rv64_accelerators_mod);
 
