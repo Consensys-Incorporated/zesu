@@ -232,6 +232,7 @@ pub fn build(b: *std.Build) void {
     executor_module.addImport("state", state_module);
     executor_module.addImport("bytecode", bytecode_module);
     executor_module.addImport("database", database_module);
+    executor_module.addImport("interpreter", interpreter_module);
     executor_module.addImport("handler", handler_module);
     executor_module.addImport("precompile", precompile_module);
     executor_module.addImport("accelerators", accelerators_module);
