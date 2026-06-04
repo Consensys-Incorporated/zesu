@@ -45,6 +45,7 @@ fn buildModules(
     optimize: std.builtin.OptimizeMode,
     expose: bool,
     alloc_root: std.Build.LazyPath,
+    crypto_prefix: []const u8,
 ) ModuleSet {
     const freestanding = target.result.os.tag == .freestanding;
 
@@ -79,8 +80,8 @@ fn buildModules(
         // default.zig @cImports system crypto headers (e.g. secp256k1.h). C include paths are
         // per-module and don't cross the dependency boundary, so set it on the accel_impl module
         // itself — that way dependents (and our own apps/tests) resolve the @cImport without each
-        // consumer re-adding an include path to a module they can't see.
-        const crypto_prefix = if (b.graph.host.result.os.tag == .linux) "/usr/local" else "/opt/homebrew";
+        // consumer re-adding an include path to a module they can't see. `crypto_prefix` is the
+        // caller-provided prefix (overridable via -Dcrypto-prefix; see build()).
         accel_impl.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{crypto_prefix}) });
     }
 
@@ -399,13 +400,19 @@ pub fn build(b: *std.Build) void {
 
     // ── Platform detection ────────────────────────────────────────────────────
     const is_linux = b.graph.host.result.os.tag == .linux;
-    const crypto_prefix: []const u8 = if (is_linux) "/usr/local" else "/opt/homebrew";
+    // Native crypto dependency prefix. Defaults per OS (Homebrew on macOS, /usr/local on Linux),
+    // overridable for non-default setups (e.g. Intel-mac /usr/local) without patching the build.
+    const crypto_prefix: []const u8 = b.option(
+        []const u8,
+        "crypto-prefix",
+        "Native crypto dependency prefix (default: /opt/homebrew on macOS, /usr/local on Linux)",
+    ) orelse (if (is_linux) "/usr/local" else "/opt/homebrew");
     const crypto_include = b.fmt("{s}/include", .{crypto_prefix});
     const libblst_path = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
     const libmcl_path = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
 
     // ── Module graph (exposed via addModule; backends selected by target) ──────
-    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"));
+    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix);
 
     // ── zesu binary ───────────────────────────────────────────────────────────
     const stateless_exe = b.addExecutable(.{
@@ -591,7 +598,7 @@ pub fn build(b: *std.Build) void {
             .abi = .none,
         });
 
-        const obj_mods = buildModules(b, rv64im_target, optimize, false, b.path("src/zkvm/bump_alloc.zig"));
+        const obj_mods = buildModules(b, rv64im_target, optimize, false, b.path("src/zkvm/bump_alloc.zig"), crypto_prefix);
 
         const rv64_obj = b.addObject(.{
             .name = "zesu",
