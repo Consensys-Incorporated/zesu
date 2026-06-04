@@ -408,6 +408,11 @@ pub fn build(b: *std.Build) void {
         "Native crypto dependency prefix (default: /opt/homebrew on macOS, /usr/local on Linux)",
     ) orelse (if (is_linux) "/usr/local" else "/opt/homebrew");
     const crypto_include = b.fmt("{s}/include", .{crypto_prefix});
+    // HACK: unlike secp256k1/OpenSSL (resolved via linkSystemLibrary → pkg-config/system search),
+    // mcl and blst ship no pkg-config metadata, so the linker can't locate them on its own —
+    // addCryptoLibraries hands it the static archives by explicit path. We presume both live under
+    // `<crypto_prefix>/lib` (libblst.a, libmcl.a). Assuming they share one directory is itself a bit
+    // of a hack
     const libblst_path = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
     const libmcl_path = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
 
