@@ -76,6 +76,12 @@ fn buildModules(
     });
     if (!freestanding) {
         accel_impl.addImport("zesu_allocator", zesu_allocator);
+        // default.zig @cImports system crypto headers (e.g. secp256k1.h). C include paths are
+        // per-module and don't cross the dependency boundary, so set it on the accel_impl module
+        // itself — that way dependents (and our own apps/tests) resolve the @cImport without each
+        // consumer re-adding an include path to a module they can't see.
+        const crypto_prefix = if (b.graph.host.result.os.tag == .linux) "/usr/local" else "/opt/homebrew";
+        accel_impl.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{crypto_prefix}) });
     }
 
     const accelerators = mkmod(b, expose, "accelerators", .{
