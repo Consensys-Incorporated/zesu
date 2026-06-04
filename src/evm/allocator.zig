@@ -1,13 +1,37 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
-/// Returns the allocator for zevm internal allocations.
+/// zesu_allocator — the allocator used for zesu's internal allocations.
 ///
-/// Defaults to std.heap.c_allocator for native builds.
-/// Override at build time by injecting a different "zevm_allocator" module
-/// via addImport("zevm_allocator", my_module) in your build.zig.
+/// Runtime-injectable singleton. The 268 internal `get()` call sites across the EVM
+/// and stateless modules all read this one global, so a consumer installs its
+/// allocator once at startup with `set()` and every downstream allocation observes it.
 ///
-/// The replacement module must export:
-///   pub fn get() std.mem.Allocator { ... }
+/// If never set:
+///   - native targets default to std.heap.c_allocator (zesu's own apps/tools/tests),
+///   - freestanding targets panic — a zkVM guest MUST install an allocator before use.
+///
+/// Injection happens at runtime, not build time, so the single exposed `zesu_allocator`
+/// module works for every target without rewiring the build graph. Examples:
+///   zesu_allocator.set(fixed_buffer.allocator());   // zkVM guest heap region
+///   zesu_allocator.set(arena.allocator());          // native tests
+var current: ?std.mem.Allocator = null;
+
+/// Install the allocator returned by subsequent `get()` calls.
+pub fn set(allocator: std.mem.Allocator) void {
+    current = allocator;
+}
+
 pub fn get() std.mem.Allocator {
-    return std.heap.c_allocator;
+    return current orelse defaultAllocator();
+}
+
+fn defaultAllocator() std.mem.Allocator {
+    // Explicit if/else so the comptime-known target prunes the untaken branch: on freestanding
+    // `std.heap.c_allocator` (which references libc malloc/free) is never analyzed.
+    if (builtin.target.os.tag == .freestanding) {
+        @panic("zesu allocator not set: call zesu_allocator.set() before use");
+    } else {
+        return std.heap.c_allocator;
+    }
 }

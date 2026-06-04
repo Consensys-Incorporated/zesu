@@ -50,15 +50,18 @@ Zesu produces a **relocatable rv64im ELF object** (`zesu.rv64im.o`) with all EVM
 
 Each zkVM target in [zesu-zkvm](https://github.com/consensys/zesu-zkvm) provides a host object that satisfies these references using platform-native circuits or software fallbacks, then links it against `zesu.rv64im.o` to produce the final guest binary. This decouples EVM logic from zkVM specifics at the ELF/ABI level.
 
-`core/build.zig` exposes the `"zkvm_root"` named module for freestanding targets, which wires the bump allocator, extern IO, and extern accelerator bridge automatically:
+The `zesu` package exposes its module graph via `addModule`, so consumers depend on it and pull modules by name. Backends are chosen by target: a **freestanding** target wires the bump allocator, extern IO, and the extern accelerator bridge automatically and exposes a `"zkvm_root"` module, while a **native** target wires `std.heap.c_allocator` and the native crypto backend (`default.zig`, linking secp256k1/mcl/blst/openssl). To build the object directly:
 
 ```zig
 // In zesu-zkvm/*/build.zig
+const zesu = b.dependency("zesu", .{ .target = rv64im_target, .optimize = optimize });
 const zesu_obj = b.addObject(.{
     .name = "zesu",
-    .root_module = zesu_core_dep.module("zkvm_root"),
+    .root_module = zesu.module("zkvm_root"),
 });
 ```
+
+Guests that drive execution themselves can instead import the leaf modules — e.g. `zesu.module("executor")`, `"input"`, `"mpt"`, `"rlp_decode"`, `"precompile"` — install their own allocator at startup with `zesu_allocator.set(...)`, and provide the `zkvm_*` accelerator symbols at link time.
 
 Pre-built `zesu.rv64im.o` artifacts are published as GitHub Releases so zkVM consumers can avoid a source dependency on this repo.
 
@@ -148,7 +151,7 @@ src/
     root.zig        — rv64im object root: std_options, panic, export fn main
     bump_alloc.zig  — bump allocator over ZKVM_HEAP_POS/TOP extern vars
     extern_io.zig   — read_input/write_output as C-ABI extern refs
-core/           Module library build.zig (consumed by zesu-zkvm)
+build.zig       Builds the apps/tools/tests + rv64im object; exposes the module graph via addModule
 tools/          Spec-test runners, Hive adapter, t8n tool
 spec-tests/     Downloaded execution-spec-tests fixtures (gitignored)
 ```
