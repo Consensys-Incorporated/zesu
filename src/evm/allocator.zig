@@ -15,6 +15,11 @@ const builtin = @import("builtin");
 /// module works for every target without rewiring the build graph. Examples:
 ///   zesu_allocator.set(fixed_buffer.allocator());   // zkVM guest heap region
 ///   zesu_allocator.set(arena.allocator());          // native tests
+///
+/// Lifetime: the backing allocator state (FixedBufferAllocator/arena/…) must outlive every
+///   `get()` call — in practice for the whole program/guest lifetime.
+/// Concurrency: not thread-safe. Call `set()` once at startup before spawning any threads.
+///   zkVM guests are single-threaded, so this is a non-issue there.
 var current: ?std.mem.Allocator = null;
 
 /// Install the allocator returned by subsequent `get()` calls.

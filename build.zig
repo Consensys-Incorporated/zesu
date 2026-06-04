@@ -2,7 +2,7 @@ const std = @import("std");
 
 /// The set of modules produced by `buildModules`. The exposable ones are registered
 /// via `addModule` (retrievable by dependents through `dep.module(name)`) when
-/// `expose` is true; `accel_impl`, `executor_types` and `zkvm_io` stay private.
+/// `expose` is true; `accel_impl`, `executor_types`, `zkvm_io` and `zkvm_root` stay private.
 const ModuleSet = struct {
     zesu_allocator: *std.Build.Module,
     primitives: *std.Build.Module,
@@ -27,7 +27,8 @@ const ModuleSet = struct {
     executor: *std.Build.Module,
     runner: *std.Build.Module,
     zkvm_io: *std.Build.Module,
-    /// Freestanding only: the relocatable-object root that wires runner + extern IO + allocator.
+    /// Freestanding only, private (used by the in-repo rv64im-object build): the relocatable-object
+    /// root that wires runner + extern IO + allocator and exports main().
     zkvm_root: ?*std.Build.Module,
 };
 
@@ -296,7 +297,14 @@ fn buildModules(
 
     var zkvm_root: ?*std.Build.Module = null;
     if (freestanding) {
-        const root = mkmod(b, expose, "zkvm_root", .{
+        // zkvm_root stays PRIVATE (never addModule'd). It wires the full turnkey object
+        // (runner + extern IO + allocator) and exports main(). It must NOT be exposed: the
+        // exposed graph roots `zesu_allocator` on the settable singleton, and a consumer
+        // building this as an object gets no chance to call set() before main() runs (get()
+        // would panic on a freestanding default). The turnkey object is instead produced by the
+        // `rv64im-object` step (which wires the bump allocator over ZKVM_HEAP_POS/TOP) and
+        // published as zesu.rv64im.o. Module consumers import the leaf modules and call set().
+        const root = b.createModule(.{
             .root_source_file = b.path("src/zkvm/root.zig"),
             .target = target,
             .optimize = optimize,

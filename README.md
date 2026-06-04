@@ -50,20 +50,11 @@ Zesu produces a **relocatable rv64im ELF object** (`zesu.rv64im.o`) with all EVM
 
 Each zkVM target in [zesu-zkvm](https://github.com/consensys/zesu-zkvm) provides a host object that satisfies these references using platform-native circuits or software fallbacks, then links it against `zesu.rv64im.o` to produce the final guest binary. This decouples EVM logic from zkVM specifics at the ELF/ABI level.
 
-The `zesu` package exposes its module graph via `addModule`, so consumers depend on it and pull modules by name. Backends are chosen by target: a **freestanding** target wires the bump allocator, extern IO, and the extern accelerator bridge automatically and exposes a `"zkvm_root"` module, while a **native** target wires `std.heap.c_allocator` and the native crypto backend (`default.zig`, linking secp256k1/mcl/blst/openssl). To build the object directly:
+There are two ways to consume zesu:
 
-```zig
-// In zesu-zkvm/*/build.zig
-const zesu = b.dependency("zesu", .{ .target = rv64im_target, .optimize = optimize });
-const zesu_obj = b.addObject(.{
-    .name = "zesu",
-    .root_module = zesu.module("zkvm_root"),
-});
-```
+**1. Turnkey relocatable object.** `zig build rv64im-object` produces `zig-out/lib/zesu.o`, and pre-built `zesu.rv64im.o` artifacts are published as GitHub Releases so consumers can avoid a source dependency. This object wires the bump allocator (over `ZKVM_HEAP_POS`/`ZKVM_HEAP_TOP`), extern IO, and the extern accelerator bridge — no runtime setup beyond satisfying the extern symbols above.
 
-Guests that drive execution themselves can instead import the leaf modules — e.g. `zesu.module("executor")`, `"input"`, `"mpt"`, `"rlp_decode"`, `"precompile"` — install their own allocator at startup with `zesu_allocator.set(...)`, and provide the `zkvm_*` accelerator symbols at link time.
-
-Pre-built `zesu.rv64im.o` artifacts are published as GitHub Releases so zkVM consumers can avoid a source dependency on this repo.
+**2. Module graph.** The `zesu` package exposes its modules via `addModule`, so a build script can depend on it and import modules by name — `zesu.module("executor")`, `"input"`, `"mpt"`, `"rlp_decode"`, `"precompile"`, etc. Backends are selected by target: a **freestanding** target wires the extern accelerator bridge (the `zkvm_*` symbols the host resolves at link), a **native** target wires `default.zig` (linking secp256k1/mcl/blst/openssl). The exposed `zesu_allocator` is a runtime-settable singleton, so a guest that drives execution itself **must** install an allocator once at startup with `zesu_allocator.set(...)` before any execution (a freestanding default panics if left unset) and provide the `zkvm_*` accelerator symbols at link time.
 
 ## Input formats
 
