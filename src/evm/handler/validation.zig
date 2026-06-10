@@ -16,7 +16,9 @@ fn countNonzeroBytes(data: []const u8) u64 {
         const v = w & 0x7F7F7F7F7F7F7F7F;
         nonzero += @popCount((v +% 0x7F7F7F7F7F7F7F7F | w) & 0x8080808080808080);
     }
-    for (data[i..]) |b| if (b != 0) { nonzero += 1; };
+    for (data[i..]) |b| if (b != 0) {
+        nonzero += 1;
+    };
     return nonzero;
 }
 
