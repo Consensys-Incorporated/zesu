@@ -5,6 +5,21 @@ const state = @import("state");
 const main = @import("main.zig");
 const interpreter_mod = @import("interpreter");
 
+/// Count nonzero bytes in data using SWAR (8 bytes at a time).
+/// For each byte b, (v + 0x7F) sets bit7 iff b has any low-7-bit set; OR with w
+/// catches bytes with bit7 set. No inter-byte carry since max per-byte sum = 0xFE.
+fn countNonzeroBytes(data: []const u8) u64 {
+    var nonzero: u64 = 0;
+    var i: usize = 0;
+    while (i + 8 <= data.len) : (i += 8) {
+        const w = std.mem.readInt(u64, data[i..][0..8], .little);
+        const v = w & 0x7F7F7F7F7F7F7F7F;
+        nonzero += @popCount((v +% 0x7F7F7F7F7F7F7F7F | w) & 0x8080808080808080);
+    }
+    for (data[i..]) |b| if (b != 0) { nonzero += 1; };
+    return nonzero;
+}
+
 // Gas constants for intrinsic gas calculation
 const TX_BASE_COST: u64 = 21000;
 const TX_CREATE_COST: u64 = 32000;
@@ -320,13 +335,9 @@ pub const Validation = struct {
         else
             68; // pre-EIP-2028 (Frontier through Petersburg)
         if (tx.data) |data| {
-            for (data.items) |byte| {
-                if (byte == 0) {
-                    gas += CALLDATA_ZERO_BYTE_COST;
-                } else {
-                    gas += calldata_nonzero_cost;
-                }
-            }
+            const len: u64 = @intCast(data.items.len);
+            const nonzero = countNonzeroBytes(data.items);
+            gas += (len - nonzero) * CALLDATA_ZERO_BYTE_COST + nonzero * calldata_nonzero_cost;
         }
 
         // EIP-3860 (Shanghai+): initcode word gas for CREATE transactions
@@ -460,13 +471,9 @@ pub const Validation = struct {
             if (is_amsterdam) {
                 tokens += @as(u64, data.items.len) * FLOOR_NONZERO_TOKEN_COST;
             } else {
-                for (data.items) |byte| {
-                    if (byte == 0) {
-                        tokens += FLOOR_ZERO_TOKEN_COST;
-                    } else {
-                        tokens += FLOOR_NONZERO_TOKEN_COST;
-                    }
-                }
+                const len: u64 = @intCast(data.items.len);
+                const nonzero = countNonzeroBytes(data.items);
+                tokens += (len - nonzero) * FLOOR_ZERO_TOKEN_COST + nonzero * FLOOR_NONZERO_TOKEN_COST;
             }
         }
 

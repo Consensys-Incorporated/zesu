@@ -119,6 +119,7 @@ pub const JournalVTable = struct {
     accountInfo: *const fn (*anyopaque, primitives.Address) anyerror!context_mod.AccountInfoLoad,
     loadAccountWithCode: *const fn (*anyopaque, primitives.Address) anyerror!context_mod.StateLoad(*const state_mod.Account),
     sload: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) anyerror!context_mod.StateLoad(primitives.StorageValue),
+    sloadSkipColdLoad: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) anyerror!context_mod.StateLoad(primitives.StorageValue),
     sstore: *const fn (*anyopaque, primitives.Address, primitives.StorageKey, primitives.StorageValue) anyerror!context_mod.StateLoad(context_mod.SStoreResult),
     tload: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) primitives.StorageValue,
     tstore: *const fn (*anyopaque, primitives.Address, primitives.StorageKey, primitives.StorageValue) void,
@@ -142,6 +143,7 @@ pub const JournalVTable = struct {
                 .accountInfo = accountInfoFn,
                 .loadAccountWithCode = loadAccountWithCodeFn,
                 .sload = sloadFn,
+                .sloadSkipColdLoad = sloadSkipColdLoadFn,
                 .sstore = sstoreFn,
                 .tload = tloadFn,
                 .tstore = tstoreFn,
@@ -175,6 +177,9 @@ pub const JournalVTable = struct {
             }
             fn sloadFn(ptr: *anyopaque, addr: primitives.Address, key: primitives.StorageKey) anyerror!context_mod.StateLoad(primitives.StorageValue) {
                 return j(ptr).sload(addr, key);
+            }
+            fn sloadSkipColdLoadFn(ptr: *anyopaque, addr: primitives.Address, key: primitives.StorageKey) anyerror!context_mod.StateLoad(primitives.StorageValue) {
+                return j(ptr).sloadSkipColdLoad(addr, key, true);
             }
             fn sstoreFn(ptr: *anyopaque, addr: primitives.Address, key: primitives.StorageKey, val: primitives.StorageValue) anyerror!context_mod.StateLoad(context_mod.SStoreResult) {
                 return j(ptr).sstore(addr, key, val);
@@ -228,17 +233,30 @@ pub const Host = struct {
     js_vtable: *const JournalVTable,
     /// Precompile set for the current spec. Null disables precompile dispatch (benchmarks/unit tests).
     precompiles: ?*const precompile_mod.Precompiles = null,
+    // Direct pointers to the 4 hottest vtable entries — saves one indirection on every
+    // EIP-2929 access check and SLOAD/SSTORE. Set from js_vtable at init time.
+    _is_address_cold: *const fn (*anyopaque, primitives.Address) bool = undefined,
+    _is_storage_cold: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) bool = undefined,
+    _sload: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) anyerror!context_mod.StateLoad(primitives.StorageValue) = undefined,
+    _sload_skip_cold: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) anyerror!context_mod.StateLoad(primitives.StorageValue) = undefined,
+    _sstore: *const fn (*anyopaque, primitives.Address, primitives.StorageKey, primitives.StorageValue) anyerror!context_mod.StateLoad(context_mod.SStoreResult) = undefined,
 
     /// Create a Host from any Context(DB). DB is resolved at comptime.
     pub fn init(comptime DB: type, ctx: *context_mod.Context(DB), prec: ?*const precompile_mod.Precompiles) Host {
+        const vtable = JournalVTable.forDb(DB);
         return .{
             .block = &ctx.block,
             .tx = &ctx.tx,
             .cfg = &ctx.cfg,
             .ctx_error = &ctx.ctx_error,
             .js = &ctx.journaled_state,
-            .js_vtable = JournalVTable.forDb(DB),
+            .js_vtable = vtable,
             .precompiles = prec,
+            ._is_address_cold = vtable.isAddressCold,
+            ._is_storage_cold = vtable.isStorageCold,
+            ._sload = vtable.sload,
+            ._sload_skip_cold = vtable.sloadSkipColdLoad,
+            ._sstore = vtable.sstore,
         };
     }
 
@@ -328,12 +346,12 @@ pub const Host = struct {
 
     /// Check whether an address is cold WITHOUT loading it from the database.
     pub fn isAddressCold(self: *Host, addr: primitives.Address) bool {
-        return self.js_vtable.isAddressCold(self.js, addr);
+        return self._is_address_cold(self.js, addr);
     }
 
     /// Check whether a storage slot is cold WITHOUT loading it from the database.
     pub fn isStorageCold(self: *Host, addr: primitives.Address, key: primitives.StorageKey) bool {
-        return self.js_vtable.isStorageCold(self.js, addr, key);
+        return self._is_storage_cold(self.js, addr, key);
     }
 
     /// Check whether an address is already in the EVM state cache.
@@ -384,12 +402,12 @@ pub const Host = struct {
     }
 
     pub fn sload(self: *Host, addr: primitives.Address, key: primitives.U256) ?struct { value: primitives.U256, is_cold: bool } {
-        const load = self.js_vtable.sload(self.js, addr, key) catch return null;
+        const load = self._sload(self.js, addr, key) catch return null;
         return .{ .value = load.data, .is_cold = load.is_cold };
     }
 
     pub fn sstore(self: *Host, addr: primitives.Address, key: primitives.U256, val: primitives.U256) ?struct { original: primitives.U256, current: primitives.U256, new: primitives.U256, is_cold: bool } {
-        const result = self.js_vtable.sstore(self.js, addr, key, val) catch return null;
+        const result = self._sstore(self.js, addr, key, val) catch return null;
         return .{
             .original = result.data.original_value,
             .current = result.data.present_value,

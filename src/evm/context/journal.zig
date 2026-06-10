@@ -361,6 +361,9 @@ pub const TransferError = error{
 /// Journal load error
 pub const JournalLoadError = error{
     ColdLoadSkipped,
+    /// Slot is not yet loaded from DB and is pre-warmed via EIP-2930 access list.
+    /// Caller should charge WARM_SLOAD cost then call sload normally.
+    WarmPreloadSkipped,
     DatabaseError,
 };
 
@@ -1304,7 +1307,11 @@ pub const JournalInner = struct {
         } else {
             // Storage slot not yet loaded — fetch from DB
             if (skip_cold_load) {
-                return JournalLoadError.ColdLoadSkipped;
+                // Distinguish pre-warmed (EIP-2930) from truly cold for gas charging.
+                return if (self.warm_addresses.isStorageWarm(address, key))
+                    JournalLoadError.WarmPreloadSkipped
+                else
+                    JournalLoadError.ColdLoadSkipped;
             }
             // For newly-created accounts all storage is implicitly zero (no DB lookup needed).
             const value = if (is_newly_created) @as(primitives.StorageValue, 0) else try db.storage(address, key);
