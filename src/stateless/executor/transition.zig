@@ -1417,9 +1417,11 @@ fn extractPostState(
             acct.code = &.{};
         }
 
-        // Update storage: merge pre-state slots with journal modifications.
-        // In delta mode (pre_storage_root != null) keep zero values as deletion markers
-        // so computeStorageRoot() can apply the MPT delete operation.
+        // Update storage: emit block-level changes only.
+        // Only slots whose present_value differs from pre_block_value (the value at first
+        // DB load this block) need to appear in the MPT delta. Read-only slots and
+        // net-zero writes are skipped; this eliminates the bulk of batchUpdateIndexed work.
+        // fresh_storage (newly created / storage_wiped): all storage is new, use as-is.
         var stor_it = account.storage.iterator();
         while (stor_it.next()) |slot| {
             const key = slot.key_ptr.*;
@@ -1428,16 +1430,19 @@ fn extractPostState(
             if (slot.value_ptr.*.was_written) {
                 acct.written_storage.put(arena, key, {}) catch {};
             }
-            if (present == 0) {
-                if (!fresh_storage) {
-                    // Existing account: keep zero as a deletion marker for computeStateRootDelta.
-                    // Works for both stateful (pre_storage_root set) and stateless (pre_alloc empty).
-                    try acct.storage.put(arena, key, 0);
-                } else {
-                    _ = acct.storage.remove(key);
-                }
-            } else {
+            if (!fresh_storage) {
+                // Skip slots unchanged vs. block start — no MPT update needed.
+                const pre_block = slot.value_ptr.*.pre_block_value;
+                if (present == pre_block) continue;
+                // Emit deletion marker if slot existed before and is now zero.
+                // Emit updated value otherwise.
                 try acct.storage.put(arena, key, present);
+            } else {
+                if (present == 0) {
+                    _ = acct.storage.remove(key);
+                } else {
+                    try acct.storage.put(arena, key, present);
+                }
             }
         }
 
