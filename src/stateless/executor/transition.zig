@@ -140,10 +140,16 @@ const BaTracker = struct {
 
     fn detectAndRecord(self: *BaTracker, bai: u64, ctx: anytype) void {
         const a = self.alloc;
+        // For bai > 0, skip accounts not touched in the just-committed tx: their state
+        // hasn't changed since the last detectAndRecord call, so nothing new to record.
+        const tx_id = ctx.journaled_state.inner.transaction_id;
+        const last_tx_id: usize = if (tx_id > 0) tx_id - 1 else 0;
+        const filter_by_tx = bai > 0;
         var it = ctx.journaled_state.inner.evm_state.iterator();
         while (it.next()) |e| {
             const addr = e.key_ptr.*;
             const acct = e.value_ptr.*;
+            if (filter_by_tx and acct.transaction_id != last_tx_id) continue;
             if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
 
             // Same-tx-created-and-selfdestructed (ephemeral) account: per EIP-7928 spec's
@@ -267,11 +273,12 @@ const BaTracker = struct {
             }
         }
 
-        // Update committed state to current evm_state
+        // Update committed state to current evm_state (only accounts touched this tx).
         var it2 = ctx.journaled_state.inner.evm_state.iterator();
         while (it2.next()) |e| {
             const addr = e.key_ptr.*;
             const acct = e.value_ptr.*;
+            if (filter_by_tx and acct.transaction_id != last_tx_id) continue;
             if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
             // Selfdestructed accounts: nonce/code/storage are gone. Commit the live balance
             // (which may be non-zero if ETH arrived after the SELFDESTRUCT opcode) so that
