@@ -53,6 +53,7 @@ jobs:
           if-no-files-found: error
 
       - name: Create draft GitHub Release
+        if: ${{ !env.ACT }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.version }}
