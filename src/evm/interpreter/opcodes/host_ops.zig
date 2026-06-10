@@ -306,13 +306,38 @@ pub fn opSload(ctx: *InstructionContext) void {
     const self_addr = ctx.interpreter.input.target;
     const spec = ctx.interpreter.runtime_flags.spec_id;
 
-    // Dynamic gas for Berlin+ (static_gas is 0 for Berlin+).
-    // Charge BEFORE loading to avoid a DB read on OOG (EIP-7928 BAL correctness).
+    // Berlin+: combined warm-path probe — avoids double map lookup for already-loaded warm slots.
+    // Three outcomes:
+    //   warm value  → charge WARM_SLOAD, return (1 probe total, no fallthrough)
+    //   WarmPreload → slot pre-warmed via EIP-2930 but not in storage; charge WARM_SLOAD, fallthrough to sload
+    //   ColdLoad    → slot cold; charge COLD_SLOAD before DB fetch, fallthrough to sload
     if (primitives.isEnabledIn(spec, .berlin)) {
-        const dyn_gas: u64 = if (h.isStorageCold(self_addr, key)) gas_costs.COLD_SLOAD else gas_costs.WARM_SLOAD;
-        if (!ctx.interpreter.gas.spend(dyn_gas)) {
-            ctx.interpreter.halt(.out_of_gas);
+        if (h._sload_skip_cold(h.js, self_addr, key)) |warm_result| {
+            // Already-loaded warm slot: gas charged after (no DB access occurred).
+            if (!ctx.interpreter.gas.spend(gas_costs.WARM_SLOAD)) {
+                ctx.interpreter.halt(.out_of_gas);
+                return;
+            }
+            stack.setTopUnsafe().* = warm_result.data;
             return;
+        } else |err| switch (err) {
+            error.WarmPreloadSkipped => {
+                if (!ctx.interpreter.gas.spend(gas_costs.WARM_SLOAD)) {
+                    ctx.interpreter.halt(.out_of_gas);
+                    return;
+                }
+            },
+            error.ColdLoadSkipped => {
+                // Charge before DB access (EIP-7928 no-phantom-BAL ordering).
+                if (!ctx.interpreter.gas.spend(gas_costs.COLD_SLOAD)) {
+                    ctx.interpreter.halt(.out_of_gas);
+                    return;
+                }
+            },
+            else => {
+                ctx.interpreter.halt(.invalid_opcode);
+                return;
+            },
         }
     }
 

@@ -42,16 +42,19 @@ pub const WitnessDatabase = struct {
     node_index: *const mpt.NodeIndex,
     pre_state_root: primitives.Hash,
     /// Witness bytecodes indexed by keccak256(code) for O(1) lookup.
-    witness_codes: std.AutoHashMap(primitives.Hash, []const u8),
+    witness_codes: primitives.HashToValue([]const u8),
     block_hashes: []const types.BlockHashEntry,
     /// Bytecodes deployed by CREATE in the current block, keyed by code hash.
     /// EIP-8025: verifier derives these from execution, so they need not be in the witness.
-    deployed_codes: std.AutoHashMap(primitives.Hash, bytecode.Bytecode),
+    deployed_codes: primitives.HashToValue(bytecode.Bytecode),
+    /// Cache of analyzed Bytecode keyed by code hash — amortizes JUMPDEST analysis
+    /// across repeated lookups of the same contract code within a block.
+    analyzed_codes: primitives.HashToValue(bytecode.Bytecode),
     /// Cache of address → storage_root populated by basic() during execution.
     /// Eliminates redundant account trie walks in storage() and in the post-execution
     /// batch update (storageRootFor). Accounts absent from pre-state are cached as
     /// EMPTY_TRIE_HASH so the batch output phase skips verifyAccountIndexed for them.
-    storage_root_cache: std.AutoHashMap(primitives.Address, primitives.Hash),
+    storage_root_cache: primitives.AddressToValue(primitives.Hash),
 
     const Self = @This();
 
@@ -62,7 +65,7 @@ pub const WitnessDatabase = struct {
         codes: []const []const u8,
         block_hashes: []const types.BlockHashEntry,
     ) !Self {
-        var witness_codes = std.AutoHashMap(primitives.Hash, []const u8).init(alloc);
+        var witness_codes = primitives.HashToValue([]const u8).init(alloc);
         try witness_codes.ensureTotalCapacity(@intCast(codes.len));
         for (codes) |code_bytes| {
             const h = mpt.keccak256(code_bytes);
@@ -73,14 +76,16 @@ pub const WitnessDatabase = struct {
             .pre_state_root = pre_state_root,
             .witness_codes = witness_codes,
             .block_hashes = block_hashes,
-            .deployed_codes = std.AutoHashMap(primitives.Hash, bytecode.Bytecode).init(alloc),
-            .storage_root_cache = std.AutoHashMap(primitives.Address, primitives.Hash).init(alloc),
+            .deployed_codes = primitives.HashToValue(bytecode.Bytecode).init(alloc),
+            .analyzed_codes = primitives.HashToValue(bytecode.Bytecode).init(alloc),
+            .storage_root_cache = primitives.AddressToValue(primitives.Hash).init(alloc),
         };
     }
 
     pub fn deinit(self: *Self) void {
         self.witness_codes.deinit();
         self.deployed_codes.deinit();
+        self.analyzed_codes.deinit();
         self.storage_root_cache.deinit();
     }
 
@@ -124,15 +129,18 @@ pub const WitnessDatabase = struct {
         if (std.mem.eql(u8, &code_hash, &primitives.KECCAK_EMPTY)) {
             return bytecode.Bytecode.newLegacy(&.{});
         }
+        // Fast path: return already-analyzed bytecode (amortizes JUMPDEST analysis).
+        if (self.analyzed_codes.get(code_hash)) |cached| return cached;
         if (self.witness_codes.get(code_hash)) |code_bytes| {
             // Detect EIP-7702 delegation pointer: 0xEF 0x01 0x00 + 20-byte address (23 bytes total).
             // Must return Bytecode.eip7702 so that setupCall detects it and loads the delegation target.
-            if (code_bytes.len == 23 and code_bytes[0] == 0xEF and code_bytes[1] == 0x01 and code_bytes[2] == 0x00) {
+            const bc = if (code_bytes.len == 23 and code_bytes[0] == 0xEF and code_bytes[1] == 0x01 and code_bytes[2] == 0x00) blk: {
                 var delegation_addr: primitives.Address = [_]u8{0} ** 20;
                 @memcpy(&delegation_addr, code_bytes[3..23]);
-                return bytecode.Bytecode{ .eip7702 = bytecode.Eip7702Bytecode.new(delegation_addr) };
-            }
-            return bytecode.Bytecode.newLegacy(code_bytes);
+                break :blk bytecode.Bytecode{ .eip7702 = bytecode.Eip7702Bytecode.new(delegation_addr) };
+            } else bytecode.Bytecode.newLegacy(code_bytes);
+            self.analyzed_codes.put(code_hash, bc) catch {};
+            return bc;
         }
         if (self.deployed_codes.get(code_hash)) |code| return code;
         return DbError.InvalidWitness;

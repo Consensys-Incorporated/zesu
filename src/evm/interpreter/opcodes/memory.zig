@@ -51,9 +51,12 @@ pub fn opMload(ctx: *InstructionContext) void {
     const offset_usize: usize = @intCast(offset);
     const new_size = offset_usize + 32;
 
-    if (!expandMemory(ctx, new_size)) {
-        ctx.interpreter.halt(.out_of_gas);
-        return;
+    // Fast path: skip expansion logic when already in bounds.
+    if (new_size > ctx.interpreter.memory.size()) {
+        if (!expandMemory(ctx, new_size)) {
+            ctx.interpreter.halt(.out_of_gas);
+            return;
+        }
     }
 
     const U = primitives.U256;
@@ -87,9 +90,12 @@ pub fn opMstore(ctx: *InstructionContext) void {
     const offset_usize: usize = @intCast(offset);
     const new_size = offset_usize + 32;
 
-    if (!expandMemory(ctx, new_size)) {
-        ctx.interpreter.halt(.out_of_gas);
-        return;
+    // Fast path: skip expansion logic when already in bounds.
+    if (new_size > ctx.interpreter.memory.size()) {
+        if (!expandMemory(ctx, new_size)) {
+            ctx.interpreter.halt(.out_of_gas);
+            return;
+        }
     }
 
     const dest = ctx.interpreter.memory.buffer.items[offset_usize..][0..32];

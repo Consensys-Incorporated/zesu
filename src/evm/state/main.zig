@@ -325,6 +325,9 @@ pub const EvmStorageSlot = struct {
     original_value: primitives.StorageValue,
     /// Present value of the storage slot
     present_value: primitives.StorageValue,
+    /// Value at first DB load this block — never reset by commitTx.
+    /// Used by extractPostState to emit only block-level changed slots.
+    pre_block_value: primitives.StorageValue,
     /// Transaction id, used to track when storage slot was made warm.
     transaction_id: usize,
     /// Represents if the storage slot is cold
@@ -341,6 +344,7 @@ pub const EvmStorageSlot = struct {
         return Self{
             .original_value = original,
             .present_value = original,
+            .pre_block_value = original,
             .transaction_id = transaction_id,
             .is_cold = false,
             .was_written = false,
@@ -352,6 +356,7 @@ pub const EvmStorageSlot = struct {
         return Self{
             .original_value = original_value,
             .present_value = present_value,
+            .pre_block_value = original_value,
             .transaction_id = transaction_id,
             .is_cold = false,
             .was_written = false,

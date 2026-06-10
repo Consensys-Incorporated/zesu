@@ -21,7 +21,7 @@ fn sha2(a: [32]u8, b: [32]u8) [32]u8 {
     @memcpy(buf[0..32], &a);
     @memcpy(buf[32..64], &b);
     var out: [32]u8 = undefined;
-    accel.sha256(&buf, &out);
+    accel.sha256_64(&buf, &out);
     return out;
 }
 
@@ -33,13 +33,21 @@ fn sha2Bytes(data: []const u8) [32]u8 {
 
 // ── Zero hash tree ────────────────────────────────────────────────────────────
 
-/// z[k] = sha256(z[k-1] || z[k-1]), z[0] = 0x00*32.
-/// Depth up to 25 covers all Amsterdam SSZ list limits.
+// z[k] = sha256(z[k-1] || z[k-1]), z[0] = 0x00*32.
+// Depth 0..25 covers all Amsterdam SSZ list limits (depth 25 is the largest: ByteList[2^30]).
+// Lazily initialized on first call because accel.sha256 is a runtime syscall.
+var zero_hashes: [26][32]u8 = undefined;
+var zero_hashes_ready: bool = false;
+
+fn initZeroHashes() void {
+    zero_hashes[0] = [_]u8{0} ** 32;
+    for (1..26) |i| zero_hashes[i] = sha2(zero_hashes[i - 1], zero_hashes[i - 1]);
+    zero_hashes_ready = true;
+}
+
 fn zeroHash(depth: u8) [32]u8 {
-    var h: [32]u8 = [_]u8{0} ** 32;
-    var i: u8 = 0;
-    while (i < depth) : (i += 1) h = sha2(h, h);
-    return h;
+    if (!zero_hashes_ready) initZeroHashes();
+    return zero_hashes[depth];
 }
 
 // ── mix_in_length ─────────────────────────────────────────────────────────────

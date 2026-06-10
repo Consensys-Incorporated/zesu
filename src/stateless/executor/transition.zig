@@ -140,10 +140,16 @@ const BaTracker = struct {
 
     fn detectAndRecord(self: *BaTracker, bai: u64, ctx: anytype) void {
         const a = self.alloc;
+        // For bai > 0, skip accounts not touched in the just-committed tx: their state
+        // hasn't changed since the last detectAndRecord call, so nothing new to record.
+        const tx_id = ctx.journaled_state.inner.transaction_id;
+        const last_tx_id: usize = if (tx_id > 0) tx_id - 1 else 0;
+        const filter_by_tx = bai > 0;
         var it = ctx.journaled_state.inner.evm_state.iterator();
         while (it.next()) |e| {
             const addr = e.key_ptr.*;
             const acct = e.value_ptr.*;
+            if (filter_by_tx and acct.transaction_id != last_tx_id) continue;
             if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
 
             // Same-tx-created-and-selfdestructed (ephemeral) account: per EIP-7928 spec's
@@ -267,11 +273,12 @@ const BaTracker = struct {
             }
         }
 
-        // Update committed state to current evm_state
+        // Update committed state to current evm_state (only accounts touched this tx).
         var it2 = ctx.journaled_state.inner.evm_state.iterator();
         while (it2.next()) |e| {
             const addr = e.key_ptr.*;
             const acct = e.value_ptr.*;
+            if (filter_by_tx and acct.transaction_id != last_tx_id) continue;
             if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
             // Selfdestructed accounts: nonce/code/storage are gone. Commit the live balance
             // (which may be non-zero if ETH arrived after the SELFDESTRUCT opcode) so that
@@ -1104,7 +1111,6 @@ pub fn transitionWithContext(
             for (log.topics, 0..) |t, ti| topics[ti] = t;
 
             bloom.addLog(&receipt_bloom, log.address, log.topics);
-            bloom.merge(&block_bloom, receipt_bloom);
 
             try receipt_logs.append(arena, Log{
                 .address = log.address,
@@ -1119,6 +1125,7 @@ pub fn transitionWithContext(
             });
             log_index_global += 1;
         }
+        bloom.merge(&block_bloom, &receipt_bloom);
         _ = logs_start;
 
         // Blob gas accumulation (limit checks were done pre-execution in 1e).
@@ -1417,9 +1424,11 @@ fn extractPostState(
             acct.code = &.{};
         }
 
-        // Update storage: merge pre-state slots with journal modifications.
-        // In delta mode (pre_storage_root != null) keep zero values as deletion markers
-        // so computeStorageRoot() can apply the MPT delete operation.
+        // Update storage: emit block-level changes only.
+        // Only slots whose present_value differs from pre_block_value (the value at first
+        // DB load this block) need to appear in the MPT delta. Read-only slots and
+        // net-zero writes are skipped; this eliminates the bulk of batchUpdateIndexed work.
+        // fresh_storage (newly created / storage_wiped): all storage is new, use as-is.
         var stor_it = account.storage.iterator();
         while (stor_it.next()) |slot| {
             const key = slot.key_ptr.*;
@@ -1428,16 +1437,19 @@ fn extractPostState(
             if (slot.value_ptr.*.was_written) {
                 acct.written_storage.put(arena, key, {}) catch {};
             }
-            if (present == 0) {
-                if (!fresh_storage) {
-                    // Existing account: keep zero as a deletion marker for computeStateRootDelta.
-                    // Works for both stateful (pre_storage_root set) and stateless (pre_alloc empty).
-                    try acct.storage.put(arena, key, 0);
-                } else {
-                    _ = acct.storage.remove(key);
-                }
-            } else {
+            if (!fresh_storage) {
+                // Skip slots unchanged vs. block start — no MPT update needed.
+                const pre_block = slot.value_ptr.*.pre_block_value;
+                if (present == pre_block) continue;
+                // Emit deletion marker if slot existed before and is now zero.
+                // Emit updated value otherwise.
                 try acct.storage.put(arena, key, present);
+            } else {
+                if (present == 0) {
+                    _ = acct.storage.remove(key);
+                } else {
+                    try acct.storage.put(arena, key, present);
+                }
             }
         }
 

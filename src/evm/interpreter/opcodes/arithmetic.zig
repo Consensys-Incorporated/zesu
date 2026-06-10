@@ -2,6 +2,7 @@ const std = @import("std");
 const primitives = @import("primitives");
 const InstructionContext = @import("../instruction_context.zig").InstructionContext;
 const gas_costs = @import("../gas_costs.zig");
+const accel = @import("accelerators");
 
 /// ADD opcode (0x01): a + b (wrapping mod 2^256)
 /// Stack: [a, b] -> [a + b]   Static gas: 3 (VERYLOW, charged by dispatch)
@@ -56,7 +57,14 @@ pub fn opDiv(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = if (b != 0) a / b else 0;
+    if (b == 0) {
+        stack.setTopUnsafe().* = 0;
+        return;
+    }
+    var q: u256 = undefined;
+    var r: u256 = undefined;
+    if (!accel.udivrem256(a, b, &q, &r)) q = a / b;
+    stack.setTopUnsafe().* = q;
 }
 
 /// SDIV opcode (0x05): a / b (signed, division by zero returns 0)
@@ -84,7 +92,14 @@ pub fn opMod(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = if (b != 0) a % b else 0;
+    if (b == 0) {
+        stack.setTopUnsafe().* = 0;
+        return;
+    }
+    var q: u256 = undefined;
+    var r: u256 = undefined;
+    if (!accel.udivrem256(a, b, &q, &r)) r = a % b;
+    stack.setTopUnsafe().* = r;
 }
 
 /// SMOD opcode (0x07): a % b (signed, mod by zero returns 0)
@@ -506,10 +521,12 @@ pub fn sdiv(a: primitives.U256, b: primitives.U256) primitives.U256 {
     const abs_a = if (a_negative) (~a) +% 1 else a;
     const abs_b = if (b_negative) (~b) +% 1 else b;
 
-    const abs_result = abs_a / abs_b;
+    var q: primitives.U256 = undefined;
+    var r: primitives.U256 = undefined;
+    if (!accel.udivrem256(abs_a, abs_b, &q, &r)) q = abs_a / abs_b;
 
     const result_negative = a_negative != b_negative;
-    return if (result_negative) (~abs_result) +% 1 else abs_result;
+    return if (result_negative) (~q) +% 1 else q;
 }
 
 /// Signed modulo: a % b in two's complement.
@@ -525,9 +542,11 @@ pub fn smod(a: primitives.U256, b: primitives.U256) primitives.U256 {
     const abs_a = if (a_negative) (~a) +% 1 else a;
     const abs_b = if (b_negative) (~b) +% 1 else b;
 
-    const abs_result = abs_a % abs_b;
+    var q: primitives.U256 = undefined;
+    var r: primitives.U256 = undefined;
+    if (!accel.udivrem256(abs_a, abs_b, &q, &r)) r = abs_a % abs_b;
 
-    return if (a_negative) (~abs_result) +% 1 else abs_result;
+    return if (a_negative) (~r) +% 1 else r;
 }
 
 /// Sign extend value from byte position.

@@ -306,6 +306,40 @@ pub fn formatSpecId(spec_id: SpecId, writer: *std.Io.Writer) std.Io.Writer.Error
     try writer.writeAll(specIdToString(spec_id));
 }
 
+/// Hash map context for Hash ([32]u8) keys that are already keccak256 outputs.
+/// Reads the first 8 bytes as a u64 instead of running Wyhash over all 32 bytes.
+/// Do NOT use for keys that may be attacker-controlled (e.g. StorageKey / U256).
+pub const HashContext = struct {
+    pub fn hash(_: HashContext, k: Hash) u64 {
+        return std.mem.readInt(u64, k[0..8], .little);
+    }
+    pub fn eql(_: HashContext, a: Hash, b: Hash) bool {
+        return std.mem.eql(u8, &a, &b);
+    }
+};
+
+/// Hash map context for Address ([20]u8) keys.
+/// Ethereum addresses are derived from keccak256, so the first 8 bytes are pseudo-random.
+/// Do NOT use for keys that may be attacker-controlled.
+pub const AddressContext = struct {
+    pub fn hash(_: AddressContext, k: Address) u64 {
+        return std.mem.readInt(u64, k[0..8], .little);
+    }
+    pub fn eql(_: AddressContext, a: Address, b: Address) bool {
+        return std.mem.eql(u8, &a, &b);
+    }
+};
+
+/// HashMap with cheap hash for [32]u8 keccak-output keys.
+pub fn HashToValue(comptime V: type) type {
+    return std.HashMap(Hash, V, HashContext, 80);
+}
+
+/// HashMap with cheap hash for [20]u8 address keys.
+pub fn AddressToValue(comptime V: type) type {
+    return std.HashMap(Address, V, AddressContext, 80);
+}
+
 /// Test module for primitives
 pub const testing = struct {
     pub fn testShortAddress() !void {
