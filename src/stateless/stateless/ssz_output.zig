@@ -21,7 +21,7 @@ fn sha2(a: [32]u8, b: [32]u8) [32]u8 {
     @memcpy(buf[0..32], &a);
     @memcpy(buf[32..64], &b);
     var out: [32]u8 = undefined;
-    accel.sha256_64(&buf, &out);
+    accel.sha256(&buf, &out);
     return out;
 }
 

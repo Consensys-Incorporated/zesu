@@ -180,14 +180,3 @@ pub inline fn udivrem256(a: u256, b: u256, q: *u256, r: *u256) bool {
     impl.udivrem256(a, b, q, r);
     return true;
 }
-
-/// SHA-256 of exactly 64 bytes. Uses a specialized fast path when available
-/// (two sha256Compress calls with a constant padding block — no generic padding overhead).
-/// Falls back to the generic sha256 path when sha256_64 is not implemented.
-pub inline fn sha256_64(data: *const [64]u8, output: *Hash32) void {
-    if (@hasDecl(impl, "sha256_64")) {
-        impl.sha256_64(data, output);
-    } else {
-        impl.sha256(data, output);
-    }
-}
