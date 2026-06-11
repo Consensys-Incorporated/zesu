@@ -598,7 +598,7 @@ pub fn build(b: *std.Build) void {
             .cpu_arch = .riscv64,
             .cpu_model = .{ .explicit = &std.Target.riscv.cpu.baseline_rv64 },
             .cpu_features_add = std.Target.riscv.featureSet(&.{ .m, .zicclsm }),
-            .cpu_features_sub = std.Target.riscv.featureSet(&.{ .a, .c, .d, .f, .zicsr, .zaamo, .zalrsc }),
+            .cpu_features_sub = std.Target.riscv.featureSet(&.{ .a, .c, .zca, .zcb, .d, .f, .zicsr, .zaamo, .zalrsc }),
             .os_tag = .freestanding,
             .abi = .none,
         });
