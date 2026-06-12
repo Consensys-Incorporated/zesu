@@ -594,9 +594,15 @@ fn runDispatch(
         },
         0x01 => { // ADD
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(2)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const a = stack.peekUnsafe(0);
             const b = stack.peekUnsafe(1);
             stack.shrinkUnsafe(1);
@@ -606,9 +612,15 @@ fn runDispatch(
         },
         0x02 => { // MUL
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_LOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_LOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(2)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const a = stack.peekUnsafe(0);
             const b = stack.peekUnsafe(1);
             stack.shrinkUnsafe(1);
@@ -618,9 +630,15 @@ fn runDispatch(
         },
         0x03 => { // SUB
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(2)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const a = stack.peekUnsafe(0);
             const b = stack.peekUnsafe(1);
             stack.shrinkUnsafe(1);
@@ -630,9 +648,15 @@ fn runDispatch(
         },
         0x10 => { // LT
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(2)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const a = stack.peekUnsafe(0);
             const b = stack.peekUnsafe(1);
             stack.shrinkUnsafe(1);
@@ -642,9 +666,15 @@ fn runDispatch(
         },
         0x11 => { // GT
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(2)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const a = stack.peekUnsafe(0);
             const b = stack.peekUnsafe(1);
             stack.shrinkUnsafe(1);
@@ -654,9 +684,15 @@ fn runDispatch(
         },
         0x14 => { // EQ
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(2)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const a = stack.peekUnsafe(0);
             const b = stack.peekUnsafe(1);
             stack.shrinkUnsafe(1);
@@ -666,9 +702,15 @@ fn runDispatch(
         },
         0x15 => { // ISZERO
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(1)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(1)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const ptr = stack.setTopUnsafe();
             ptr.* = if (ptr.* == 0) 1 else 0;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
@@ -676,9 +718,15 @@ fn runDispatch(
         },
         0x16 => { // AND
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(2)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const a = stack.peekUnsafe(0);
             const b = stack.peekUnsafe(1);
             stack.shrinkUnsafe(1);
@@ -688,9 +736,15 @@ fn runDispatch(
         },
         0x17 => { // OR
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(2)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const a = stack.peekUnsafe(0);
             const b = stack.peekUnsafe(1);
             stack.shrinkUnsafe(1);
@@ -700,9 +754,15 @@ fn runDispatch(
         },
         0x18 => { // XOR
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(2)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const a = stack.peekUnsafe(0);
             const b = stack.peekUnsafe(1);
             stack.shrinkUnsafe(1);
@@ -712,9 +772,15 @@ fn runDispatch(
         },
         0x19 => { // NOT
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(1)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(1)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const ptr = stack.setTopUnsafe();
             ptr.* = ~ptr.*;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
@@ -722,9 +788,15 @@ fn runDispatch(
         },
         0x1B => { // SHL
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(2)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const shift = stack.peekUnsafe(0);
             const value = stack.peekUnsafe(1);
             stack.shrinkUnsafe(1);
@@ -734,9 +806,15 @@ fn runDispatch(
         },
         0x1C => { // SHR
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(2)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const shift = stack.peekUnsafe(0);
             const value = stack.peekUnsafe(1);
             stack.shrinkUnsafe(1);
@@ -746,38 +824,68 @@ fn runDispatch(
         },
         0x50 => { // POP
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_BASE)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_BASE)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(1)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(1)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             stack.shrinkUnsafe(1);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x56 => { // JUMP
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_MID)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_MID)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(1)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(1)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const dest = stack.popUnsafe();
-            if (dest > std.math.maxInt(usize)) { self.halt(.invalid_jump); return; }
+            if (dest > std.math.maxInt(usize)) {
+                self.halt(.invalid_jump);
+                return;
+            }
             const dest_usize: usize = @intCast(dest);
-            if (!self.bytecode.isValidJump(dest_usize)) { self.halt(.invalid_jump); return; }
+            if (!self.bytecode.isValidJump(dest_usize)) {
+                self.halt(.invalid_jump);
+                return;
+            }
             self.bytecode.absoluteJump(dest_usize);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x57 => { // JUMPI
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_HIGH)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_HIGH)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(2)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             const dest = stack.peekUnsafe(0);
             const cond = stack.peekUnsafe(1);
             stack.shrinkUnsafe(2);
             if (cond != 0) {
-                if (dest > std.math.maxInt(usize)) { self.halt(.invalid_jump); return; }
+                if (dest > std.math.maxInt(usize)) {
+                    self.halt(.invalid_jump);
+                    return;
+                }
                 const dest_usize: usize = @intCast(dest);
-                if (!self.bytecode.isValidJump(dest_usize)) { self.halt(.invalid_jump); return; }
+                if (!self.bytecode.isValidJump(dest_usize)) {
+                    self.halt(.invalid_jump);
+                    return;
+                }
                 self.bytecode.absoluteJump(dest_usize);
             }
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
@@ -785,15 +893,24 @@ fn runDispatch(
         },
         0x5B => { // JUMPDEST
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_JUMPDEST)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_JUMPDEST)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x5F => { // PUSH0
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_BASE)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_BASE)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasSpace(1)) { self.halt(.stack_overflow); return; }
+            if (!stack.hasSpace(1)) {
+                self.halt(.stack_overflow);
+                return;
+            }
             stack.pushUnsafe(0);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
@@ -802,9 +919,15 @@ fn runDispatch(
         inline 0x60...0x7F => |push_op| {
             const n = push_op - 0x60 + 1;
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasSpace(1)) { self.halt(.stack_overflow); return; }
+            if (!stack.hasSpace(1)) {
+                self.halt(.stack_overflow);
+                return;
+            }
             const imm = self.bytecode.readImmediates(n);
             var buf: [32]u8 = .{0} ** 32;
             @memcpy(buf[32 - n ..], &imm);
@@ -823,10 +946,19 @@ fn runDispatch(
         inline 0x80...0x8F => |dup_op| {
             const n = dup_op - 0x80 + 1;
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(n)) { self.halt(.stack_underflow); return; }
-            if (!stack.hasSpace(1)) { self.halt(.stack_overflow); return; }
+            if (!stack.hasItems(n)) {
+                self.halt(.stack_underflow);
+                return;
+            }
+            if (!stack.hasSpace(1)) {
+                self.halt(.stack_overflow);
+                return;
+            }
             stack.dupUnsafe(n);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
@@ -835,9 +967,15 @@ fn runDispatch(
         inline 0x90...0x9F => |swap_op| {
             const n = swap_op - 0x90 + 1;
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             const stack = &self.stack;
-            if (!stack.hasItems(n + 1)) { self.halt(.stack_underflow); return; }
+            if (!stack.hasItems(n + 1)) {
+                self.halt(.stack_underflow);
+                return;
+            }
             stack.swapUnsafe(n);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
@@ -846,7 +984,10 @@ fn runDispatch(
         else => |op| {
             self.bytecode.relativeJump(1);
             const entry = table[op];
-            if (!self.gas.spend(entry.static_gas)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(entry.static_gas)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             entry.func(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();

@@ -32,7 +32,7 @@ pub fn addLog(bloom: *Bloom, address: [20]u8, topics: []const [32]u8) void {
 
 /// OR two bloom filters together in place. src passed by pointer to avoid 256-byte copy.
 pub fn merge(dst: *Bloom, src: *const Bloom) void {
-    const d64: *[32]u64 = @alignCast(@ptrCast(dst));
-    const s64: *const [32]u64 = @alignCast(@ptrCast(src));
+    const d64: *[32]u64 = @ptrCast(@alignCast(dst));
+    const s64: *const [32]u64 = @ptrCast(@alignCast(src));
     for (d64, s64) |*d, s| d.* |= s;
 }
