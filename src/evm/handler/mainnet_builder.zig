@@ -137,7 +137,7 @@ pub const MainnetHandler = struct {
                     count += 1;
                 }
             }
-            try js.warmPrecompiles(addr_buf[0..count]);
+            js.warmPrecompiles(addr_buf[0..count]);
         }
 
         // EIP-3651 (Shanghai+): Pre-warm coinbase so CALL to coinbase is not cold

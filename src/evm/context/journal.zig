@@ -204,19 +204,24 @@ pub const JournalEntry = union(enum) {
 /// Warm addresses
 pub const WarmAddresses = struct {
     coinbase: ?primitives.Address,
-    precompiles: std.ArrayList(primitives.Address),
+    /// Bitset of registered precompile short-address indices.
+    /// SHORT_ADDRESS_CAP = 300, so 5 × u64 = 320 bits covers the full range.
+    /// Bit n is set when precompile at short-address index n is registered.
+    /// P256_VERIFY lives at index 256 (0x0100), which requires this full width —
+    /// a u64 alone or a max-index scalar would either miss it or falsely warm
+    /// the large gap between 0x12 and 0x100.
+    precompile_bitset: [5]u64,
     access_list: std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80),
 
     pub fn new() WarmAddresses {
         return .{
             .coinbase = null,
-            .precompiles = std.ArrayList(primitives.Address).empty,
+            .precompile_bitset = .{0} ** 5,
             .access_list = std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80).init(alloc_mod.get()),
         };
     }
 
     pub fn deinit(self: *WarmAddresses) void {
-        self.precompiles.deinit(alloc_mod.get());
         var iterator = self.access_list.iterator();
         while (iterator.next()) |entry| {
             entry.value_ptr.deinit(alloc_mod.get());
@@ -228,9 +233,15 @@ pub const WarmAddresses = struct {
         self.coinbase = address;
     }
 
-    pub fn setPrecompileAddresses(self: *WarmAddresses, addresses: []const primitives.Address) !void {
-        self.precompiles.clearRetainingCapacity();
-        try self.precompiles.appendSlice(alloc_mod.get(), addresses);
+    pub fn setPrecompileAddresses(self: *WarmAddresses, addresses: []const primitives.Address) void {
+        self.precompile_bitset = .{0} ** 5;
+        for (addresses) |addr| {
+            if (primitives.shortAddress(addr)) |n| {
+                const word = n / 64;
+                const bit = @as(u64, 1) << @intCast(n % 64);
+                if (word < 5) self.precompile_bitset[word] |= bit;
+            }
+        }
     }
 
     pub fn setAccessList(self: *WarmAddresses, access_list: std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80)) !void {
@@ -267,11 +278,11 @@ pub const WarmAddresses = struct {
             }
         }
 
-        // Check if address is precompile
-        for (self.precompiles.items) |precompile| {
-            if (std.mem.eql(u8, &address, &precompile)) {
-                return false;
-            }
+        // Check if address is a precompile via bitset (O(1), no contiguity assumption)
+        if (primitives.shortAddress(address)) |n| {
+            const word = n / 64;
+            const bit = @as(u64, 1) << @intCast(n % 64);
+            if (word < 5 and (self.precompile_bitset[word] & bit) != 0) return false;
         }
 
         // Check if address is in access list
@@ -293,9 +304,6 @@ pub const WarmAddresses = struct {
         return false;
     }
 
-    pub fn getPrecompiles(self: *const WarmAddresses) []const primitives.Address {
-        return self.precompiles.items;
-    }
 };
 
 /// Journal checkpoint
@@ -1469,12 +1477,8 @@ pub fn Journal(comptime DB: type) type {
             self.inner.warm_addresses.setCoinbase(address);
         }
 
-        pub fn warmPrecompiles(self: *@This(), precompiles: []const primitives.Address) !void {
-            try self.inner.warm_addresses.setPrecompileAddresses(precompiles);
-        }
-
-        pub fn precompileAddresses(self: @This()) []const primitives.Address {
-            return self.inner.warm_addresses.precompiles();
+        pub fn warmPrecompiles(self: *@This(), precompiles: []const primitives.Address) void {
+            self.inner.warm_addresses.setPrecompileAddresses(precompiles);
         }
 
         pub fn setSpecId(self: *@This(), spec_id: primitives.SpecId) void {
