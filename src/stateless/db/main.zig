@@ -42,16 +42,16 @@ pub const WitnessDatabase = struct {
     node_index: *const mpt.NodeIndex,
     pre_state_root: primitives.Hash,
     /// Witness bytecodes indexed by keccak256(code) for O(1) lookup.
-    witness_codes: std.AutoHashMap(primitives.Hash, []const u8),
+    witness_codes: std.HashMap(primitives.Hash, []const u8, primitives.HashContext, 80),
     block_hashes: []const types.BlockHashEntry,
     /// Bytecodes deployed by CREATE in the current block, keyed by code hash.
     /// EIP-8025: verifier derives these from execution, so they need not be in the witness.
-    deployed_codes: std.AutoHashMap(primitives.Hash, bytecode.Bytecode),
+    deployed_codes: std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80),
     /// Cache of address → storage_root populated by basic() during execution.
     /// Eliminates redundant account trie walks in storage() and in the post-execution
     /// batch update (storageRootFor). Accounts absent from pre-state are cached as
     /// EMPTY_TRIE_HASH so the batch output phase skips verifyAccountIndexed for them.
-    storage_root_cache: std.AutoHashMap(primitives.Address, primitives.Hash),
+    storage_root_cache: std.HashMap(primitives.Address, primitives.Hash, primitives.AddressContext, 80),
 
     const Self = @This();
 
@@ -62,7 +62,7 @@ pub const WitnessDatabase = struct {
         codes: []const []const u8,
         block_hashes: []const types.BlockHashEntry,
     ) !Self {
-        var witness_codes = std.AutoHashMap(primitives.Hash, []const u8).init(alloc);
+        var witness_codes = std.HashMap(primitives.Hash, []const u8, primitives.HashContext, 80).init(alloc);
         try witness_codes.ensureTotalCapacity(@intCast(codes.len));
         for (codes) |code_bytes| {
             const h = mpt.keccak256(code_bytes);
@@ -73,8 +73,8 @@ pub const WitnessDatabase = struct {
             .pre_state_root = pre_state_root,
             .witness_codes = witness_codes,
             .block_hashes = block_hashes,
-            .deployed_codes = std.AutoHashMap(primitives.Hash, bytecode.Bytecode).init(alloc),
-            .storage_root_cache = std.AutoHashMap(primitives.Address, primitives.Hash).init(alloc),
+            .deployed_codes = std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80).init(alloc),
+            .storage_root_cache = std.HashMap(primitives.Address, primitives.Hash, primitives.AddressContext, 80).init(alloc),
         };
     }
 

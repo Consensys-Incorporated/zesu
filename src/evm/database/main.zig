@@ -219,23 +219,23 @@ const StorageKeyContext = struct {
 /// (snapshotFrame, commitFrame, etc.) are opt-in: implement them on your DB type and
 /// they will be activated automatically via @hasDecl in the Journal wrappers.
 pub const InMemoryDB = struct {
-    accounts: std.AutoHashMap(primitives.Address, state.AccountInfo),
-    code: std.AutoHashMap(primitives.Hash, bytecode.Bytecode),
+    accounts: std.HashMap(primitives.Address, state.AccountInfo, primitives.AddressContext, 80),
+    code: std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80),
     storage_map: std.HashMap(struct { primitives.Address, primitives.StorageKey }, primitives.StorageValue, StorageKeyContext, std.hash_map.default_max_load_percentage),
     block_hashes: std.AutoHashMap(u64, primitives.Hash),
     /// Count of non-zero storage entries per address.
     /// Maintained by putStorage for O(1) hasNonZeroStorageForAddress lookups.
-    nonzero_storage_count: std.AutoHashMap(primitives.Address, u32),
+    nonzero_storage_count: std.HashMap(primitives.Address, u32, primitives.AddressContext, 80),
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
-            .accounts = std.AutoHashMap(primitives.Address, state.AccountInfo).init(allocator),
-            .code = std.AutoHashMap(primitives.Hash, bytecode.Bytecode).init(allocator),
+            .accounts = std.HashMap(primitives.Address, state.AccountInfo, primitives.AddressContext, 80).init(allocator),
+            .code = std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80).init(allocator),
             .storage_map = std.HashMap(struct { primitives.Address, primitives.StorageKey }, primitives.StorageValue, StorageKeyContext, std.hash_map.default_max_load_percentage).init(allocator),
             .block_hashes = std.AutoHashMap(u64, primitives.Hash).init(allocator),
-            .nonzero_storage_count = std.AutoHashMap(primitives.Address, u32).init(allocator),
+            .nonzero_storage_count = std.HashMap(primitives.Address, u32, primitives.AddressContext, 80).init(allocator),
         };
     }
 
@@ -347,14 +347,14 @@ pub const InMemoryDB = struct {
 
 /// State management and tracking structures
 pub const State = struct {
-    accounts: std.AutoHashMap(primitives.Address, state.Account),
+    accounts: std.HashMap(primitives.Address, state.Account, primitives.AddressContext, 80),
     allocator: std.mem.Allocator,
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
-            .accounts = std.AutoHashMap(primitives.Address, state.Account).init(allocator),
+            .accounts = std.HashMap(primitives.Address, state.Account, primitives.AddressContext, 80).init(allocator),
             .allocator = allocator,
         };
     }
@@ -386,7 +386,7 @@ pub const State = struct {
     }
 
     /// Get all accounts
-    pub fn getAccounts(self: Self) std.AutoHashMap(primitives.Address, state.Account) {
+    pub fn getAccounts(self: Self) std.HashMap(primitives.Address, state.Account, primitives.AddressContext, 80) {
         return self.accounts;
     }
 };

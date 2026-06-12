@@ -23,6 +23,29 @@ pub const StorageKey = U256;
 /// Used to store data values in smart contract storage slots.
 pub const StorageValue = U256;
 
+/// Hash context for HashMap keyed on Address ([20]u8).
+/// Addresses are already uniformly distributed — truncate the first 8 bytes
+/// instead of running Wyhash over the whole key.
+pub const AddressContext = struct {
+    pub fn hash(_: @This(), key: Address) u64 {
+        return std.mem.readInt(u64, key[0..8], .little);
+    }
+    pub fn eql(_: @This(), a: Address, b: Address) bool {
+        return std.mem.eql(u8, &a, &b);
+    }
+};
+
+/// Hash context for HashMap keyed on Hash ([32]u8).
+/// Keccak-256 output is uniformly distributed — truncate first 8 bytes.
+pub const HashContext = struct {
+    pub fn hash(_: @This(), key: Hash) u64 {
+        return std.mem.readInt(u64, key[0..8], .little);
+    }
+    pub fn eql(_: @This(), a: Hash, b: Hash) bool {
+        return std.mem.eql(u8, &a, &b);
+    }
+};
+
 /// Type alias for byte arrays
 pub const Bytes = []u8;
 

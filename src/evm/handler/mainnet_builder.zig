@@ -153,9 +153,11 @@ pub const MainnetHandler = struct {
         // which is required for correct EIP-7928 Block Access List construction.
         if (tx.access_list.items) |items| {
             const allocator = alloc_mod.get();
-            var map = std.AutoHashMap(
+            var map = std.HashMap(
                 primitives.Address,
                 std.ArrayList(primitives.StorageKey),
+                primitives.AddressContext,
+                80,
             ).init(allocator);
             defer {
                 var it = map.valueIterator();
