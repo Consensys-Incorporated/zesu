@@ -138,12 +138,19 @@ const BaTracker = struct {
         }
     }
 
-    fn detectAndRecord(self: *BaTracker, bai: u64, ctx: anytype) void {
+    fn detectAndRecord(self: *BaTracker, bai: u64, ctx: anytype, from_tx_id: usize) void {
         const a = self.alloc;
+        // For bai > 0, skip accounts not touched since from_tx_id: their state hasn't
+        // changed since the last detectAndRecord call, so nothing new to record.
+        // Per-tx calls pass (tx_id - 1) to capture exactly the just-committed tx.
+        // The post-block call passes txs.len to capture mining reward + withdrawals +
+        // all post-block system calls, which each do their own commitTx().
+        const filter_by_tx = bai > 0;
         var it = ctx.journaled_state.inner.evm_state.iterator();
         while (it.next()) |e| {
             const addr = e.key_ptr.*;
             const acct = e.value_ptr.*;
+            if (filter_by_tx and acct.transaction_id < from_tx_id) continue;
             if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
 
             // Same-tx-created-and-selfdestructed (ephemeral) account: per EIP-7928 spec's
@@ -267,11 +274,12 @@ const BaTracker = struct {
             }
         }
 
-        // Update committed state to current evm_state
+        // Update committed state to current evm_state (only accounts touched this tx).
         var it2 = ctx.journaled_state.inner.evm_state.iterator();
         while (it2.next()) |e| {
             const addr = e.key_ptr.*;
             const acct = e.value_ptr.*;
+            if (filter_by_tx and acct.transaction_id < from_tx_id) continue;
             if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
             // Selfdestructed accounts: nonce/code/storage are gone. Commit the live balance
             // (which may be non-zero if ETH arrived after the SELFDESTRUCT opcode) so that
@@ -635,7 +643,7 @@ pub fn transitionWithContext(
     // ── Pre-block system calls (EIP-4788, EIP-2935) ───────────────────────────
     system_calls.applyPreBlockCalls(ctx, &instructions, &precompiles, env, spec, chain_id);
 
-    if (tracker) |*t| t.detectAndRecord(0, ctx);
+    if (tracker) |*t| t.detectAndRecord(0, ctx, 0);
 
     var receipts = std.ArrayListUnmanaged(Receipt).empty;
     var accepted_txs = std.ArrayListUnmanaged(input.TxInput).empty;
@@ -1152,7 +1160,7 @@ pub fn transitionWithContext(
 
         if (tracker) |*t| {
             t.checkUserTxTouchedSystemAddress(ctx);
-            t.detectAndRecord(tx_idx + 1, ctx);
+            t.detectAndRecord(tx_idx + 1, ctx, ctx.journaled_state.inner.transaction_id - 1);
         }
 
         // Pre-Byzantium (EIP-658 not yet active): compute per-tx intermediate state root.
@@ -1196,7 +1204,7 @@ pub fn transitionWithContext(
     const post_block_reqs = try system_calls.applyPostBlockCallsCapture(arena, ctx, &instructions, &precompiles, spec, chain_id);
 
     // Detect changes from mining reward + withdrawals + post-block calls (all at BAI=N+1)
-    if (tracker) |*t| t.detectAndRecord(txs.len + 1, ctx);
+    if (tracker) |*t| t.detectAndRecord(txs.len + 1, ctx, txs.len);
 
     // ── Extract post-state ────────────────────────────────────────────────────
     const post_alloc = try extractPostState(arena, pre_alloc_in, ctx);

@@ -571,24 +571,32 @@ pub const JournalInner = struct {
     ///
     /// `commit_tx` is used even for discarding transactions so transaction_id will be incremented.
     pub fn commitTx(self: *JournalInner) void {
-        // EIP-7928: record committed-changed storage BEFORE resetting original_value.
-        // Slots where present != original were dirty at this tx boundary; flag them so
-        // cross-tx net-zero writes are classified as storageChanges, not storageReads.
+        // EIP-7928 + EIP-2200: single journal pass instead of two full evm_state scans.
+        //
+        // Correctness: StorageChanged is appended only when present_value actually changes
+        // (sstore bails early if present == new). Reverted entries are swapRemoved before
+        // this runs. A slot written N times has N entries; the first entry that sees
+        // present != original records + resets; subsequent entries see original == present
+        // and skip — idempotent.
+        //
+        // EIP-7928: slots where present != original at commit boundary are flagged in
+        // bal_committed_changed so cross-tx net-zero writes are storageChanges, not reads.
         // Skip accounts created AND selfdestructed in the same tx (net zero effect).
-        {
-            var state_it = self.evm_state.iterator();
-            while (state_it.next()) |entry| {
-                if (entry.value_ptr.status.created and entry.value_ptr.status.self_destructed) continue;
-                var slot_it = entry.value_ptr.storage.iterator();
-                while (slot_it.next()) |slot| {
-                    if (slot.value_ptr.present_value != slot.value_ptr.original_value) {
-                        const addr = entry.key_ptr.*;
-                        const gop = self.bal_committed_changed.getOrPut(addr) catch continue;
-                        if (!gop.found_existing) gop.value_ptr.* = std.AutoHashMap(primitives.StorageKey, void).init(alloc_mod.get());
-                        gop.value_ptr.put(slot.key_ptr.*, {}) catch {};
-                    }
-                }
-            }
+        for (self.journal.items) |entry| {
+            const data = switch (entry) {
+                .StorageChanged => |d| d,
+                else => continue,
+            };
+            const acct = self.evm_state.getPtr(data.address) orelse continue;
+            if (acct.status.created and acct.status.self_destructed) continue;
+            const slot = acct.storage.getPtr(data.key) orelse continue;
+            if (slot.present_value == slot.original_value) continue;
+            // EIP-7928: record cross-tx dirty slot.
+            const gop = self.bal_committed_changed.getOrPut(data.address) catch continue;
+            if (!gop.found_existing) gop.value_ptr.* = std.AutoHashMap(primitives.StorageKey, void).init(alloc_mod.get());
+            gop.value_ptr.put(data.key, {}) catch {};
+            // EIP-2200: original_value becomes present_value at tx commit.
+            slot.original_value = slot.present_value;
         }
 
         // EIP-7928: flush per-tx pending into permanent pre-state maps (first-access-wins).
@@ -617,20 +625,6 @@ pub const JournalInner = struct {
             self.bal_pending_storage.clearRetainingCapacity();
         }
 
-        // Per EIP-2200/EIP-3529: after committing a transaction, the "original value"
-        // of each storage slot becomes the committed (present) value. Without this,
-        // subsequent transactions in the same block would incorrectly treat slots as
-        // "dirty" (original ≠ current) rather than "clean" (original == current),
-        // causing SSTORE to charge 100 gas (dirty-warm) instead of 2900 (clean-nonzero).
-        var state_it = self.evm_state.iterator();
-        while (state_it.next()) |entry| {
-            var slot_it = entry.value_ptr.storage.valueIterator();
-            while (slot_it.next()) |slot| {
-                if (slot.original_value != slot.present_value) {
-                    slot.original_value = slot.present_value;
-                }
-            }
-        }
         self.transient_storage.clearRetainingCapacity();
         self.journal.clearRetainingCapacity();
         self.warm_addresses.clearCoinbaseAndAccessList();
