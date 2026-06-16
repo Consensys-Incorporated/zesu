@@ -1115,7 +1115,6 @@ pub fn transitionWithContext(
             for (log.topics, 0..) |t, ti| topics[ti] = t;
 
             bloom.addLog(&receipt_bloom, log.address, log.topics);
-            bloom.merge(&block_bloom, receipt_bloom);
 
             try receipt_logs.append(arena, Log{
                 .address = log.address,
@@ -1130,6 +1129,7 @@ pub fn transitionWithContext(
             });
             log_index_global += 1;
         }
+        bloom.merge(&block_bloom, &receipt_bloom);
         _ = logs_start;
 
         // Blob gas accumulation (limit checks were done pre-execution in 1e).
