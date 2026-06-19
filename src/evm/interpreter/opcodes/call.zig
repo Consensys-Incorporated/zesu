@@ -148,14 +148,15 @@ fn callImpl(
         }
     }
 
-    // Load target account info to determine warm/cold access and whether the account exists.
-    const acct_info = h.accountInfo(target_addr);
-    const is_cold = if (acct_info) |info| info.is_cold else pre_is_cold;
+    // Load target account info (warm/cold, emptiness) and code (for EIP-7702) in one shot.
+    // This replaces the former separate accountInfo + codeInfo calls (two journal lookups).
+    const callee_info = h.accountInfoWithCode(target_addr);
+    const is_cold = if (callee_info) |info| info.is_cold else pre_is_cold;
     // G_NEWACCOUNT applies to the ETH *recipient*, not the code source.
     // For CALLCODE/DELEGATECALL, ETH goes to self (always exists). Otherwise ETH goes to target_addr.
     const account_exists = switch (scheme) {
         .callcode, .delegatecall => true, // self always exists
-        else => if (acct_info) |info| !info.is_empty else false,
+        else => if (callee_info) |info| !info.is_empty else false,
     };
 
     // EIP-7702: pre-compute delegation gas as part of the CALL upfront cost (before the 63/64
@@ -163,12 +164,12 @@ fn callImpl(
     // part of the CALL instruction overhead. Including it in base_cost ensures the 63/64 rule
     // correctly limits forwarded gas (charging it after the sub-call gives the callee too much gas).
     var delegation_gas: u64 = 0;
-    if (h.codeInfo(target_addr)) |code_info| {
-        if (code_info.bytecode.isEip7702()) {
+    if (callee_info) |info| {
+        if (info.bytecode.isEip7702()) {
             // Use isAddressCold to determine cold/warm cost WITHOUT loading the delegation
             // target from the DB — avoids tracking it in the BAL during gas calculation.
             // The sub-frame's setupCall will load it properly and track it there.
-            const del_addr = code_info.bytecode.eip7702.address;
+            const del_addr = info.bytecode.eip7702.address;
             delegation_gas = if (h.isAddressCold(del_addr)) gas_costs.COLD_ACCOUNT_ACCESS else gas_costs.WARM_ACCOUNT_ACCESS;
         }
     }
@@ -309,6 +310,10 @@ fn callImpl(
         .scheme = scheme,
         .is_static = call_is_static,
         .reservoir = call_reservoir,
+        .preloaded_code = if (callee_info) |info| info.bytecode else null,
+        .needs_pre_eip161_touch = !primitives.isEnabledIn(spec, .spurious_dragon) and
+            scheme == .call and value == 0 and
+            if (callee_info) |info| info.is_empty else false,
     };
 
     // Dispatch via setupCall. Precompile/failure results are finalized immediately.
