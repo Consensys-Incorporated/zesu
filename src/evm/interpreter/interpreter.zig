@@ -4,6 +4,7 @@ const bytecode = @import("bytecode");
 const context = @import("context");
 const alloc_mod = @import("zesu_allocator");
 const gas_costs = @import("gas_costs.zig");
+const opcodes = @import("opcodes/main.zig");
 const Gas = @import("gas.zig").Gas;
 const Stack = @import("stack.zig").Stack;
 const Memory = @import("memory.zig").Memory;
@@ -575,10 +576,18 @@ pub const Interpreter = struct {
 // computed goto (single indirect branch). ctx is built once per runWithHost
 // call and lives in registers across iterations.
 //
-// comptime check_pending=false (run):       pending check is folded away.
+// comptime check_pending=false (run):         pending check is folded away.
 // comptime check_pending=true  (runWithHost): checks after every op.
 //
 // Cold opcodes fall to `else` which calls through InstructionTable as before.
+//
+// INVARIANT: only add opcodes here that are:
+//   1. Valid since Frontier (no fork gate needed), AND
+//   2. Behavior-stable across all forks (no semantic changes per EIP).
+// Fork-gated opcodes (e.g. SHL/SHR pre-Constantinople, PUSH0 pre-Shanghai)
+// and fork-modified opcodes (e.g. SELFDESTRUCT post-EIP-6780) must stay in
+// the cold `else` path where the InstructionTable enforces the correct
+// per-fork handler.
 
 fn runDispatch(
     self: *Interpreter,
@@ -589,212 +598,155 @@ fn runDispatch(
     sw: switch (self.bytecode.opcode()) {
         0x00 => { // STOP
             self.bytecode.relativeJump(1);
-            self.return_data.data = &[_]u8{};
-            self.halt(.stop);
+            opcodes.opStop(ctx);
         },
         0x01 => { // ADD
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
-            const a = stack.peekUnsafe(0);
-            const b = stack.peekUnsafe(1);
-            stack.shrinkUnsafe(1);
-            stack.setTopUnsafe().* = a +% b;
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opAdd(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x02 => { // MUL
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_LOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
-            const a = stack.peekUnsafe(0);
-            const b = stack.peekUnsafe(1);
-            stack.shrinkUnsafe(1);
-            stack.setTopUnsafe().* = a *% b;
+            if (!self.gas.spend(gas_costs.G_LOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opMul(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x03 => { // SUB
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
-            const a = stack.peekUnsafe(0);
-            const b = stack.peekUnsafe(1);
-            stack.shrinkUnsafe(1);
-            stack.setTopUnsafe().* = a -% b;
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opSub(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x10 => { // LT
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
-            const a = stack.peekUnsafe(0);
-            const b = stack.peekUnsafe(1);
-            stack.shrinkUnsafe(1);
-            stack.setTopUnsafe().* = if (a < b) 1 else 0;
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opLt(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x11 => { // GT
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
-            const a = stack.peekUnsafe(0);
-            const b = stack.peekUnsafe(1);
-            stack.shrinkUnsafe(1);
-            stack.setTopUnsafe().* = if (a > b) 1 else 0;
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opGt(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x14 => { // EQ
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
-            const a = stack.peekUnsafe(0);
-            const b = stack.peekUnsafe(1);
-            stack.shrinkUnsafe(1);
-            stack.setTopUnsafe().* = if (a == b) 1 else 0;
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opEq(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x15 => { // ISZERO
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(1)) { self.halt(.stack_underflow); return; }
-            const ptr = stack.setTopUnsafe();
-            ptr.* = if (ptr.* == 0) 1 else 0;
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opIsZero(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x16 => { // AND
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
-            const a = stack.peekUnsafe(0);
-            const b = stack.peekUnsafe(1);
-            stack.shrinkUnsafe(1);
-            stack.setTopUnsafe().* = a & b;
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opAnd(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x17 => { // OR
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
-            const a = stack.peekUnsafe(0);
-            const b = stack.peekUnsafe(1);
-            stack.shrinkUnsafe(1);
-            stack.setTopUnsafe().* = a | b;
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opOr(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x18 => { // XOR
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
-            const a = stack.peekUnsafe(0);
-            const b = stack.peekUnsafe(1);
-            stack.shrinkUnsafe(1);
-            stack.setTopUnsafe().* = a ^ b;
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opXor(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x19 => { // NOT
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(1)) { self.halt(.stack_underflow); return; }
-            const ptr = stack.setTopUnsafe();
-            ptr.* = ~ptr.*;
-            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
-        },
-        0x1B => { // SHL
-            self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
-            const shift = stack.peekUnsafe(0);
-            const value = stack.peekUnsafe(1);
-            stack.shrinkUnsafe(1);
-            stack.setTopUnsafe().* = if (shift < 256) value << @intCast(shift) else 0;
-            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
-        },
-        0x1C => { // SHR
-            self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
-            const shift = stack.peekUnsafe(0);
-            const value = stack.peekUnsafe(1);
-            stack.shrinkUnsafe(1);
-            stack.setTopUnsafe().* = if (shift < 256) value >> @intCast(shift) else 0;
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opNot(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x50 => { // POP
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_BASE)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(1)) { self.halt(.stack_underflow); return; }
-            stack.shrinkUnsafe(1);
+            if (!self.gas.spend(gas_costs.G_BASE)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opPop(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x56 => { // JUMP
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_MID)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(1)) { self.halt(.stack_underflow); return; }
-            const dest = stack.popUnsafe();
-            if (dest > std.math.maxInt(usize)) { self.halt(.invalid_jump); return; }
-            const dest_usize: usize = @intCast(dest);
-            if (!self.bytecode.isValidJump(dest_usize)) { self.halt(.invalid_jump); return; }
-            self.bytecode.absoluteJump(dest_usize);
+            if (!self.gas.spend(gas_costs.G_MID)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opJump(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x57 => { // JUMPI
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_HIGH)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(2)) { self.halt(.stack_underflow); return; }
-            const dest = stack.peekUnsafe(0);
-            const cond = stack.peekUnsafe(1);
-            stack.shrinkUnsafe(2);
-            if (cond != 0) {
-                if (dest > std.math.maxInt(usize)) { self.halt(.invalid_jump); return; }
-                const dest_usize: usize = @intCast(dest);
-                if (!self.bytecode.isValidJump(dest_usize)) { self.halt(.invalid_jump); return; }
-                self.bytecode.absoluteJump(dest_usize);
+            if (!self.gas.spend(gas_costs.G_HIGH)) {
+                self.halt(.out_of_gas);
+                return;
             }
+            opcodes.opJumpi(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
         0x5B => { // JUMPDEST
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_JUMPDEST)) { self.halt(.out_of_gas); return; }
-            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
-        },
-        0x5F => { // PUSH0
-            self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_BASE)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasSpace(1)) { self.halt(.stack_overflow); return; }
-            stack.pushUnsafe(0);
+            if (!self.gas.spend(gas_costs.G_JUMPDEST)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opJumpdest(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
@@ -802,20 +754,11 @@ fn runDispatch(
         inline 0x60...0x7F => |push_op| {
             const n = push_op - 0x60 + 1;
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasSpace(1)) { self.halt(.stack_overflow); return; }
-            const imm = self.bytecode.readImmediates(n);
-            var buf: [32]u8 = .{0} ** 32;
-            @memcpy(buf[32 - n ..], &imm);
-            const U = primitives.U256;
-            const value: U =
-                (@as(U, std.mem.readInt(u64, buf[0..8], .big)) << 192) |
-                (@as(U, std.mem.readInt(u64, buf[8..16], .big)) << 128) |
-                (@as(U, std.mem.readInt(u64, buf[16..24], .big)) << 64) |
-                @as(U, std.mem.readInt(u64, buf[24..32], .big));
-            stack.pushUnsafe(value);
-            self.bytecode.relativeJump(n);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opPushNImpl(ctx, n);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
@@ -823,11 +766,11 @@ fn runDispatch(
         inline 0x80...0x8F => |dup_op| {
             const n = dup_op - 0x80 + 1;
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(n)) { self.halt(.stack_underflow); return; }
-            if (!stack.hasSpace(1)) { self.halt(.stack_overflow); return; }
-            stack.dupUnsafe(n);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opDupNImpl(ctx, n);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
@@ -835,18 +778,24 @@ fn runDispatch(
         inline 0x90...0x9F => |swap_op| {
             const n = swap_op - 0x90 + 1;
             self.bytecode.relativeJump(1);
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) { self.halt(.out_of_gas); return; }
-            const stack = &self.stack;
-            if (!stack.hasItems(n + 1)) { self.halt(.stack_underflow); return; }
-            stack.swapUnsafe(n);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opSwapNImpl(ctx, n);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
-        // Cold path: table lookup + indirect call (same as the old step() loop)
+        // Cold path: table lookup + indirect call (same as the old step() loop).
+        // Fork-gated opcodes (SHL/SHR/PUSH0 etc.) land here and are handled correctly
+        // via the table — opUnknown on old forks, real handler on new forks.
         else => |op| {
             self.bytecode.relativeJump(1);
             const entry = table[op];
-            if (!self.gas.spend(entry.static_gas)) { self.halt(.out_of_gas); return; }
+            if (!self.gas.spend(entry.static_gas)) {
+                self.halt(.out_of_gas);
+                return;
+            }
             entry.func(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
