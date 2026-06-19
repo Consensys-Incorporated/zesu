@@ -303,7 +303,6 @@ pub const WarmAddresses = struct {
         }
         return false;
     }
-
 };
 
 /// Journal checkpoint
