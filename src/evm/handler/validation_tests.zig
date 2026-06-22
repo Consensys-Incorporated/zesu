@@ -6,11 +6,12 @@ const context = @import("context");
 const state = @import("state");
 const database = @import("database");
 const validation = @import("validation.zig");
-const handler_main = @import("main.zig");
+const mainnet_builder = @import("mainnet_builder.zig");
 
 const Validation = validation.Validation;
 const ValidationError = validation.ValidationError;
 const InitialAndFloorGas = validation.InitialAndFloorGas;
+const MainBuilder = mainnet_builder.MainBuilder;
 
 // -------------------------------------------------------------------------
 // Intrinsic gas tests
@@ -60,21 +61,6 @@ test "floor gas: zero for empty calldata on Prague" {
 // Caller deduction / nonce tests
 // -------------------------------------------------------------------------
 
-fn makeEvm(db: database.InMemoryDB, spec: primitives.SpecId) struct {
-    ctx: context.DefaultContext,
-    instructions: handler_main.Instructions,
-    precompiles: handler_main.Precompiles,
-    frame_stack: handler_main.FrameStack,
-} {
-    const ctx = context.DefaultContext.new(db, spec);
-    return .{
-        .ctx = ctx,
-        .instructions = handler_main.Instructions.new(spec),
-        .precompiles = handler_main.Precompiles.new(spec),
-        .frame_stack = handler_main.FrameStack.new(),
-    };
-}
-
 test "validateAgainstStateAndDeductCaller: deducts gas_fee and bumps nonce" {
     const caller: primitives.Address = [_]u8{0xAA} ** 20;
     const initial_balance: primitives.U256 = 1_000_000_000_000_000_000; // 1 ETH
@@ -88,19 +74,20 @@ test "validateAgainstStateAndDeductCaller: deducts gas_fee and bumps nonce" {
         .code = null,
     });
 
-    var parts = makeEvm(db, primitives.SpecId.prague);
-    var evm = handler_main.Evm.init(&parts.ctx, null, &parts.instructions, &parts.precompiles, &parts.frame_stack);
+    var ctx = context.DefaultContext.new(db, primitives.SpecId.prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
 
-    parts.ctx.tx.caller = caller;
-    parts.ctx.tx.gas_limit = 21000;
-    parts.ctx.tx.gas_price = 1_000_000_000; // 1 gwei
-    parts.ctx.tx.value = 0;
-    parts.ctx.tx.nonce = 5;
+    ctx.tx.caller = caller;
+    ctx.tx.gas_limit = 21000;
+    ctx.tx.gas_price = 1_000_000_000; // 1 gwei
+    ctx.tx.value = 0;
+    ctx.tx.nonce = 5;
 
-    try Validation.validateAgainstStateAndDeductCaller(&evm, 21000);
+    try Validation.validateAgainstStateAndDeductCaller(&mevm.evm, 21000);
 
     // Verify via journal: load the account and check mutations
-    const load = try parts.ctx.journaled_state.loadAccount(caller);
+    const load = try ctx.journaled_state.loadAccount(caller);
     const acct = load.data;
     // Nonce bumped from 5 → 6
     try std.testing.expectEqual(@as(u64, 6), acct.info.nonce);
@@ -121,14 +108,16 @@ test "validateAgainstStateAndDeductCaller: insufficient balance returns error" {
         .code = null,
     });
 
-    var parts = makeEvm(db, primitives.SpecId.prague);
-    var evm = handler_main.Evm.init(&parts.ctx, null, &parts.instructions, &parts.precompiles, &parts.frame_stack);
-    parts.ctx.tx.caller = caller;
-    parts.ctx.tx.gas_limit = 21000;
-    parts.ctx.tx.gas_price = 1_000_000_000;
-    parts.ctx.tx.nonce = 0;
+    var ctx = context.DefaultContext.new(db, primitives.SpecId.prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
 
-    const result = Validation.validateAgainstStateAndDeductCaller(&evm, 21000);
+    ctx.tx.caller = caller;
+    ctx.tx.gas_limit = 21000;
+    ctx.tx.gas_price = 1_000_000_000;
+    ctx.tx.nonce = 0;
+
+    const result = Validation.validateAgainstStateAndDeductCaller(&mevm.evm, 21000);
     try std.testing.expectError(ValidationError.InsufficientBalance, result);
 }
 
@@ -144,14 +133,16 @@ test "validateAgainstStateAndDeductCaller: nonce mismatch returns error" {
         .code = null,
     });
 
-    var parts = makeEvm(db, primitives.SpecId.prague);
-    var evm = handler_main.Evm.init(&parts.ctx, null, &parts.instructions, &parts.precompiles, &parts.frame_stack);
-    parts.ctx.tx.caller = caller;
-    parts.ctx.tx.gas_limit = 21000;
-    parts.ctx.tx.gas_price = 1;
-    parts.ctx.tx.nonce = 99; // wrong nonce
+    var ctx = context.DefaultContext.new(db, primitives.SpecId.prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
 
-    const result = Validation.validateAgainstStateAndDeductCaller(&evm, 21000);
+    ctx.tx.caller = caller;
+    ctx.tx.gas_limit = 21000;
+    ctx.tx.gas_price = 1;
+    ctx.tx.nonce = 99; // wrong nonce
+
+    const result = Validation.validateAgainstStateAndDeductCaller(&mevm.evm, 21000);
     try std.testing.expectError(ValidationError.NonceMismatch, result);
 }
 
@@ -169,13 +160,15 @@ test "validateAgainstStateAndDeductCaller: EIP-3607 rejects account with code" {
         .code = null,
     });
 
-    var parts = makeEvm(db, primitives.SpecId.prague);
-    var evm = handler_main.Evm.init(&parts.ctx, null, &parts.instructions, &parts.precompiles, &parts.frame_stack);
-    parts.ctx.tx.caller = caller;
-    parts.ctx.tx.gas_limit = 21000;
-    parts.ctx.tx.gas_price = 1;
-    parts.ctx.tx.nonce = 0;
+    var ctx = context.DefaultContext.new(db, primitives.SpecId.prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
 
-    const result = Validation.validateAgainstStateAndDeductCaller(&evm, 21000);
+    ctx.tx.caller = caller;
+    ctx.tx.gas_limit = 21000;
+    ctx.tx.gas_price = 1;
+    ctx.tx.nonce = 0;
+
+    const result = Validation.validateAgainstStateAndDeductCaller(&mevm.evm, 21000);
     try std.testing.expectError(ValidationError.SenderHasCode, result);
 }

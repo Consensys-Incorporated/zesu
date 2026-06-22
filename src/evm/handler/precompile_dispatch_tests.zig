@@ -10,7 +10,7 @@ const interpreter_mod = @import("interpreter");
 const handler_main = @import("main.zig");
 const mainnet_builder = @import("mainnet_builder.zig");
 
-const ExecuteEvm = mainnet_builder.ExecuteEvm;
+const MainBuilder = mainnet_builder.MainBuilder;
 const ALLOC = std.heap.c_allocator;
 
 // ---------------------------------------------------------------------------
@@ -34,20 +34,6 @@ const SHA256_ADDR: primitives.Address = blk: {
     break :blk a;
 };
 
-fn makeEvmParts(db: database.InMemoryDB, spec: primitives.SpecId) struct {
-    ctx: context.DefaultContext,
-    instructions: handler_main.Instructions,
-    precompiles: handler_main.Precompiles,
-    frame_stack: handler_main.FrameStack,
-} {
-    return .{
-        .ctx = context.DefaultContext.new(db, spec),
-        .instructions = handler_main.Instructions.new(spec),
-        .precompiles = handler_main.Precompiles.new(spec),
-        .frame_stack = handler_main.FrameStack.new(),
-    };
-}
-
 fn insertCaller(db: *database.InMemoryDB, addr: primitives.Address, balance: primitives.U256, nonce: u64) !void {
     try db.insertAccount(addr, state.AccountInfo{
         .balance = balance,
@@ -66,11 +52,14 @@ test "precompile dispatch: IDENTITY returns input unchanged" {
 
     var db = database.InMemoryDB.init(ALLOC);
     try insertCaller(&db, CALLER, 1_000_000, 0);
-    var parts = makeEvmParts(db, .prague);
-    _ = try parts.ctx.journaled_state.loadAccount(CALLER);
-    _ = try parts.ctx.journaled_state.loadAccount(IDENTITY_ADDR);
 
-    var host = interpreter_mod.Host.fromCtx(&parts.ctx, &parts.precompiles.precompiles);
+    var ctx = context.DefaultContext.new(db, .prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
+    _ = try ctx.journaled_state.loadAccount(CALLER);
+    _ = try ctx.journaled_state.loadAccount(IDENTITY_ADDR);
+
+    var host = interpreter_mod.Host.fromCtx(&ctx, &mevm.precompiles.precompiles);
 
     const result = host.call(.{
         .caller = CALLER,
@@ -95,11 +84,14 @@ test "precompile dispatch: IDENTITY returns input unchanged" {
 test "precompile dispatch: IDENTITY with no data returns empty" {
     var db = database.InMemoryDB.init(ALLOC);
     try insertCaller(&db, CALLER, 1_000_000, 0);
-    var parts = makeEvmParts(db, .prague);
-    _ = try parts.ctx.journaled_state.loadAccount(CALLER);
-    _ = try parts.ctx.journaled_state.loadAccount(IDENTITY_ADDR);
 
-    var host = interpreter_mod.Host.fromCtx(&parts.ctx, &parts.precompiles.precompiles);
+    var ctx = context.DefaultContext.new(db, .prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
+    _ = try ctx.journaled_state.loadAccount(CALLER);
+    _ = try ctx.journaled_state.loadAccount(IDENTITY_ADDR);
+
+    var host = interpreter_mod.Host.fromCtx(&ctx, &mevm.precompiles.precompiles);
 
     const result = host.call(.{
         .caller = CALLER,
@@ -122,11 +114,14 @@ test "precompile dispatch: IDENTITY with no data returns empty" {
 test "precompile dispatch: out-of-gas fails and consumes all gas" {
     var db = database.InMemoryDB.init(ALLOC);
     try insertCaller(&db, CALLER, 1_000_000, 0);
-    var parts = makeEvmParts(db, .prague);
-    _ = try parts.ctx.journaled_state.loadAccount(CALLER);
-    _ = try parts.ctx.journaled_state.loadAccount(IDENTITY_ADDR);
 
-    var host = interpreter_mod.Host.fromCtx(&parts.ctx, &parts.precompiles.precompiles);
+    var ctx = context.DefaultContext.new(db, .prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
+    _ = try ctx.journaled_state.loadAccount(CALLER);
+    _ = try ctx.journaled_state.loadAccount(IDENTITY_ADDR);
+
+    var host = interpreter_mod.Host.fromCtx(&ctx, &mevm.precompiles.precompiles);
 
     // IDENTITY needs at least 15 gas; give it less
     const result = host.call(.{
@@ -150,11 +145,14 @@ test "precompile dispatch: null precompiles falls back to interpreter (no precom
     // IDENTITY address with null precompiles → runs as empty contract → stop with empty return.
     var db = database.InMemoryDB.init(ALLOC);
     try insertCaller(&db, CALLER, 1_000_000, 0);
-    var parts = makeEvmParts(db, .prague);
-    _ = try parts.ctx.journaled_state.loadAccount(CALLER);
-    _ = try parts.ctx.journaled_state.loadAccount(IDENTITY_ADDR);
 
-    var host = interpreter_mod.Host.fromCtx(&parts.ctx, null);
+    var ctx = context.DefaultContext.new(db, .prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
+    _ = try ctx.journaled_state.loadAccount(CALLER);
+    _ = try ctx.journaled_state.loadAccount(IDENTITY_ADDR);
+
+    var host = interpreter_mod.Host.fromCtx(&ctx, null);
 
     const result = host.call(.{
         .caller = CALLER,
@@ -194,32 +192,27 @@ test "executeFrame: CREATE tx with STOP init code deploys successfully" {
         .code = null,
     });
 
-    var parts = makeEvmParts(db, .prague);
-    var evm = handler_main.Evm.init(
-        &parts.ctx,
-        null,
-        &parts.instructions,
-        &parts.precompiles,
-        &parts.frame_stack,
-    );
+    var ctx = context.DefaultContext.new(db, .prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
 
     const gwei: u128 = 1_000_000_000;
-    parts.ctx.tx.caller = CALLER;
-    parts.ctx.tx.gas_limit = 200_000;
-    parts.ctx.tx.gas_price = gwei;
-    parts.ctx.tx.gas_priority_fee = null;
-    parts.ctx.tx.nonce = 0;
-    parts.ctx.tx.value = 0;
-    parts.ctx.tx.kind = .Create;
-    parts.ctx.tx.data = blk: {
+    ctx.tx.caller = CALLER;
+    ctx.tx.gas_limit = 200_000;
+    ctx.tx.gas_price = gwei;
+    ctx.tx.gas_priority_fee = null;
+    ctx.tx.nonce = 0;
+    ctx.tx.value = 0;
+    ctx.tx.kind = .Create;
+    ctx.tx.data = blk: {
         var list = std.ArrayList(u8).empty;
         try list.appendSlice(ALLOC, &init_code);
         break :blk list;
     };
-    parts.ctx.block.basefee = @as(u64, @intCast(gwei));
-    parts.ctx.block.beneficiary = COINBASE;
+    ctx.block.basefee = @as(u64, @intCast(gwei));
+    ctx.block.beneficiary = COINBASE;
 
-    const result = try ExecuteEvm.execute(&evm);
+    const result = try mevm.execute();
 
     // Expect success — STOP is a valid (empty) deployment
     try std.testing.expectEqual(handler_main.ExecutionStatus.Success, result.status);
@@ -240,32 +233,27 @@ test "executeFrame: CREATE tx with REVERT init code fails gracefully" {
         .code = null,
     });
 
-    var parts = makeEvmParts(db, .prague);
-    var evm = handler_main.Evm.init(
-        &parts.ctx,
-        null,
-        &parts.instructions,
-        &parts.precompiles,
-        &parts.frame_stack,
-    );
+    var ctx = context.DefaultContext.new(db, .prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
 
     const gwei: u128 = 1_000_000_000;
-    parts.ctx.tx.caller = CALLER;
-    parts.ctx.tx.gas_limit = 200_000;
-    parts.ctx.tx.gas_price = gwei;
-    parts.ctx.tx.gas_priority_fee = null;
-    parts.ctx.tx.nonce = 0;
-    parts.ctx.tx.value = 0;
-    parts.ctx.tx.kind = .Create;
-    parts.ctx.tx.data = blk: {
+    ctx.tx.caller = CALLER;
+    ctx.tx.gas_limit = 200_000;
+    ctx.tx.gas_price = gwei;
+    ctx.tx.gas_priority_fee = null;
+    ctx.tx.nonce = 0;
+    ctx.tx.value = 0;
+    ctx.tx.kind = .Create;
+    ctx.tx.data = blk: {
         var list = std.ArrayList(u8).empty;
         try list.appendSlice(ALLOC, &init_code);
         break :blk list;
     };
-    parts.ctx.block.basefee = @as(u64, @intCast(gwei));
-    parts.ctx.block.beneficiary = COINBASE;
+    ctx.block.basefee = @as(u64, @intCast(gwei));
+    ctx.block.beneficiary = COINBASE;
 
-    const result = try ExecuteEvm.execute(&evm);
+    const result = try mevm.execute();
 
     // REVERT → deployment fails, status should be Revert
     try std.testing.expectEqual(handler_main.ExecutionStatus.Revert, result.status);
