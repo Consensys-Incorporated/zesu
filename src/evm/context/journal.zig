@@ -233,15 +233,8 @@ pub const WarmAddresses = struct {
         self.coinbase = address;
     }
 
-    pub fn setPrecompileAddresses(self: *WarmAddresses, addresses: []const primitives.Address) void {
-        self.precompile_bitset = .{0} ** 5;
-        for (addresses) |addr| {
-            if (primitives.shortAddress(addr)) |n| {
-                const word = n / 64;
-                const bit = @as(u64, 1) << @intCast(n % 64);
-                if (word < 5) self.precompile_bitset[word] |= bit;
-            }
-        }
+    pub fn setPrecompileBitset(self: *WarmAddresses, bitset: [5]u64) void {
+        self.precompile_bitset = bitset;
     }
 
     pub fn setAccessList(self: *WarmAddresses, access_list: std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80)) !void {
@@ -1474,10 +1467,6 @@ pub fn Journal(comptime DB: type) type {
 
         pub fn warmCoinbaseAccount(self: *@This(), address: primitives.Address) void {
             self.inner.warm_addresses.setCoinbase(address);
-        }
-
-        pub fn warmPrecompiles(self: *@This(), precompiles: []const primitives.Address) void {
-            self.inner.warm_addresses.setPrecompileAddresses(precompiles);
         }
 
         pub fn setSpecId(self: *@This(), spec_id: primitives.SpecId) void {

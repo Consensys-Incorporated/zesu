@@ -625,6 +625,9 @@ pub fn transitionWithContext(
     var instructions = handler_mod.Instructions.new(spec);
     var precompiles = handler_mod.Precompiles.new(spec);
 
+    // EIP-2929: precompiles are always warm — set once per block, persists across commitTx/discardTx.
+    ctx.journaled_state.inner.warm_addresses.setPrecompileBitset(precompiles.precompiles.precompile_bitset);
+
     // Pre-size journal HashMaps and ArrayLists to avoid repeated grows under the bump allocator.
     // Upper bound: all pre-state accounts plus a few new accounts per tx.
     const account_hint: u32 = @intCast(pre_alloc_in.count() + txs.len * 4);

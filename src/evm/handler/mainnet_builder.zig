@@ -66,6 +66,8 @@ pub const MainBuilder = struct {
         owned.precompiles = main.Precompiles.new(spec);
         owned.frame_stack = main.FrameStack.newPrealloc(8);
         owned.evm = main.Evm.init(self, null, &owned.instructions, &owned.precompiles, &owned.frame_stack);
+        // EIP-2929: precompiles are always warm — set once per block at construction.
+        self.journaled_state.inner.warm_addresses.setPrecompileBitset(owned.precompiles.precompiles.precompile_bitset);
         return owned;
     }
 
@@ -78,6 +80,8 @@ pub const MainBuilder = struct {
         owned.precompiles = main.Precompiles.new(spec);
         owned.frame_stack = main.FrameStack.newPrealloc(8);
         owned.evm = main.Evm.init(self, inspector, &owned.instructions, &owned.precompiles, &owned.frame_stack);
+        // EIP-2929: precompiles are always warm — set once per block at construction.
+        self.journaled_state.inner.warm_addresses.setPrecompileBitset(owned.precompiles.precompiles.precompile_bitset);
         return owned;
     }
 };
@@ -125,20 +129,6 @@ pub const MainnetHandler = struct {
         const tx = &ctx.tx;
         const spec = ctx.cfg.spec;
         const js = &ctx.journaled_state;
-
-        // EIP-2929: Pre-warm precompile addresses (precompiles are always warm at tx start).
-        {
-            var addr_buf: [256]primitives.Address = undefined;
-            var count: usize = 0;
-            var it = evm.precompiles.precompiles.addresses.keyIterator();
-            while (it.next()) |addr| {
-                if (count < addr_buf.len) {
-                    addr_buf[count] = addr.*;
-                    count += 1;
-                }
-            }
-            js.warmPrecompiles(addr_buf[0..count]);
-        }
 
         // EIP-3651 (Shanghai+): Pre-warm coinbase so CALL to coinbase is not cold
         if (primitives.isEnabledIn(spec, .shanghai)) {
