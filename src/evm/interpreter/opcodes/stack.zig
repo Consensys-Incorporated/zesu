@@ -25,35 +25,49 @@ pub fn opPush0(ctx: *InstructionContext) void {
     stack.pushUnsafe(0);
 }
 
+/// Inline implementation for PUSH1..PUSH32, callable with comptime n from runDispatch.
+/// Reads n immediate bytes, pushes as big-endian U256, advances PC by n.
+pub inline fn opPushNImpl(ctx: *InstructionContext, comptime n: u8) void {
+    const stack = &ctx.interpreter.stack;
+    if (!stack.hasSpace(1)) {
+        ctx.interpreter.halt(.stack_overflow);
+        return;
+    }
+    const imm = ctx.interpreter.bytecode.readImmediates(n);
+    var buf: [32]u8 = .{0} ** 32;
+    @memcpy(buf[32 - n ..], &imm);
+    const U = primitives.U256;
+    const value: U = (@as(U, std.mem.readInt(u64, buf[0..8], .big)) << 192) |
+        (@as(U, std.mem.readInt(u64, buf[8..16], .big)) << 128) |
+        (@as(U, std.mem.readInt(u64, buf[16..24], .big)) << 64) |
+        @as(U, std.mem.readInt(u64, buf[24..32], .big));
+    stack.pushUnsafe(value);
+    ctx.interpreter.bytecode.relativeJump(n);
+}
+
 /// Comptime PUSH generator for PUSH1..PUSH32.
 /// Reads n immediate bytes at current PC, pushes as big-endian U256, advances PC by n.
 /// Static gas (G_VERYLOW) is charged by the dispatch loop.
 pub fn makePushFn(comptime n: u8) InstructionFn {
     return struct {
         fn op(ctx: *InstructionContext) void {
-            const stack = &ctx.interpreter.stack;
-            if (!stack.hasSpace(1)) {
-                ctx.interpreter.halt(.stack_overflow);
-                return;
-            }
-
-            // Read n immediate bytes (zero-padded at end if near code boundary)
-            const imm = ctx.interpreter.bytecode.readImmediates(n);
-
-            // Right-align in 32-byte buffer then decode as big-endian U256
-            var buf: [32]u8 = .{0} ** 32;
-            @memcpy(buf[32 - n ..], &imm);
-
-            const U = primitives.U256;
-            const value: U = (@as(U, std.mem.readInt(u64, buf[0..8], .big)) << 192) |
-                (@as(U, std.mem.readInt(u64, buf[8..16], .big)) << 128) |
-                (@as(U, std.mem.readInt(u64, buf[16..24], .big)) << 64) |
-                @as(U, std.mem.readInt(u64, buf[24..32], .big));
-
-            stack.pushUnsafe(value);
-            ctx.interpreter.bytecode.relativeJump(n);
+            opPushNImpl(ctx, n);
         }
     }.op;
+}
+
+/// Inline implementation for DUP1..DUP16, callable with comptime n from runDispatch.
+pub inline fn opDupNImpl(ctx: *InstructionContext, comptime n: u8) void {
+    const stack = &ctx.interpreter.stack;
+    if (!stack.hasItems(n)) {
+        ctx.interpreter.halt(.stack_underflow);
+        return;
+    }
+    if (!stack.hasSpace(1)) {
+        ctx.interpreter.halt(.stack_overflow);
+        return;
+    }
+    stack.dupUnsafe(n);
 }
 
 /// Comptime DUP generator for DUP1..DUP16.
@@ -62,18 +76,19 @@ pub fn makePushFn(comptime n: u8) InstructionFn {
 pub fn makeDupFn(comptime n: u8) InstructionFn {
     return struct {
         fn op(ctx: *InstructionContext) void {
-            const stack = &ctx.interpreter.stack;
-            if (!stack.hasItems(n)) {
-                ctx.interpreter.halt(.stack_underflow);
-                return;
-            }
-            if (!stack.hasSpace(1)) {
-                ctx.interpreter.halt(.stack_overflow);
-                return;
-            }
-            stack.dupUnsafe(n);
+            opDupNImpl(ctx, n);
         }
     }.op;
+}
+
+/// Inline implementation for SWAP1..SWAP16, callable with comptime n from runDispatch.
+pub inline fn opSwapNImpl(ctx: *InstructionContext, comptime n: u8) void {
+    const stack = &ctx.interpreter.stack;
+    if (!stack.hasItems(n + 1)) {
+        ctx.interpreter.halt(.stack_underflow);
+        return;
+    }
+    stack.swapUnsafe(n);
 }
 
 /// Comptime SWAP generator for SWAP1..SWAP16.
@@ -82,12 +97,7 @@ pub fn makeDupFn(comptime n: u8) InstructionFn {
 pub fn makeSwapFn(comptime n: u8) InstructionFn {
     return struct {
         fn op(ctx: *InstructionContext) void {
-            const stack = &ctx.interpreter.stack;
-            if (!stack.hasItems(n + 1)) {
-                ctx.interpreter.halt(.stack_underflow);
-                return;
-            }
-            stack.swapUnsafe(n);
+            opSwapNImpl(ctx, n);
         }
     }.op;
 }

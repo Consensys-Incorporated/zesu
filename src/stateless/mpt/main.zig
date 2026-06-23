@@ -58,7 +58,7 @@ pub fn keccak256(data: []const u8) [32]u8 {
 /// Pre-computed hash → node-bytes map built once from the witness node pool.
 /// Use buildNodeIndex() to populate, then pass to the *Indexed verification
 /// functions for O(1) node lookups instead of O(N·keccak) linear scans.
-pub const NodeIndex = std.AutoHashMap([32]u8, []const u8);
+pub const NodeIndex = std.HashMap([32]u8, []const u8, primitives.HashContext, 80);
 
 /// Build a NodeIndex from a flat node pool.
 /// Each entry maps keccak256(node_bytes) → node_bytes.

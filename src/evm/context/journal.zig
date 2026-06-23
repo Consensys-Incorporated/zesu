@@ -63,12 +63,12 @@ pub const AccountPreState = struct {
 /// Ownership of the maps is transferred by `JournalInner.takeAccessLog()`.
 pub const AccessLog = struct {
     /// Pre-block account states (nonce, balance, code_hash) for all accessed addresses.
-    accounts: std.AutoHashMap(primitives.Address, AccountPreState),
+    accounts: std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80),
     /// Pre-block storage values for all accessed slots.
-    storage: std.AutoHashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue)),
+    storage: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80),
     /// Slots that were committed to a value different from the pre-block value at any tx boundary.
     /// Used to distinguish storageChanges from storageReads for cross-tx net-zero writes.
-    committed_changed: std.AutoHashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void)),
+    committed_changed: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void), primitives.AddressContext, 80),
 
     pub fn deinit(self: *@This()) void {
         self.accounts.deinit();
@@ -205,13 +205,13 @@ pub const JournalEntry = union(enum) {
 pub const WarmAddresses = struct {
     coinbase: ?primitives.Address,
     precompiles: std.ArrayList(primitives.Address),
-    access_list: std.AutoHashMap(primitives.Address, std.ArrayList(primitives.StorageKey)),
+    access_list: std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80),
 
     pub fn new() WarmAddresses {
         return .{
             .coinbase = null,
             .precompiles = std.ArrayList(primitives.Address).empty,
-            .access_list = std.AutoHashMap(primitives.Address, std.ArrayList(primitives.StorageKey)).init(alloc_mod.get()),
+            .access_list = std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80).init(alloc_mod.get()),
         };
     }
 
@@ -233,7 +233,7 @@ pub const WarmAddresses = struct {
         try self.precompiles.appendSlice(alloc_mod.get(), addresses);
     }
 
-    pub fn setAccessList(self: *WarmAddresses, access_list: std.AutoHashMap(primitives.Address, std.ArrayList(primitives.StorageKey))) !void {
+    pub fn setAccessList(self: *WarmAddresses, access_list: std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80)) !void {
         // Clear existing access list
         var iterator = self.access_list.iterator();
         while (iterator.next()) |entry| {
@@ -437,14 +437,14 @@ pub const JournalInner = struct {
 
     // ── EIP-7928 BAL tracking ──────────────────────────────────────────────────
     // Permanently committed account pre-states (survive across txs in a block).
-    bal_pre_accounts: std.AutoHashMap(primitives.Address, AccountPreState),
+    bal_pre_accounts: std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80),
     // Permanently committed storage pre-states.
-    bal_pre_storage: std.AutoHashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue)),
+    bal_pre_storage: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80),
     // Per-tx staging: flushed on commitTx, cleared on discardTx.
-    bal_pending_accounts: std.AutoHashMap(primitives.Address, AccountPreState),
-    bal_pending_storage: std.AutoHashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue)),
+    bal_pending_accounts: std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80),
+    bal_pending_storage: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80),
     // Slots committed to a non-pre-block value at any tx boundary.
-    bal_committed_changed: std.AutoHashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void)),
+    bal_committed_changed: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void), primitives.AddressContext, 80),
 
     pub fn new() JournalInner {
         return .{
@@ -456,11 +456,11 @@ pub const JournalInner = struct {
             .spec = primitives.SpecId.prague,
             .warm_addresses = WarmAddresses.new(),
             .pending_burns = std.ArrayList(PendingBurn).empty,
-            .bal_pre_accounts = std.AutoHashMap(primitives.Address, AccountPreState).init(alloc_mod.get()),
-            .bal_pre_storage = std.AutoHashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue)).init(alloc_mod.get()),
-            .bal_pending_accounts = std.AutoHashMap(primitives.Address, AccountPreState).init(alloc_mod.get()),
-            .bal_pending_storage = std.AutoHashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue)).init(alloc_mod.get()),
-            .bal_committed_changed = std.AutoHashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void)).init(alloc_mod.get()),
+            .bal_pre_accounts = std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80).init(alloc_mod.get()),
+            .bal_pre_storage = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80).init(alloc_mod.get()),
+            .bal_pending_accounts = std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80).init(alloc_mod.get()),
+            .bal_pending_storage = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80).init(alloc_mod.get()),
+            .bal_committed_changed = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void), primitives.AddressContext, 80).init(alloc_mod.get()),
         };
     }
 
@@ -553,9 +553,9 @@ pub const JournalInner = struct {
             .storage = self.bal_pre_storage,
             .committed_changed = self.bal_committed_changed,
         };
-        self.bal_pre_accounts = std.AutoHashMap(primitives.Address, AccountPreState).init(alloc_mod.get());
-        self.bal_pre_storage = std.AutoHashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue)).init(alloc_mod.get());
-        self.bal_committed_changed = std.AutoHashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void)).init(alloc_mod.get());
+        self.bal_pre_accounts = std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80).init(alloc_mod.get());
+        self.bal_pre_storage = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80).init(alloc_mod.get());
+        self.bal_committed_changed = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void), primitives.AddressContext, 80).init(alloc_mod.get());
         return log;
     }
 
@@ -1468,7 +1468,7 @@ pub fn Journal(comptime DB: type) type {
             return self.inner.selfdestruct(self.getDbMut(), address, target);
         }
 
-        pub fn warmAccessList(self: *@This(), access_list: std.AutoHashMap(primitives.Address, std.ArrayList(primitives.StorageKey))) !void {
+        pub fn warmAccessList(self: *@This(), access_list: std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80)) !void {
             try self.inner.warm_addresses.setAccessList(access_list);
         }
 
