@@ -9,26 +9,11 @@ const handler_main = @import("main.zig");
 const mainnet_builder = @import("mainnet_builder.zig");
 const validation = @import("validation.zig");
 
-const MainnetHandler = mainnet_builder.MainnetHandler;
-const ExecuteEvm = mainnet_builder.ExecuteEvm;
+const MainBuilder = mainnet_builder.MainBuilder;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn makeEvmParts(db: database.InMemoryDB, spec: primitives.SpecId) struct {
-    ctx: context.DefaultContext,
-    instructions: handler_main.Instructions,
-    precompiles: handler_main.Precompiles,
-    frame_stack: handler_main.FrameStack,
-} {
-    return .{
-        .ctx = context.DefaultContext.new(db, spec),
-        .instructions = handler_main.Instructions.new(spec),
-        .precompiles = handler_main.Precompiles.new(spec),
-        .frame_stack = handler_main.FrameStack.new(),
-    };
-}
 
 /// Insert an account with a given balance into the DB and return it.
 fn insertCaller(db: *database.InMemoryDB, addr: primitives.Address, balance: primitives.U256) !void {
@@ -100,28 +85,23 @@ test "postExecution: caller reimbursed for unused gas, coinbase receives tip" {
     defer db.deinit();
     try insertCaller(&db, caller, initial_caller_balance);
 
-    var parts = makeEvmParts(db, primitives.SpecId.london);
-    var evm = handler_main.Evm.init(
-        &parts.ctx,
-        null,
-        &parts.instructions,
-        &parts.precompiles,
-        &parts.frame_stack,
-    );
+    var ctx = context.DefaultContext.new(db, primitives.SpecId.london);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
 
     // London tx: basefee=1gwei, max_fee=10gwei, tip=2gwei → effective = min(10,1+2)=3gwei
     const gwei: u128 = 1_000_000_000;
-    parts.ctx.tx.caller = caller;
-    parts.ctx.tx.gas_limit = 100_000;
-    parts.ctx.tx.gas_price = 10 * gwei; // max fee
-    parts.ctx.tx.gas_priority_fee = 2 * gwei; // tip
-    parts.ctx.tx.nonce = 0;
-    parts.ctx.tx.value = 0;
+    ctx.tx.caller = caller;
+    ctx.tx.gas_limit = 100_000;
+    ctx.tx.gas_price = 10 * gwei; // max fee
+    ctx.tx.gas_priority_fee = 2 * gwei; // tip
+    ctx.tx.nonce = 0;
+    ctx.tx.value = 0;
     // Empty calldata → STOP executed immediately
-    parts.ctx.block.basefee = @as(u64, @intCast(gwei));
-    parts.ctx.block.beneficiary = coinbase;
+    ctx.block.basefee = @as(u64, @intCast(gwei));
+    ctx.block.beneficiary = coinbase;
 
-    const result = try ExecuteEvm.execute(&evm);
+    const result = try mevm.execute();
 
     try std.testing.expectEqual(handler_main.ExecutionStatus.Success, result.status);
 
@@ -130,14 +110,14 @@ test "postExecution: caller reimbursed for unused gas, coinbase receives tip" {
     // Net cost = gas_used * effective_gas_price = 21000 * 3*gwei = 63_000 gwei.
     const effective_price = 3 * gwei;
     const gas_returned: u64 = 79_000;
-    const expected_caller: primitives.U256 = initial_caller_balance - @as(primitives.U256, effective_price) * parts.ctx.tx.gas_limit // deduct at effective
+    const expected_caller: primitives.U256 = initial_caller_balance - @as(primitives.U256, effective_price) * ctx.tx.gas_limit // deduct at effective
     + @as(primitives.U256, effective_price) * gas_returned; // reimburse at effective
-    const actual_caller = try readBalance(&parts.ctx, caller);
+    const actual_caller = try readBalance(&ctx, caller);
     try std.testing.expectEqual(expected_caller, actual_caller);
 
     // coinbase tip = (effective_price - basefee) * gas_used = 2gwei * 21000
     const expected_coinbase: primitives.U256 = 2 * gwei * 21_000;
-    const actual_coinbase = try readBalance(&parts.ctx, coinbase);
+    const actual_coinbase = try readBalance(&ctx, coinbase);
     try std.testing.expectEqual(expected_coinbase, actual_coinbase);
 }
 

@@ -228,6 +228,10 @@ pub const Precompiles = struct {
     optimized_access: [256]?Precompile,
     /// Whether all precompiles are short addresses
     all_short_addresses: bool,
+    /// 320-bit bitset (5 × u64) of registered short-address indices.
+    /// Bit n is set when a precompile at short-address index n is registered.
+    /// Built incrementally in add() — no separate initialization step needed.
+    precompile_bitset: [5]u64,
 
     /// Create new precompiles collection
     pub fn new() Precompiles {
@@ -236,6 +240,7 @@ pub const Precompiles = struct {
             .addresses = std.HashMap(primitives.Address, void, primitives.AddressContext, 80).init(alloc_mod.get()),
             .optimized_access = [_]?Precompile{null} ** 256,
             .all_short_addresses = true,
+            .precompile_bitset = .{0} ** 5,
         };
     }
 
@@ -250,6 +255,13 @@ pub const Precompiles = struct {
             if (index < 256) {
                 self.optimized_access[index] = precompile;
             }
+        }
+
+        // Update precompile_bitset for O(1) isCold checks in the journal.
+        if (primitives.shortAddress(precompile.address)) |n| {
+            const word = n / 64;
+            const bit = @as(u64, 1) << @intCast(n % 64);
+            if (word < 5) self.precompile_bitset[word] |= bit;
         }
     }
 

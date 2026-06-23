@@ -11,6 +11,7 @@ const handler_main = @import("main.zig");
 const mainnet_builder = @import("mainnet_builder.zig");
 
 const ExecuteEvm = mainnet_builder.ExecuteEvm;
+const MainBuilder = mainnet_builder.MainBuilder;
 const gas_costs = interpreter_mod.gas_costs;
 const ALLOC = std.heap.c_allocator;
 
@@ -21,20 +22,6 @@ const ALLOC = std.heap.c_allocator;
 const CALLER: primitives.Address = [_]u8{0xAA} ** 20;
 const CALLEE: primitives.Address = [_]u8{0xBB} ** 20;
 const COINBASE: primitives.Address = [_]u8{0xCB} ** 20;
-
-fn makeParts(db: database.InMemoryDB, spec: primitives.SpecId) struct {
-    ctx: context.DefaultContext,
-    instructions: handler_main.Instructions,
-    precompiles: handler_main.Precompiles,
-    frame_stack: handler_main.FrameStack,
-} {
-    return .{
-        .ctx = context.DefaultContext.new(db, spec),
-        .instructions = handler_main.Instructions.new(spec),
-        .precompiles = handler_main.Precompiles.new(spec),
-        .frame_stack = handler_main.FrameStack.new(),
-    };
-}
 
 fn insertEoa(db: *database.InMemoryDB, addr: primitives.Address, balance: primitives.U256, nonce: u64) !void {
     try db.insertAccount(addr, state.AccountInfo{
@@ -99,11 +86,13 @@ test "SSTORE EIP-2200: fails when gas_remaining <= 2300 (Istanbul+)" {
     try insertEoa(&db, CALLER, 1_000_000_000_000_000_000, 0);
     try insertContract(&db, CALLEE, &sstore_code);
 
-    var parts = makeParts(db, .istanbul);
-    _ = try parts.ctx.journaled_state.loadAccount(CALLER);
-    _ = try parts.ctx.journaled_state.loadAccount(CALLEE);
+    var ctx = context.DefaultContext.new(db, .istanbul);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
+    _ = try ctx.journaled_state.loadAccount(CALLER);
+    _ = try ctx.journaled_state.loadAccount(CALLEE);
 
-    var host = interpreter_mod.Host.fromCtx(&parts.ctx, null);
+    var host = interpreter_mod.Host.fromCtx(&ctx, null);
 
     // Exactly 2300 gas — EIP-2200 guard fires before SSTORE
     const result = host.call(.{
@@ -128,11 +117,13 @@ test "SSTORE EIP-2200: succeeds with sufficient gas" {
     try insertEoa(&db, CALLER, 1_000_000_000_000_000_000, 0);
     try insertContract(&db, CALLEE, &sstore_code);
 
-    var parts = makeParts(db, .istanbul);
-    _ = try parts.ctx.journaled_state.loadAccount(CALLER);
-    _ = try parts.ctx.journaled_state.loadAccount(CALLEE);
+    var ctx = context.DefaultContext.new(db, .istanbul);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
+    _ = try ctx.journaled_state.loadAccount(CALLER);
+    _ = try ctx.journaled_state.loadAccount(CALLEE);
 
-    var host = interpreter_mod.Host.fromCtx(&parts.ctx, null);
+    var host = interpreter_mod.Host.fromCtx(&ctx, null);
 
     // 50,000 gas — plenty for SSTORE set (20000 + SLOAD overhead)
     const result = host.call(.{
@@ -163,14 +154,16 @@ test "gas refund propagation: SSTORE clear in sub-call surfaces in CallResult" {
     try insertEoa(&db, CALLER, 1_000_000_000_000_000_000, 0);
     try insertContract(&db, CALLEE, &clear_code);
 
-    var parts = makeParts(db, .berlin);
-    _ = try parts.ctx.journaled_state.loadAccount(CALLER);
-    _ = try parts.ctx.journaled_state.loadAccount(CALLEE);
+    var ctx = context.DefaultContext.new(db, .berlin);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
+    _ = try ctx.journaled_state.loadAccount(CALLER);
+    _ = try ctx.journaled_state.loadAccount(CALLEE);
 
     // Pre-warm and set slot 0 to non-zero so clearing it earns a refund
-    _ = try parts.ctx.journaled_state.sstore(CALLEE, 0, 1);
+    _ = try ctx.journaled_state.sstore(CALLEE, 0, 1);
 
-    var host = interpreter_mod.Host.fromCtx(&parts.ctx, null);
+    var host = interpreter_mod.Host.fromCtx(&ctx, null);
 
     const result = host.call(.{
         .caller = CALLER,
@@ -202,26 +195,21 @@ test "full tx: plain ETH transfer to EOA succeeds and uses exactly 21000 gas" {
     try insertEoa(&db, CALLER, initial_balance, 0);
     try insertEoa(&db, CALLEE, 0, 0);
 
-    var parts = makeParts(db, .prague);
-    var evm = handler_main.Evm.init(
-        &parts.ctx,
-        null,
-        &parts.instructions,
-        &parts.precompiles,
-        &parts.frame_stack,
-    );
+    var ctx = context.DefaultContext.new(db, .prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
 
-    parts.ctx.tx.caller = CALLER;
-    parts.ctx.tx.gas_limit = 21_000;
-    parts.ctx.tx.gas_price = gwei;
-    parts.ctx.tx.gas_priority_fee = null;
-    parts.ctx.tx.nonce = 0;
-    parts.ctx.tx.value = gwei; // 1 gwei transfer
-    parts.ctx.tx.kind = .{ .Call = CALLEE };
-    parts.ctx.block.basefee = @as(u64, @intCast(gwei));
-    parts.ctx.block.beneficiary = COINBASE;
+    ctx.tx.caller = CALLER;
+    ctx.tx.gas_limit = 21_000;
+    ctx.tx.gas_price = gwei;
+    ctx.tx.gas_priority_fee = null;
+    ctx.tx.nonce = 0;
+    ctx.tx.value = gwei; // 1 gwei transfer
+    ctx.tx.kind = .{ .Call = CALLEE };
+    ctx.block.basefee = @as(u64, @intCast(gwei));
+    ctx.block.beneficiary = COINBASE;
 
-    const result = try ExecuteEvm.execute(&evm);
+    const result = try mevm.execute();
 
     try std.testing.expectEqual(handler_main.ExecutionStatus.Success, result.status);
     // Plain transfer to EOA: gas_used = 21000 (intrinsic only, no exec gas)
