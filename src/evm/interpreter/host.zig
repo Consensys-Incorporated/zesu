@@ -69,6 +69,13 @@ pub const CallInputs = struct {
     is_static: bool,
     /// EIP-8037 (Amsterdam+): state gas reservoir forwarded from parent to child.
     reservoir: u64,
+    /// Pre-loaded callee bytecode from accountInfoWithCode — skips the redundant
+    /// loadAccountWithCode in setupCallCore for the common (non-precompile) path.
+    preloaded_code: ?bytecode_mod.Bytecode = null,
+    /// Pre-EIP-161 (Frontier/Homestead): zero-value CALL to non-existent address must touch it.
+    /// Computed in callImpl from callee_info.is_empty; passed through so setupCallCore can act
+    /// on it without re-loading the account.
+    needs_pre_eip161_touch: bool = false,
 };
 
 /// Result of a selfdestruct operation
@@ -365,6 +372,30 @@ pub const Host = struct {
             .bytecode = code,
             .code_hash = code_hash,
             .is_cold = load.is_cold,
+        };
+    }
+
+    /// Load account info and code in one journal lookup.
+    /// Merges accountInfo + codeInfo into a single loadAccountWithCode call,
+    /// avoiding the redundant basic-info fetch that codeInfo would otherwise repeat.
+    pub fn accountInfoWithCode(self: *Host, addr: primitives.Address) ?struct {
+        balance: primitives.U256,
+        is_cold: bool,
+        is_empty: bool,
+        bytecode: bytecode_mod.Bytecode,
+        code_hash: primitives.Hash,
+    } {
+        const load = self.js_vtable.loadAccountWithCode(self.js, addr) catch {
+            self.ctx_error.* = context_mod.ContextError.database_error;
+            return null;
+        };
+        const acc = load.data;
+        return .{
+            .balance = acc.info.balance,
+            .is_cold = load.is_cold,
+            .is_empty = acc.stateClearAwareIsEmpty(self.cfg.spec),
+            .bytecode = if (acc.info.code) |c| c else bytecode_mod.Bytecode.new(),
+            .code_hash = acc.info.code_hash,
         };
     }
 
@@ -665,13 +696,26 @@ fn setupCallCore(js: anytype, host: *Host, inputs: CallInputs, frame_depth: usiz
         }
     }
 
-    // 3. Load callee code + EIP-7702 delegation
-    const callee_load = js.loadAccountWithCode(inputs.callee) catch {
-        host.ctx_error.* = context_mod.ContextError.database_error;
-        return .{ .failed = CallResult.failure(inputs.gas_limit) };
-    };
-    const callee_acc = callee_load.data;
-    var code = if (callee_acc.info.code) |c| c else bytecode_mod.Bytecode.new();
+    // 3. Load callee code + EIP-7702 delegation.
+    // Fast path: use pre-loaded bytecode from callImpl (already fetched for gas computation),
+    // skipping the redundant loadAccountWithCode. Fall back to a fresh load when not available
+    // (e.g. direct setupCall invocations from tests, system calls, etc.).
+    var code: bytecode_mod.Bytecode = undefined;
+    var needs_pre_eip161_touch = false;
+    if (inputs.preloaded_code) |preloaded| {
+        code = preloaded;
+        needs_pre_eip161_touch = inputs.needs_pre_eip161_touch;
+    } else {
+        const callee_load = js.loadAccountWithCode(inputs.callee) catch {
+            host.ctx_error.* = context_mod.ContextError.database_error;
+            return .{ .failed = CallResult.failure(inputs.gas_limit) };
+        };
+        const callee_acc = callee_load.data;
+        code = if (callee_acc.info.code) |c| c else bytecode_mod.Bytecode.new();
+        needs_pre_eip161_touch = inputs.value == 0 and inputs.scheme == .call and
+            !primitives.isEnabledIn(host.cfg.spec, .spurious_dragon) and
+            callee_acc.isLoadedAsNotExistingNotTouched();
+    }
     var delegation_gas: u64 = 0;
     if (code.isEip7702()) {
         const delegation_addr = code.eip7702.address;
@@ -706,10 +750,7 @@ fn setupCallCore(js: anytype, host: *Host, inputs: CallInputs, frame_depth: usiz
         {
             js.emitTransferLog(inputs.caller, inputs.target, inputs.value);
         }
-    } else if (inputs.value == 0 and inputs.scheme == .call and
-        !primitives.isEnabledIn(host.cfg.spec, .spurious_dragon) and
-        callee_acc.isLoadedAsNotExistingNotTouched())
-    {
+    } else if (needs_pre_eip161_touch) {
         // Pre-EIP-161 (Frontier/Homestead): a zero-value CALL to a non-existent address
         // still creates it as an empty account ("touches" it). EIP-161 (Spurious Dragon)
         // removed empty accounts on touch, making this a no-op; we skip it for those forks.
