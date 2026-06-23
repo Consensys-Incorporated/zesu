@@ -595,6 +595,7 @@ fn runDispatch(
     ctx: *InstructionContext,
     comptime check_pending: bool,
 ) void {
+    if (!self.bytecode.isNotEnd()) return;
     sw: switch (self.bytecode.opcode()) {
         0x00 => { // STOP
             self.bytecode.relativeJump(1);
