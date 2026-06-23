@@ -3,6 +3,8 @@ const primitives = @import("primitives");
 const bytecode = @import("bytecode");
 const context = @import("context");
 const alloc_mod = @import("zesu_allocator");
+const gas_costs = @import("gas_costs.zig");
+const opcodes = @import("opcodes/main.zig");
 const Gas = @import("gas.zig").Gas;
 const Stack = @import("stack.zig").Stack;
 const Memory = @import("memory.zig").Memory;
@@ -525,9 +527,8 @@ pub const Interpreter = struct {
 
     /// Run the interpreter until execution halts (no host).
     pub fn run(self: *Interpreter, table: *const InstructionTable) InstructionResult {
-        while (self.bytecode.isNotEnd()) {
-            self.step(table);
-        }
+        var ctx = InstructionContext{ .interpreter = self };
+        runDispatch(self, table, &ctx, false);
         return self.result;
     }
 
@@ -546,13 +547,262 @@ pub const Interpreter = struct {
 
     /// Run the interpreter until execution halts or a sub-call is pending, with full host access.
     pub fn runWithHost(self: *Interpreter, table: *const InstructionTable, host: *Host) InstructionResult {
-        while (self.bytecode.isNotEnd()) {
-            self.stepWithHost(table, host);
-            if (self.pending != .none) break;
-        }
+        var ctx = InstructionContext{ .interpreter = self, .host = host };
+        runDispatch(self, table, &ctx, true);
         return self.result;
     }
+
+    /// Reset this interpreter for a new frame without freeing the memory buffer.
+    /// The memory buffer grows to its high-water mark and is reused across frames.
+    pub fn clearReusingMemory(
+        self: *Interpreter,
+        bytecode_data: ExtBytecode,
+        input: InputsImpl,
+        is_static: bool,
+        spec_id: primitives.SpecId,
+        gas_limit: u64,
+    ) void {
+        self.memory.clear();
+        self.clear(self.memory, bytecode_data, input, is_static, spec_id, gas_limit);
+    }
 };
+
+// ---------------------------------------------------------------------------
+// Labeled-switch computed-goto dispatch (Tier 1 hot path)
+// ---------------------------------------------------------------------------
+//
+// Hot opcodes are inlined directly in switch cases — no per-opcode function
+// call or InstructionContext construction. `continue :sw` compiles to a
+// computed goto (single indirect branch). ctx is built once per runWithHost
+// call and lives in registers across iterations.
+//
+// comptime check_pending=false (run):         pending check is folded away.
+// comptime check_pending=true  (runWithHost): checks after every op.
+//
+// Cold opcodes fall to `else` which calls through InstructionTable as before.
+//
+// INVARIANT: only add opcodes here that are:
+//   1. Valid since Frontier (no fork gate needed), AND
+//   2. Behavior-stable across all forks (no semantic changes per EIP).
+// Fork-gated opcodes (e.g. SHL/SHR pre-Constantinople, PUSH0 pre-Shanghai)
+// and fork-modified opcodes (e.g. SELFDESTRUCT post-EIP-6780) must stay in
+// the cold `else` path where the InstructionTable enforces the correct
+// per-fork handler.
+
+fn runDispatch(
+    self: *Interpreter,
+    table: *const InstructionTable,
+    ctx: *InstructionContext,
+    comptime check_pending: bool,
+) void {
+    if (!self.bytecode.isNotEnd()) return;
+    sw: switch (self.bytecode.opcode()) {
+        0x00 => { // STOP
+            self.bytecode.relativeJump(1);
+            opcodes.opStop(ctx);
+        },
+        0x01 => { // ADD
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opAdd(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x02 => { // MUL
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_LOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opMul(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x03 => { // SUB
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opSub(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x10 => { // LT
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opLt(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x11 => { // GT
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opGt(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x14 => { // EQ
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opEq(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x15 => { // ISZERO
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opIsZero(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x16 => { // AND
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opAnd(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x17 => { // OR
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opOr(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x18 => { // XOR
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opXor(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x19 => { // NOT
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opNot(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x50 => { // POP
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_BASE)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opPop(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x56 => { // JUMP
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_MID)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opJump(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x57 => { // JUMPI
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_HIGH)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opJumpi(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x5B => { // JUMPDEST
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_JUMPDEST)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opJumpdest(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        // PUSH1..PUSH32: comptime N gives optimal readImmediates specialization
+        inline 0x60...0x7F => |push_op| {
+            const n = push_op - 0x60 + 1;
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opPushNImpl(ctx, n);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        // DUP1..DUP16: comptime N enables constant-folded depth checks
+        inline 0x80...0x8F => |dup_op| {
+            const n = dup_op - 0x80 + 1;
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opDupNImpl(ctx, n);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        // SWAP1..SWAP16: comptime N enables constant-folded depth checks
+        inline 0x90...0x9F => |swap_op| {
+            const n = swap_op - 0x90 + 1;
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opSwapNImpl(ctx, n);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        // Cold path: table lookup + indirect call (same as the old step() loop).
+        // Fork-gated opcodes (SHL/SHR/PUSH0 etc.) land here and are handled correctly
+        // via the table — opUnknown on old forks, real handler on new forks.
+        else => |op| {
+            self.bytecode.relativeJump(1);
+            const entry = table[op];
+            if (!self.gas.spend(entry.static_gas)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            entry.func(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+    }
+}
 
 /// Calculate number of words from bytes
 pub fn numWords(bytes: usize) usize {
