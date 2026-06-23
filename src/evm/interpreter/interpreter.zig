@@ -275,15 +275,11 @@ pub const ExtBytecode = struct {
         return self.bytecode.isValidJump(dest);
     }
 
-    /// Read n immediate bytes at current PC (zero-padded if near end of code)
-    pub fn readImmediates(self: *const ExtBytecode, comptime n: u8) [n]u8 {
+    /// Read a single immediate byte at current PC (returns 0 if past end of code)
+    pub fn readImmediate(self: *const ExtBytecode) u8 {
         const bytes = self.bytecode.bytecode();
-        var result: [n]u8 = .{0} ** n;
-        if (self.pc >= bytes.len) return result;
-        const available = bytes.len - self.pc;
-        const to_read = @min(@as(usize, n), available);
-        @memcpy(result[0..to_read], bytes[self.pc .. self.pc + to_read]);
-        return result;
+        if (self.pc >= bytes.len) return 0;
+        return bytes[self.pc];
     }
 
     pub fn isNotEnd(self: *const ExtBytecode) bool {
@@ -751,7 +747,7 @@ fn runDispatch(
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
-        // PUSH1..PUSH32: comptime N gives optimal readImmediates specialization
+        // PUSH1..PUSH32: inlined opPushNImpl reads directly from the bytecode slice
         inline 0x60...0x7F => |push_op| {
             const n = push_op - 0x60 + 1;
             self.bytecode.relativeJump(1);

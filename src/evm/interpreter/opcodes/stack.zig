@@ -117,7 +117,7 @@ pub fn makeSwapFn(comptime n: u8) InstructionFn {
 /// Gas: 3 (G_VERYLOW, charged by dispatch).
 pub fn opDupN(ctx: *InstructionContext) void {
     const stack = &ctx.interpreter.stack;
-    const imm = ctx.interpreter.bytecode.readImmediates(1)[0];
+    const imm = ctx.interpreter.bytecode.readImmediate();
     ctx.interpreter.bytecode.relativeJump(1);
     // EIP-8024: immediates 91..=127 (0x5B..=0x7F) are invalid per decode_single.
     if (imm > 90 and imm < 128) {
@@ -143,7 +143,7 @@ pub fn opDupN(ctx: *InstructionContext) void {
 /// Gas: 3 (G_VERYLOW, charged by dispatch).
 pub fn opSwapN(ctx: *InstructionContext) void {
     const stack = &ctx.interpreter.stack;
-    const imm = ctx.interpreter.bytecode.readImmediates(1)[0];
+    const imm = ctx.interpreter.bytecode.readImmediate();
     ctx.interpreter.bytecode.relativeJump(1);
     // EIP-8024: immediates 91..=127 (0x5B..=0x7F) are invalid per decode_single.
     if (imm > 90 and imm < 128) {
@@ -168,7 +168,7 @@ pub fn opSwapN(ctx: *InstructionContext) void {
 /// Gas: 3 (G_VERYLOW, charged by dispatch).
 pub fn opExchange(ctx: *InstructionContext) void {
     const stack = &ctx.interpreter.stack;
-    const imm = ctx.interpreter.bytecode.readImmediates(1)[0];
+    const imm = ctx.interpreter.bytecode.readImmediate();
     ctx.interpreter.bytecode.relativeJump(1);
     // Immediates 82..=127 (0x52..=0x7F) are invalid per EIP-8024.
     if (imm >= 82 and imm <= 127) {
