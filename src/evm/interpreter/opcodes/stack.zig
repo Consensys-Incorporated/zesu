@@ -33,9 +33,18 @@ pub inline fn opPushNImpl(ctx: *InstructionContext, comptime n: u8) void {
         ctx.interpreter.halt(.stack_overflow);
         return;
     }
-    const imm = ctx.interpreter.bytecode.readImmediates(n);
+    // Read n immediate bytes directly into the right-aligned position of the 32-byte
+    // buffer, skipping the intermediate [n]u8 copy that readImmediates would allocate.
     var buf: [32]u8 = .{0} ** 32;
-    @memcpy(buf[32 - n ..], &imm);
+    const ext = &ctx.interpreter.bytecode;
+    const bytes = ext.bytecode.bytecode();
+    const pc = ext.pc;
+    if (pc + n <= bytes.len) {
+        @memcpy(buf[32 - n ..], bytes[pc .. pc + n]);
+    } else if (pc < bytes.len) {
+        const available = bytes.len - pc;
+        @memcpy(buf[32 - n .. 32 - n + available], bytes[pc..]);
+    }
     const U = primitives.U256;
     const value: U = (@as(U, std.mem.readInt(u64, buf[0..8], .big)) << 192) |
         (@as(U, std.mem.readInt(u64, buf[8..16], .big)) << 128) |
@@ -108,7 +117,7 @@ pub fn makeSwapFn(comptime n: u8) InstructionFn {
 /// Gas: 3 (G_VERYLOW, charged by dispatch).
 pub fn opDupN(ctx: *InstructionContext) void {
     const stack = &ctx.interpreter.stack;
-    const imm = ctx.interpreter.bytecode.readImmediates(1)[0];
+    const imm = ctx.interpreter.bytecode.readImmediate();
     ctx.interpreter.bytecode.relativeJump(1);
     // EIP-8024: immediates 91..=127 (0x5B..=0x7F) are invalid per decode_single.
     if (imm > 90 and imm < 128) {
@@ -134,7 +143,7 @@ pub fn opDupN(ctx: *InstructionContext) void {
 /// Gas: 3 (G_VERYLOW, charged by dispatch).
 pub fn opSwapN(ctx: *InstructionContext) void {
     const stack = &ctx.interpreter.stack;
-    const imm = ctx.interpreter.bytecode.readImmediates(1)[0];
+    const imm = ctx.interpreter.bytecode.readImmediate();
     ctx.interpreter.bytecode.relativeJump(1);
     // EIP-8024: immediates 91..=127 (0x5B..=0x7F) are invalid per decode_single.
     if (imm > 90 and imm < 128) {
@@ -159,7 +168,7 @@ pub fn opSwapN(ctx: *InstructionContext) void {
 /// Gas: 3 (G_VERYLOW, charged by dispatch).
 pub fn opExchange(ctx: *InstructionContext) void {
     const stack = &ctx.interpreter.stack;
-    const imm = ctx.interpreter.bytecode.readImmediates(1)[0];
+    const imm = ctx.interpreter.bytecode.readImmediate();
     ctx.interpreter.bytecode.relativeJump(1);
     // Immediates 82..=127 (0x52..=0x7F) are invalid per EIP-8024.
     if (imm >= 82 and imm <= 127) {
