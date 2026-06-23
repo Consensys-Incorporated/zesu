@@ -33,9 +33,18 @@ pub inline fn opPushNImpl(ctx: *InstructionContext, comptime n: u8) void {
         ctx.interpreter.halt(.stack_overflow);
         return;
     }
-    const imm = ctx.interpreter.bytecode.readImmediates(n);
+    // Read n immediate bytes directly into the right-aligned position of the 32-byte
+    // buffer, skipping the intermediate [n]u8 copy that readImmediates would allocate.
     var buf: [32]u8 = .{0} ** 32;
-    @memcpy(buf[32 - n ..], &imm);
+    const ext = &ctx.interpreter.bytecode;
+    const bytes = ext.bytecode.bytecode();
+    const pc = ext.pc;
+    if (pc + n <= bytes.len) {
+        @memcpy(buf[32 - n ..], bytes[pc .. pc + n]);
+    } else if (pc < bytes.len) {
+        const available = bytes.len - pc;
+        @memcpy(buf[32 - n .. 32 - n + available], bytes[pc..]);
+    }
     const U = primitives.U256;
     const value: U = (@as(U, std.mem.readInt(u64, buf[0..8], .big)) << 192) |
         (@as(U, std.mem.readInt(u64, buf[8..16], .big)) << 128) |
