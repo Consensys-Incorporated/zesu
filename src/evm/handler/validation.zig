@@ -172,6 +172,7 @@ pub const Validation = struct {
         const ctx = evm.getContext();
         const tx = &ctx.tx;
         const cfg = &ctx.cfg;
+        const spec = cfg.spec;
         const js = &ctx.journaled_state;
 
         // Load caller account with code (need code to check EIP-7702 delegation exception in EIP-3607)
@@ -220,20 +221,26 @@ pub const Validation = struct {
         // EIP-4844: compute blob fees — balance validation uses max_fee_per_blob_gas (worst-case),
         // upfront deduction uses actual blob_gasprice (what the user actually pays).
         // Blob fees are NOT reimbursed in postExecution (separate fee market).
+        // Guard on Cancun+: validateBlobTx (which enforces max_fee_per_blob_gas >= blob_gasprice)
+        // only runs for Cancun+, so the invariant blob_fee <= max_blob_fee is not guaranteed
+        // for pre-Cancun specs. Without the guard, a huge blob_gasprice (saturated to u128::MAX)
+        // paired with a small max_fee_per_blob_gas would cause a U256 underflow at the deduction.
         var max_blob_fee: primitives.U256 = 0; // for balance validation (worst-case)
         var blob_fee: primitives.U256 = 0; // for upfront deduction (actual price)
-        if (tx.blob_hashes) |blob_hashes| {
-            if (blob_hashes.items.len > 0) {
-                const blob_count = blob_hashes.items.len;
-                // Balance validation: use tx.max_fee_per_blob_gas (the max the user agreed to pay)
-                max_blob_fee = @as(primitives.U256, blob_count) *
-                    @as(primitives.U256, primitives.GAS_PER_BLOB) *
-                    @as(primitives.U256, tx.max_fee_per_blob_gas);
-                // Upfront deduction: use actual blob_gasprice from the block
-                if (ctx.block.blob_excess_gas_and_price) |blob_info| {
-                    blob_fee = @as(primitives.U256, blob_count) *
+        if (primitives.isEnabledIn(spec, .cancun)) {
+            if (tx.blob_hashes) |blob_hashes| {
+                if (blob_hashes.items.len > 0) {
+                    const blob_count = blob_hashes.items.len;
+                    // Balance validation: use tx.max_fee_per_blob_gas (the max the user agreed to pay)
+                    max_blob_fee = @as(primitives.U256, blob_count) *
                         @as(primitives.U256, primitives.GAS_PER_BLOB) *
-                        @as(primitives.U256, blob_info.blob_gasprice);
+                        @as(primitives.U256, tx.max_fee_per_blob_gas);
+                    // Upfront deduction: use actual blob_gasprice from the block
+                    if (ctx.block.blob_excess_gas_and_price) |blob_info| {
+                        blob_fee = @as(primitives.U256, blob_count) *
+                            @as(primitives.U256, primitives.GAS_PER_BLOB) *
+                            @as(primitives.U256, blob_info.blob_gasprice);
+                    }
                 }
             }
         }
