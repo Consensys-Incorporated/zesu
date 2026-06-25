@@ -186,9 +186,8 @@ fn htByteList32(data: []const u8) [32]u8 {
     return mixInLength(chunk, data.len);
 }
 
-/// ByteList[2^24]: block_access_list.
-/// limit = 2^24 bytes → ceil(2^24/32) = 2^19 chunk limit → depth 19.
-/// TODO: replace with allocator-backed version for large access lists.
+/// ByteList[2^24]: unused — kept for reference.
+/// block_access_list uses htByteList2_30 (spec: ByteList[2^30], depth 25).
 fn htByteList2_24(data: []const u8) [32]u8 {
     const chunk_limit_depth = 19;
     if (data.len == 0) return mixInLength(zeroHash(chunk_limit_depth), 0);
@@ -354,7 +353,7 @@ fn htExecutionPayload(alloc: std.mem.Allocator, ep: input.ExecutionPayload) !([3
     // f17..f18: Amsterdam+ only. V3 EP (Prague/Osaka) has slot_number == null;
     // leave chunks[17..31] as zero to match Reth's 17-field ExecutionPayloadV3 hash.
     if (ep.slot_number != null) {
-        chunks[17] = htByteList2_24(ep.block_access_list);
+        chunks[17] = htByteList2_30(ep.block_access_list);
         chunks[18] = htU64(ep.slot_number.?);
     }
 
