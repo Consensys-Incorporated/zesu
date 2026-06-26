@@ -632,7 +632,7 @@ pub fn build(b: *std.Build) void {
             "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
     }).step);
 
-    const zkevm_version = "tests-zkevm@v0.4.1";
+    const zkevm_version = "tests-zkevm@v0.4.2"; // THIS RELEASE DOES NOT YET EXIST, FIX ME ONCE UPDATED FIXTURES ARE PUBLISHED
     const fetch_zkevm_step = b.step("fetch-zkevm-fixtures", "Download " ++ zkevm_version ++ " execution-specs fixtures");
     fetch_zkevm_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
