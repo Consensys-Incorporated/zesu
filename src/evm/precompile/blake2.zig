@@ -29,14 +29,18 @@ pub fn blake2fRun(input: []const u8, gas_limit: u64) main.PrecompileResult {
     if (f_flag > 1)
         return .{ .err = main.PrecompileError.Blake2WrongFinalIndicatorFlag };
 
-    // Copy h (64 bytes) — accel.blake2f updates it in place
-    var h_bytes: [64]u8 = undefined;
+    // Some zkvm implementations require h, m, and t to be 8-byte aligned.
+    // m/t sit at input offsets 68/196 (both 4 mod 8), so we copy all three
+    // into aligned stack buffers. This is cheap and harmless for implementations
+    // that don't require alignment. h is also updated in place by accel.blake2f.
+    var h_bytes: [64]u8 align(8) = undefined;
     @memcpy(&h_bytes, input[4..68]);
+    var m_bytes: [128]u8 align(8) = undefined;
+    @memcpy(&m_bytes, input[68..196]);
+    var t_bytes: [16]u8 align(8) = undefined;
+    @memcpy(&t_bytes, input[196..212]);
 
-    const m_bytes: *const [128]u8 = input[68..196];
-    const t_bytes: *const [16]u8 = input[196..212];
-
-    if (!accel.blake2f(rounds, &h_bytes, m_bytes, t_bytes, f_flag))
+    if (!accel.blake2f(rounds, &h_bytes, &m_bytes, &t_bytes, f_flag))
         return .{ .err = main.PrecompileError.Blake2WrongFinalIndicatorFlag };
 
     const heap_out = alloc_mod.get().dupe(u8, &h_bytes) catch
