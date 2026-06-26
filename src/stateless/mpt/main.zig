@@ -1658,18 +1658,101 @@ fn updHashOrEmbedExIndexed(alloc: std.mem.Allocator, node_rlp: []const u8, index
     return updRlpBytes(alloc, &h);
 }
 
+/// Number of bytes required to RLP-encode `data` as a byte string (mirrors updRlpBytes logic).
+fn rlpBytesLen(data: []const u8) usize {
+    if (data.len == 0) return 1;
+    if (data.len == 1 and data[0] < 0x80) return 1;
+    if (data.len <= 55) return 1 + data.len;
+    var lc: usize = 0;
+    var lv = data.len;
+    while (lv > 0) : (lv >>= 8) lc += 1;
+    return 1 + lc + data.len;
+}
+
+/// Write `data` as an RLP byte string into `buf[pos..]`. Returns updated position.
+fn rlpBytesWrite(buf: []u8, pos: usize, data: []const u8) usize {
+    if (data.len == 0) {
+        buf[pos] = 0x80;
+        return pos + 1;
+    }
+    if (data.len == 1 and data[0] < 0x80) {
+        buf[pos] = data[0];
+        return pos + 1;
+    }
+    if (data.len <= 55) {
+        buf[pos] = @intCast(0x80 + data.len);
+        @memcpy(buf[pos + 1 ..][0..data.len], data);
+        return pos + 1 + data.len;
+    }
+    var len_buf: [8]u8 = undefined;
+    var lv = data.len;
+    var lc: usize = 0;
+    while (lv > 0) : (lv >>= 8) lc += 1;
+    lv = data.len;
+    var li = lc;
+    while (li > 0) : (li -= 1) {
+        len_buf[li - 1] = @intCast(lv & 0xff);
+        lv >>= 8;
+    }
+    buf[pos] = @intCast(0xb7 + lc);
+    @memcpy(buf[pos + 1 ..][0..lc], len_buf[0..lc]);
+    @memcpy(buf[pos + 1 + lc ..][0..data.len], data);
+    return pos + 1 + lc + data.len;
+}
+
+/// Write an RLP list header for a payload of `payload` bytes into `buf[pos..]`.
+/// Returns updated position (i.e. start of payload region).
+fn rlpListHeaderWrite(buf: []u8, pos: usize, payload: usize) usize {
+    if (payload <= 55) {
+        buf[pos] = @intCast(0xc0 + payload);
+        return pos + 1;
+    }
+    var len_buf: [8]u8 = undefined;
+    var lv = payload;
+    var lc: usize = 0;
+    while (lv > 0) : (lv >>= 8) lc += 1;
+    lv = payload;
+    var li = lc;
+    while (li > 0) : (li -= 1) {
+        len_buf[li - 1] = @intCast(lv & 0xff);
+        lv >>= 8;
+    }
+    buf[pos] = @intCast(0xf7 + lc);
+    @memcpy(buf[pos + 1 ..][0..lc], len_buf[0..lc]);
+    return pos + 1 + lc;
+}
+
+/// Returns the number of bytes in an RLP list header for `payload` content bytes.
+fn rlpListHeaderLen(payload: usize) usize {
+    if (payload <= 55) return 1;
+    var lc: usize = 0;
+    var lv = payload;
+    while (lv > 0) : (lv >>= 8) lc += 1;
+    return 1 + lc;
+}
+
 fn updMakeLeaf(alloc: std.mem.Allocator, path_nibs: []const u8, value: []const u8) ![]const u8 {
     var hp_buf: [65]u8 = undefined;
     const hp = nibbles.hpEncode(path_nibs, true, &hp_buf);
-    const items = [_][]const u8{ try updRlpBytes(alloc, hp), try updRlpBytes(alloc, value) };
-    return updRlpList(alloc, &items);
+    const payload = rlpBytesLen(hp) + rlpBytesLen(value);
+    const out = try alloc.alloc(u8, rlpListHeaderLen(payload) + payload);
+    var pos = rlpListHeaderWrite(out, 0, payload);
+    pos = rlpBytesWrite(out, pos, hp);
+    _ = rlpBytesWrite(out, pos, value);
+    return out;
 }
 
 fn updMakeExtension(alloc: std.mem.Allocator, path_nibs: []const u8, child_ref: []const u8) ![]const u8 {
     var hp_buf: [65]u8 = undefined;
     const hp = nibbles.hpEncode(path_nibs, false, &hp_buf);
-    const items = [_][]const u8{ try updRlpBytes(alloc, hp), child_ref };
-    return updRlpList(alloc, &items);
+    // child_ref is already an RLP-encoded list item (either an inline node or rlp(hash)),
+    // so it contributes its raw bytes directly to the list payload.
+    const payload = rlpBytesLen(hp) + child_ref.len;
+    const out = try alloc.alloc(u8, rlpListHeaderLen(payload) + payload);
+    var pos = rlpListHeaderWrite(out, 0, payload);
+    pos = rlpBytesWrite(out, pos, hp);
+    @memcpy(out[pos..][0..child_ref.len], child_ref);
+    return out;
 }
 
 fn updEncodeBranch(
