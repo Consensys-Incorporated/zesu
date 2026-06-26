@@ -41,7 +41,7 @@ pub const AccountState = struct {
 
 /// RLP encoding of an empty node (single byte 0x80). Used as a static sentinel
 /// to avoid bump-allocator dupe calls for the common empty-node case in trie updates.
-const EMPTY_NODE_RLP: [1]u8 = .{0x80};
+pub const EMPTY_NODE_RLP: [1]u8 = .{0x80};
 
 // ─── keccak256 ─────────────────────────────────────────────────────────────────
 
@@ -1762,7 +1762,8 @@ fn updEncodeBranch(
 ) ![]const u8 {
     var items: [17][]const u8 = undefined;
     for (children_enc, 0..) |enc, i| items[i] = enc;
-    items[16] = try updRlpBytes(alloc, value);
+    //items[16] = try updRlpBytes(alloc, value);
+    items[16] = if (value.len == 0) &EMPTY_NODE_RLP else try updRlpBytes(alloc, value);
     return updRlpList(alloc, &items);
 }
 

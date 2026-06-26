@@ -7,6 +7,7 @@
 const std = @import("std");
 const nibbles = @import("nibbles.zig");
 const accel = @import("accelerators");
+const mpt = @import("main.zig");
 
 pub const EMPTY_TRIE_HASH: [32]u8 = [_]u8{
     0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6,
@@ -61,7 +62,7 @@ pub fn trieRoot(alloc: std.mem.Allocator, items: []KV) ![32]u8 {
 fn buildNode(alloc: std.mem.Allocator, items: anytype, depth: usize) ![]const u8 {
     if (items.len == 0) {
         // Empty node: RLP of empty string
-        return alloc.dupe(u8, &.{0x80});
+        return &mpt.EMPTY_NODE_RLP;
     }
 
     if (items.len == 1) {
