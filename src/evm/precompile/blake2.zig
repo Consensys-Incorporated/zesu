@@ -29,11 +29,10 @@ pub fn blake2fRun(input: []const u8, gas_limit: u64) main.PrecompileResult {
     if (f_flag > 1)
         return .{ .err = main.PrecompileError.Blake2WrongFinalIndicatorFlag };
 
-    // ZisK's blake2 syscall reads an indirection table of pointers and requires
-    // each (h, m, t) pointer to be 8-byte aligned. m/t sit at input offsets
-    // 68/196 (both 4 mod 8) so the raw input pointers trap; copy all three into
-    // 8-byte-aligned stack buffers before the host call. h is also updated in
-    // place by accel.blake2f.
+    // Some zkvm implementations require h, m, and t to be 8-byte aligned.
+    // m/t sit at input offsets 68/196 (both 4 mod 8), so we copy all three
+    // into aligned stack buffers. This is cheap and harmless for implementations
+    // that don't require alignment. h is also updated in place by accel.blake2f.
     var h_bytes: [64]u8 align(8) = undefined;
     @memcpy(&h_bytes, input[4..68]);
     var m_bytes: [128]u8 align(8) = undefined;
