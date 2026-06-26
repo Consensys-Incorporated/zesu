@@ -32,8 +32,9 @@ pub fn ecrecover(msg: *const [32]u8, sig: *const [64]u8, recid: u8, output: *[64
 
 pub fn ripemd160(data: []const u8, output: *[32]u8) void {
     const hash = ripemd160_impl.ripemd160(data);
+    // EVM output layout: 12 zero bytes followed by the 20-byte digest.
     output.* = [_]u8{0} ** 32;
-    @memcpy(output[0..20], &hash);
+    @memcpy(output[12..32], &hash);
 }
 
 pub fn modexp(base: []const u8, exp: []const u8, modulus: []const u8, output: []u8) bool {
