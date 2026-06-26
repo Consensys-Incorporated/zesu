@@ -36,16 +36,11 @@ pub fn ripemd160Run(input: []const u8, gas_limit: u64) main.PrecompileResult {
     if (gas_used > gas_limit)
         return .{ .err = main.PrecompileError.OutOfGas };
 
-    // accel.ripemd160 writes a 20-byte hash zero-padded to 32 bytes (bytes 0–19 = hash, 20–31 = 0).
-    // EVM wants: 12 zero bytes, then the 20-byte hash.
-    var raw: [32]u8 = undefined;
-    accel.ripemd160(input, &raw);
-
-    // raw[0..20] = hash, raw[20..32] = 0. EVM layout = 12 zeros + hash.
-    var padded: [32]u8 = [_]u8{0} ** 32;
-    @memcpy(padded[12..32], raw[0..20]);
-
-    const heap_out = alloc_mod.get().dupe(u8, &padded) catch
+    // accel.ripemd160 writes the EVM output layout directly (12 zero bytes +
+    // 20-byte digest), so the host result lands straight in the heap buffer —
+    // no intermediate copy or re-pad needed.
+    const heap_out = alloc_mod.get().alloc(u8, 32) catch
         return .{ .err = main.PrecompileError.OutOfGas };
+    accel.ripemd160(input, heap_out[0..32]);
     return .{ .success = main.PrecompileOutput.new(gas_used, heap_out) };
 }

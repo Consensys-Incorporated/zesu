@@ -75,7 +75,8 @@ pub inline fn sha256(data: []const u8, output: *Hash32) void {
     impl.sha256(data, output);
 }
 
-/// RIPEMD-160 (precompile 0x03). Produces a 20-byte hash zero-padded to 32 bytes.
+/// RIPEMD-160 (precompile 0x03). Writes the EVM output layout directly:
+/// 12 zero bytes followed by the 20-byte digest (output[12..32] = digest).
 pub inline fn ripemd160(data: []const u8, output: *Hash32) void {
     impl.ripemd160(data, output);
 }

@@ -50,6 +50,9 @@ pub fn ecrecover(msg: *const [32]u8, sig: *const [64]u8, recid: u8, output: *[64
 }
 
 pub fn ripemd160(data: []const u8, output: *[32]u8) void {
+    // ZisK's zkvm_ripemd160 writes the 20-byte digest right-aligned in the
+    // 32-byte word (12 leading zero bytes) — exactly the accel contract's EVM
+    // output layout. Pass through directly: no marshalling steps on the guest.
     _ = zkvm_ripemd160(data.ptr, data.len, output);
 }
 
