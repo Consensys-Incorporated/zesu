@@ -186,28 +186,6 @@ fn htByteList32(data: []const u8) [32]u8 {
     return mixInLength(chunk, data.len);
 }
 
-/// ByteList[2^24]: unused — kept for reference.
-/// block_access_list uses htByteList2_30 (spec: ByteList[2^30], depth 25).
-fn htByteList2_24(data: []const u8) [32]u8 {
-    const chunk_limit_depth = 19;
-    if (data.len == 0) return mixInLength(zeroHash(chunk_limit_depth), 0);
-    const nchunks = (data.len + 31) / 32;
-    if (nchunks <= 32) {
-        var leaf_buf: [32][32]u8 = undefined;
-        for (0..nchunks) |i| {
-            leaf_buf[i] = [_]u8{0} ** 32;
-            const start = i * 32;
-            const end = @min(start + 32, data.len);
-            @memcpy(leaf_buf[i][0 .. end - start], data[start..end]);
-        }
-        const root = sparseRoot(leaf_buf[0..nchunks], chunk_limit_depth);
-        return mixInLength(root, data.len);
-    } else {
-        const root = sparseRootFromBytes(data, chunk_limit_depth);
-        return mixInLength(root, data.len);
-    }
-}
-
 /// ByteList[2^30]: one raw transaction.
 /// limit = 2^30 bytes → 2^25 chunk limit → depth 25.
 fn htByteList2_30(tx_bytes: []const u8) [32]u8 {
