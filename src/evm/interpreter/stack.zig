@@ -1,9 +1,25 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const primitives = @import("primitives");
 const alloc_mod = @import("zesu_allocator");
 
 /// EVM interpreter stack limit.
 pub const STACK_LIMIT: usize = 1024;
+
+/// Recycle EVM stack backing buffers on the zkVM target only.
+///
+/// The zkVM bump allocator never reclaims (free is a no-op), so the fixed
+/// STACK_LIMIT*32-byte stack allocated per call frame would accumulate and
+/// exhaust the heap on deep-call / high-iteration workloads. A buffer is only
+/// returned to the pool at frame teardown (deinit), by which point nothing
+/// references it, and it is only ever reused as another stack — so there is no
+/// cross-type aliasing. The guest is single-threaded, so a plain global free
+/// list (intrusive: the next pointer lives in the buffer's first word) is safe.
+///
+/// Native builds use a real freeing allocator and keep plain alloc/free, which
+/// also sidesteps any sharing of this global across parallel test runners.
+const pool_enabled = builtin.target.os.tag == .freestanding;
+var stack_pool_head: ?[*]primitives.U256 = null;
 
 /// EVM stack with STACK_LIMIT capacity of words.
 /// Heap-allocates backing storage so Interpreter can live on the native call stack.
@@ -13,15 +29,30 @@ pub const Stack = struct {
     /// Current number of items on the stack.
     length: usize = 0,
 
-    /// Create a new stack (allocates STACK_LIMIT * 32 bytes on the heap).
+    /// Create a new stack (STACK_LIMIT * 32 bytes). Reuses a pooled backing
+    /// buffer on the zkVM target; otherwise allocates fresh.
     pub fn new() Stack {
+        if (pool_enabled) {
+            if (stack_pool_head) |buf| {
+                // Pop: the head's next pointer is stored in its first word.
+                stack_pool_head = @as(*const ?[*]primitives.U256, @ptrCast(@alignCast(buf))).*;
+                return Stack{ .data = buf[0..STACK_LIMIT], .length = 0 };
+            }
+        }
         const backing = alloc_mod.get().alloc(primitives.U256, STACK_LIMIT) catch
             @panic("failed to allocate EVM stack");
         return Stack{ .data = backing, .length = 0 };
     }
 
-    /// Free the backing allocation.
+    /// Return the backing buffer to the pool (zkVM) or free it (native).
     pub fn deinit(self: *Stack) void {
+        if (pool_enabled) {
+            // Push: store the current head in this buffer's first word.
+            const buf = self.data.ptr;
+            @as(*?[*]primitives.U256, @ptrCast(@alignCast(buf))).* = stack_pool_head;
+            stack_pool_head = buf;
+            return;
+        }
         alloc_mod.get().free(self.data);
     }
 
