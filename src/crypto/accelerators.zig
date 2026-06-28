@@ -91,6 +91,26 @@ pub inline fn modexp(
     return impl.modexp(base, exp, modulus, output);
 }
 
+// ── 256-bit modular arithmetic opcodes ───────────────────────────────────────
+// Offloaded to the zkVM's circuit accelerators (ZisK syscall_arith256_mod);
+// native builds compute them with wide-integer arithmetic. All return 0 when
+// the modulus is 0, matching EVM semantics.
+
+/// MOD (opcode 0x06): a mod n.
+pub inline fn mod256(a: u256, n: u256) u256 {
+    return impl.mod256(a, n);
+}
+
+/// ADDMOD (opcode 0x08): (a + b) mod n.
+pub inline fn addmod(a: u256, b: u256, n: u256) u256 {
+    return impl.addmod(a, b, n);
+}
+
+/// MULMOD (opcode 0x09): (a * b) mod n.
+pub inline fn mulmod(a: u256, b: u256, n: u256) u256 {
+    return impl.mulmod(a, b, n);
+}
+
 /// BN254 G1 point addition (precompile 0x06, EIP-196).
 pub inline fn bn254_g1_add(p1: *const Bytes64, p2: *const Bytes64, result: *Bytes64) bool {
     return impl.bn254_g1_add(p1, p2, result);

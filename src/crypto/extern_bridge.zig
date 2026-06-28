@@ -31,6 +31,12 @@ extern fn zkvm_bls12_pairing(pairs: [*]const Bls12PairingPair, num_pairs: usize,
 extern fn zkvm_bls12_map_fp_to_g1(field_element: *const [48]u8, result: *[96]u8) i32;
 extern fn zkvm_bls12_map_fp2_to_g2(field_element: *const [96]u8, result: *[192]u8) i32;
 extern fn zkvm_secp256r1_verify(msg: *const [32]u8, sig: *const [64]u8, pubkey: *const [64]u8, verified: *bool) i32;
+// 256-bit modular arithmetic. The *_c entry points take 4×u64 little-endian
+// limbs — identical to zesu's u256 in-memory layout — so operands pass via a
+// zero-cost @bitCast (no big-endian conversion). Used by EVM MOD/ADDMOD/MULMOD.
+extern fn reduce_mod256_c(a: *const [4]u64, m: *const [4]u64, result: *[4]u64) void;
+extern fn add_mod256_c(a: *const [4]u64, b: *const [4]u64, m: *const [4]u64, result: *[4]u64) void;
+extern fn mul_mod256_c(a: *const [4]u64, b: *const [4]u64, m: *const [4]u64, result: *[4]u64) void;
 
 // ── accel_impl interface ───────────────────────────────────────────────────────
 
@@ -59,6 +65,40 @@ pub fn ripemd160(data: []const u8, output: *[32]u8) void {
 
 pub fn modexp(base: []const u8, exp: []const u8, modulus: []const u8, output: []u8) bool {
     return zkvm_modexp(base.ptr, base.len, exp.ptr, exp.len, modulus.ptr, modulus.len, output.ptr) == 0;
+}
+
+// ── 256-bit modular arithmetic opcodes ───────────────────────────────────────
+// Operands pass as 4×u64 LE limbs via @bitCast (zesu's u256 already has that
+// layout — no conversion). The n == 0 guard matches EVM semantics (result 0)
+// and keeps the zero modulus away from the accelerator.
+
+pub fn mod256(a: u256, n: u256) u256 {
+    if (n == 0) return 0;
+    const al: [4]u64 = @bitCast(a);
+    const nl: [4]u64 = @bitCast(n);
+    var out: [4]u64 = undefined;
+    reduce_mod256_c(&al, &nl, &out);
+    return @bitCast(out);
+}
+
+pub fn addmod(a: u256, b: u256, n: u256) u256 {
+    if (n == 0) return 0;
+    const al: [4]u64 = @bitCast(a);
+    const bl: [4]u64 = @bitCast(b);
+    const nl: [4]u64 = @bitCast(n);
+    var out: [4]u64 = undefined;
+    add_mod256_c(&al, &bl, &nl, &out);
+    return @bitCast(out);
+}
+
+pub fn mulmod(a: u256, b: u256, n: u256) u256 {
+    if (n == 0) return 0;
+    const al: [4]u64 = @bitCast(a);
+    const bl: [4]u64 = @bitCast(b);
+    const nl: [4]u64 = @bitCast(n);
+    var out: [4]u64 = undefined;
+    mul_mod256_c(&al, &bl, &nl, &out);
+    return @bitCast(out);
 }
 
 pub fn bn254_g1_add(p1: *const [64]u8, p2: *const [64]u8, result: *[64]u8) bool {

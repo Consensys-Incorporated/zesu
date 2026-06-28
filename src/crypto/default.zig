@@ -41,6 +41,25 @@ pub fn modexp(base: []const u8, exp: []const u8, modulus: []const u8, output: []
     return modexp_impl.modexp(base, exp, modulus, output);
 }
 
+// ── 256-bit modular arithmetic opcodes (native: wide-integer arithmetic) ──────
+
+pub fn mod256(a: u256, n: u256) u256 {
+    if (n == 0) return 0;
+    return a % n;
+}
+
+pub fn addmod(a: u256, b: u256, n: u256) u256 {
+    if (n == 0) return 0;
+    // 257-bit intermediate so a + b cannot overflow before the reduction.
+    return @intCast((@as(u257, a) + @as(u257, b)) % @as(u257, n));
+}
+
+pub fn mulmod(a: u256, b: u256, n: u256) u256 {
+    if (n == 0) return 0;
+    // 512-bit intermediate so a * b cannot overflow before the reduction.
+    return @intCast((@as(u512, a) * @as(u512, b)) % @as(u512, n));
+}
+
 pub fn bn254_g1_add(p1: *const [64]u8, p2: *const [64]u8, result: *[64]u8) bool {
     result.* = mcl_wrapper.g1Add(p1.*, p2.*) catch return false;
     return true;
