@@ -41,6 +41,13 @@ pub fn modexp(base: []const u8, exp: []const u8, modulus: []const u8, output: []
     return modexp_impl.modexp(base, exp, modulus, output);
 }
 
+// ── 256-bit division opcodes (native: hardware divide) ────────────────────────
+
+pub fn div256(a: u256, b: u256) u256 {
+    if (b == 0) return 0;
+    return a / b;
+}
+
 pub fn bn254_g1_add(p1: *const [64]u8, p2: *const [64]u8, result: *[64]u8) bool {
     result.* = mcl_wrapper.g1Add(p1.*, p2.*) catch return false;
     return true;

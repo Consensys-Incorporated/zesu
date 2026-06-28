@@ -31,6 +31,9 @@ extern fn zkvm_bls12_pairing(pairs: [*]const Bls12PairingPair, num_pairs: usize,
 extern fn zkvm_bls12_map_fp_to_g1(field_element: *const [48]u8, result: *[96]u8) i32;
 extern fn zkvm_bls12_map_fp2_to_g2(field_element: *const [96]u8, result: *[192]u8) i32;
 extern fn zkvm_secp256r1_verify(msg: *const [32]u8, sig: *const [64]u8, pubkey: *const [64]u8, verified: *bool) i32;
+// Unsigned 256-bit division (4×u64 little-endian limbs): writes a / b, returns
+// 1 if b != 0, 0 if b == 0. Used by the EVM DIV/SDIV opcodes.
+extern fn checked_div256_c(a: *const [4]u64, b: *const [4]u64, result: *[4]u64) u8;
 
 // ── accel_impl interface ───────────────────────────────────────────────────────
 
@@ -59,6 +62,19 @@ pub fn ripemd160(data: []const u8, output: *[32]u8) void {
 
 pub fn modexp(base: []const u8, exp: []const u8, modulus: []const u8, output: []u8) bool {
     return zkvm_modexp(base.ptr, base.len, exp.ptr, exp.len, modulus.ptr, modulus.len, output.ptr) == 0;
+}
+
+// ── 256-bit division opcodes ─────────────────────────────────────────────────
+// Operands pass as 4×u64 LE limbs via @bitCast (zesu's u256 already has that
+// layout — no conversion). The b == 0 guard matches EVM semantics (result 0)
+// and keeps a zero divisor away from the accelerator.
+pub fn div256(a: u256, b: u256) u256 {
+    if (b == 0) return 0;
+    const al: [4]u64 = @bitCast(a);
+    const bl: [4]u64 = @bitCast(b);
+    var out: [4]u64 = undefined;
+    _ = checked_div256_c(&al, &bl, &out);
+    return @bitCast(out);
 }
 
 pub fn bn254_g1_add(p1: *const [64]u8, p2: *const [64]u8, result: *[64]u8) bool {

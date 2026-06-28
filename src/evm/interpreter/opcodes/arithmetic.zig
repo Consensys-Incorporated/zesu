@@ -1,5 +1,6 @@
 const std = @import("std");
 const primitives = @import("primitives");
+const accel = @import("accelerators");
 const InstructionContext = @import("../instruction_context.zig").InstructionContext;
 const gas_costs = @import("../gas_costs.zig");
 
@@ -56,7 +57,7 @@ pub fn opDiv(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = if (b != 0) a / b else 0;
+    stack.setTopUnsafe().* = accel.div256(a, b);
 }
 
 /// SDIV opcode (0x05): a / b (signed, division by zero returns 0)
@@ -506,7 +507,7 @@ pub fn sdiv(a: primitives.U256, b: primitives.U256) primitives.U256 {
     const abs_a = if (a_negative) (~a) +% 1 else a;
     const abs_b = if (b_negative) (~b) +% 1 else b;
 
-    const abs_result = abs_a / abs_b;
+    const abs_result = accel.div256(abs_a, abs_b);
 
     const result_negative = a_negative != b_negative;
     return if (result_negative) (~abs_result) +% 1 else abs_result;

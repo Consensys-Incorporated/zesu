@@ -91,6 +91,16 @@ pub inline fn modexp(
     return impl.modexp(base, exp, modulus, output);
 }
 
+// ── 256-bit division opcodes ─────────────────────────────────────────────────
+// Offloaded to the zkVM's div256 circuit accelerator; native builds use the
+// hardware divide. Returns 0 when b == 0, matching EVM semantics.
+
+/// Unsigned 256-bit division a / b (DIV opcode 0x04; also the magnitude
+/// division inside signed SDIV 0x05). Returns 0 when b == 0.
+pub inline fn div256(a: u256, b: u256) u256 {
+    return impl.div256(a, b);
+}
+
 /// BN254 G1 point addition (precompile 0x06, EIP-196).
 pub inline fn bn254_g1_add(p1: *const Bytes64, p2: *const Bytes64, result: *Bytes64) bool {
     return impl.bn254_g1_add(p1, p2, result);
