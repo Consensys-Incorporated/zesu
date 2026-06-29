@@ -6,6 +6,29 @@
 ///   zesu (native):     accel_impl = default.zig        (std.crypto + C libs)
 ///   zesu-core (zkvm):  accel_impl = extern_bridge.zig  (extern fn zkvm_* → zisk_accel.o)
 const impl = @import("accel_impl");
+const std = @import("std");
+const builtin = @import("builtin");
+
+// ── keccak256 key-hash memo (zkVM only) ───────────────────────────────────────
+//
+// Secure-trie keys are keccak256 of a raw 20-byte address / 32-byte slot, and the
+// same address/slot is hashed repeatedly across a block (pre-state proof read AND
+// state-root rebuild; the same slot number recurs across contracts) — ~56-67%
+// redundant on real mainnet blocks. keccak256 is pure, so memoizing it is always
+// sound. Done here at the single chokepoint so every caller benefits regardless
+// of code path, restricted to 20/32-byte inputs (the key hashes; node hashes are
+// larger, unique, and skip the memo).
+//
+// Static direct-mapped cache: no allocator, and under a sparse zkVM memory cost
+// model only touched buckets count toward proving cost, so generous capacity is
+// free. A bucket collision recomputes and overwrites, so the result is always correct.
+// zkVM-only (single-threaded → plain globals are safe; native recomputes and
+// keeps no shared state across parallel test runners). kmemo_len 0 = empty slot.
+const memo_enabled = builtin.target.os.tag == .freestanding;
+const KMEMO_LEN = 1 << 14; // 16384 buckets
+var kmemo_len = [_]u8{0} ** KMEMO_LEN;
+var kmemo_key: [KMEMO_LEN][32]u8 = undefined;
+var kmemo_val: [KMEMO_LEN][32]u8 = undefined;
 
 // ── Type aliases ──────────────────────────────────────────────────────────────
 
@@ -48,6 +71,18 @@ pub const Bls12PairingPair = extern struct {
 // ── Public API — delegating to accel_impl ─────────────────────────────────────
 
 pub inline fn keccak256(data: []const u8, output: *Hash32) void {
+    if (memo_enabled and (data.len == 20 or data.len == 32)) {
+        const idx = std.mem.readInt(u32, data[0..4], .little) & (KMEMO_LEN - 1);
+        if (kmemo_len[idx] == data.len and std.mem.eql(u8, kmemo_key[idx][0..data.len], data)) {
+            output.* = kmemo_val[idx];
+            return;
+        }
+        impl.keccak256(data, output);
+        kmemo_len[idx] = @intCast(data.len);
+        @memcpy(kmemo_key[idx][0..data.len], data);
+        kmemo_val[idx] = output.*;
+        return;
+    }
     impl.keccak256(data, output);
 }
 
