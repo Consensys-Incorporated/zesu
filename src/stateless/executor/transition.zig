@@ -632,8 +632,13 @@ pub fn transitionWithContext(
     // Upper bound: all pre-state accounts plus a few new accounts per tx.
     const account_hint: u32 = @intCast(pre_alloc_in.count() + txs.len * 4);
     try ctx.journaled_state.inner.evm_state.ensureTotalCapacity(account_hint);
-    try ctx.journaled_state.inner.bal_pre_accounts.ensureTotalCapacity(account_hint);
-    try ctx.journaled_state.inner.bal_pending_accounts.ensureTotalCapacity(account_hint);
+    // EIP-7928 BAL maps are only populated/consumed on Amsterdam+; pre-Amsterdam they
+    // stay empty (recorders gated), so skip pre-sizing them — it only touches RAM
+    // (proving-cost footprint) for buckets never used.
+    if (primitives.isEnabledIn(spec, .amsterdam)) {
+        try ctx.journaled_state.inner.bal_pre_accounts.ensureTotalCapacity(account_hint);
+        try ctx.journaled_state.inner.bal_pending_accounts.ensureTotalCapacity(account_hint);
+    }
     // ~64 journal entries per tx on average (account touches, balance changes, warms, etc.)
     try ctx.journaled_state.inner.journal.ensureTotalCapacity(alloc_mod.get(), txs.len * 64);
 
