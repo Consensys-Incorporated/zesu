@@ -588,6 +588,7 @@ pub const JournalInner = struct {
         // EIP-7928: slots where present != original at commit boundary are flagged in
         // bal_committed_changed so cross-tx net-zero writes are storageChanges, not reads.
         // Skip accounts created AND selfdestructed in the same tx (net zero effect).
+        const bal_enabled = primitives.isEnabledIn(self.spec, .amsterdam);
         for (self.journal.items) |entry| {
             const data = switch (entry) {
                 .StorageChanged => |d| d,
@@ -597,11 +598,18 @@ pub const JournalInner = struct {
             if (acct.status.created and acct.status.self_destructed) continue;
             const slot = acct.storage.getPtr(data.key) orelse continue;
             if (slot.present_value == slot.original_value) continue;
-            // EIP-7928: record cross-tx dirty slot.
-            const gop = self.bal_committed_changed.getOrPut(data.address) catch continue;
-            if (!gop.found_existing) gop.value_ptr.* = std.AutoHashMap(primitives.StorageKey, void).init(alloc_mod.get());
-            gop.value_ptr.put(data.key, {}) catch {};
-            // EIP-2200: original_value becomes present_value at tx commit.
+            // EIP-7928 (Amsterdam+) only: record cross-tx dirty slot. Pre-Amsterdam this
+            // map is never consumed, so skip the per-entry getOrPut/put bookkeeping.
+            if (bal_enabled) {
+                const gop = self.bal_committed_changed.getOrPut(data.address) catch {
+                    // OOM: best-effort — still perform the EIP-2200 reset below.
+                    slot.original_value = slot.present_value;
+                    continue;
+                };
+                if (!gop.found_existing) gop.value_ptr.* = std.AutoHashMap(primitives.StorageKey, void).init(alloc_mod.get());
+                gop.value_ptr.put(data.key, {}) catch {};
+            }
+            // EIP-2200 (all forks): original_value becomes present_value at tx commit.
             slot.original_value = slot.present_value;
         }
 
