@@ -487,29 +487,35 @@ pub const JournalInner = struct {
     /// Record an account at its pre-block state (null = non-existent account).
     /// Uses first-access-wins: if the address is already in pre or pending, skip.
     fn recordAccountAccess(self: *JournalInner, address: primitives.Address, info: ?state.AccountInfo) void {
-        if (self.bal_pre_accounts.contains(address) or self.bal_pending_accounts.contains(address)) return;
-        const pre: AccountPreState = if (info) |i| .{
+        // EIP-7928 (Amsterdam+) only: skip the BAL bookkeeping entirely on older forks.
+        if (!primitives.isEnabledIn(self.spec, .amsterdam)) return;
+        if (self.bal_pre_accounts.contains(address)) return;
+        // Single getOrPut on bal_pending_accounts (replaces a separate contains + put).
+        const gop = self.bal_pending_accounts.getOrPut(address) catch return;
+        if (gop.found_existing) return; // first-access-wins
+        gop.value_ptr.* = if (info) |i| .{
             .nonce = i.nonce,
             .balance = i.balance,
             .code_hash = i.code_hash,
         } else .{};
-        self.bal_pending_accounts.put(address, pre) catch {};
     }
 
     /// Record a storage slot at its pre-block value.
     /// Uses first-access-wins per slot.
     fn recordStorageAccess(self: *JournalInner, address: primitives.Address, key: primitives.StorageKey, value: primitives.StorageValue) void {
-        // Check permanent pre_storage first
+        // EIP-7928 (Amsterdam+) only: skip the BAL bookkeeping entirely on older forks.
+        if (!primitives.isEnabledIn(self.spec, .amsterdam)) return;
+        // Already permanently recorded (committed in a prior tx)?
         if (self.bal_pre_storage.get(address)) |slots| {
             if (slots.contains(key)) return;
         }
-        // Check pending
-        if (self.bal_pending_storage.get(address)) |slots| {
-            if (slots.contains(key)) return;
-        }
+        // Single getOrPut on the pending map (replaces a separate get + getOrPut for
+        // the address), then a single getOrPut on the slot (replaces contains + put).
         const gop = self.bal_pending_storage.getOrPut(address) catch return;
         if (!gop.found_existing) gop.value_ptr.* = std.AutoHashMap(primitives.StorageKey, primitives.StorageValue).init(alloc_mod.get());
-        gop.value_ptr.put(key, value) catch {};
+        const kgop = gop.value_ptr.getOrPut(key) catch return;
+        if (kgop.found_existing) return; // first-access-wins
+        kgop.value_ptr.* = value;
     }
 
     /// Returns true if the address has been accessed (appears in the BAL).
