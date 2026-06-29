@@ -41,7 +41,7 @@ pub const AccountState = struct {
 
 /// RLP encoding of an empty node (single byte 0x80). Used as a static sentinel
 /// to avoid bump-allocator dupe calls for the common empty-node case in trie updates.
-const EMPTY_NODE_RLP: [1]u8 = .{0x80};
+pub const EMPTY_NODE_RLP: [1]u8 = .{0x80};
 
 // ─── keccak256 ─────────────────────────────────────────────────────────────────
 
@@ -1658,18 +1658,101 @@ fn updHashOrEmbedExIndexed(alloc: std.mem.Allocator, node_rlp: []const u8, index
     return updRlpBytes(alloc, &h);
 }
 
+/// Number of bytes required to RLP-encode `data` as a byte string (mirrors updRlpBytes logic).
+fn rlpBytesLen(data: []const u8) usize {
+    if (data.len == 0) return 1;
+    if (data.len == 1 and data[0] < 0x80) return 1;
+    if (data.len <= 55) return 1 + data.len;
+    var lc: usize = 0;
+    var lv = data.len;
+    while (lv > 0) : (lv >>= 8) lc += 1;
+    return 1 + lc + data.len;
+}
+
+/// Write `data` as an RLP byte string into `buf[pos..]`. Returns updated position.
+fn rlpBytesWrite(buf: []u8, pos: usize, data: []const u8) usize {
+    if (data.len == 0) {
+        buf[pos] = 0x80;
+        return pos + 1;
+    }
+    if (data.len == 1 and data[0] < 0x80) {
+        buf[pos] = data[0];
+        return pos + 1;
+    }
+    if (data.len <= 55) {
+        buf[pos] = @intCast(0x80 + data.len);
+        @memcpy(buf[pos + 1 ..][0..data.len], data);
+        return pos + 1 + data.len;
+    }
+    var len_buf: [8]u8 = undefined;
+    var lv = data.len;
+    var lc: usize = 0;
+    while (lv > 0) : (lv >>= 8) lc += 1;
+    lv = data.len;
+    var li = lc;
+    while (li > 0) : (li -= 1) {
+        len_buf[li - 1] = @intCast(lv & 0xff);
+        lv >>= 8;
+    }
+    buf[pos] = @intCast(0xb7 + lc);
+    @memcpy(buf[pos + 1 ..][0..lc], len_buf[0..lc]);
+    @memcpy(buf[pos + 1 + lc ..][0..data.len], data);
+    return pos + 1 + lc + data.len;
+}
+
+/// Write an RLP list header for a payload of `payload` bytes into `buf[pos..]`.
+/// Returns updated position (i.e. start of payload region).
+fn rlpListHeaderWrite(buf: []u8, pos: usize, payload: usize) usize {
+    if (payload <= 55) {
+        buf[pos] = @intCast(0xc0 + payload);
+        return pos + 1;
+    }
+    var len_buf: [8]u8 = undefined;
+    var lv = payload;
+    var lc: usize = 0;
+    while (lv > 0) : (lv >>= 8) lc += 1;
+    lv = payload;
+    var li = lc;
+    while (li > 0) : (li -= 1) {
+        len_buf[li - 1] = @intCast(lv & 0xff);
+        lv >>= 8;
+    }
+    buf[pos] = @intCast(0xf7 + lc);
+    @memcpy(buf[pos + 1 ..][0..lc], len_buf[0..lc]);
+    return pos + 1 + lc;
+}
+
+/// Returns the number of bytes in an RLP list header for `payload` content bytes.
+fn rlpListHeaderLen(payload: usize) usize {
+    if (payload <= 55) return 1;
+    var lc: usize = 0;
+    var lv = payload;
+    while (lv > 0) : (lv >>= 8) lc += 1;
+    return 1 + lc;
+}
+
 fn updMakeLeaf(alloc: std.mem.Allocator, path_nibs: []const u8, value: []const u8) ![]const u8 {
     var hp_buf: [65]u8 = undefined;
     const hp = nibbles.hpEncode(path_nibs, true, &hp_buf);
-    const items = [_][]const u8{ try updRlpBytes(alloc, hp), try updRlpBytes(alloc, value) };
-    return updRlpList(alloc, &items);
+    const payload = rlpBytesLen(hp) + rlpBytesLen(value);
+    const out = try alloc.alloc(u8, rlpListHeaderLen(payload) + payload);
+    var pos = rlpListHeaderWrite(out, 0, payload);
+    pos = rlpBytesWrite(out, pos, hp);
+    _ = rlpBytesWrite(out, pos, value);
+    return out;
 }
 
 fn updMakeExtension(alloc: std.mem.Allocator, path_nibs: []const u8, child_ref: []const u8) ![]const u8 {
     var hp_buf: [65]u8 = undefined;
     const hp = nibbles.hpEncode(path_nibs, false, &hp_buf);
-    const items = [_][]const u8{ try updRlpBytes(alloc, hp), child_ref };
-    return updRlpList(alloc, &items);
+    // child_ref is already an RLP-encoded list item (either an inline node or rlp(hash)),
+    // so it contributes its raw bytes directly to the list payload.
+    const payload = rlpBytesLen(hp) + child_ref.len;
+    const out = try alloc.alloc(u8, rlpListHeaderLen(payload) + payload);
+    var pos = rlpListHeaderWrite(out, 0, payload);
+    pos = rlpBytesWrite(out, pos, hp);
+    @memcpy(out[pos..][0..child_ref.len], child_ref);
+    return out;
 }
 
 fn updEncodeBranch(
@@ -1679,7 +1762,8 @@ fn updEncodeBranch(
 ) ![]const u8 {
     var items: [17][]const u8 = undefined;
     for (children_enc, 0..) |enc, i| items[i] = enc;
-    items[16] = try updRlpBytes(alloc, value);
+    // updRlpBytes("") == EMPTY_NODE_RLP; use the static const to skip the alloc.
+    items[16] = if (value.len == 0) &EMPTY_NODE_RLP else try updRlpBytes(alloc, value);
     return updRlpList(alloc, &items);
 }
 
@@ -1737,6 +1821,49 @@ fn buildTestExtTrie(alloc: std.mem.Allocator) ![]const u8 {
     const branch = try updEncodeBranch(alloc, &enc, &.{});
     const child_ref = try updHashOrEmbed(alloc, branch);
     return updMakeExtension(alloc, &.{ 0, 0 }, child_ref);
+}
+
+test "rlp helpers byte-identical to updRlpBytes/updRlpList" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Byte-string encoding across every branch: empty, single-byte <0x80,
+    // single-byte >=0x80, short (<=55) and long (>55, multi-byte length prefix).
+    const lens = [_]usize{ 0, 1, 2, 31, 32, 55, 56, 100, 256, 300 };
+    for (lens) |n| {
+        const data = try alloc.alloc(u8, n);
+        for (data, 0..) |*b, i| b.* = @intCast((i * 7 + 1) & 0xff);
+        if (n == 1) data[0] = 0x7f; // single-byte <0x80 (raw) path
+        const ref = try updRlpBytes(alloc, data);
+        try std.testing.expectEqual(ref.len, rlpBytesLen(data));
+        const buf = try alloc.alloc(u8, rlpBytesLen(data));
+        try std.testing.expectEqual(buf.len, rlpBytesWrite(buf, 0, data));
+        try std.testing.expectEqualSlices(u8, ref, buf);
+    }
+    // single-byte >=0x80 must take the length-prefixed path (0x81, b)
+    {
+        const data = [_]u8{0xff};
+        const ref = try updRlpBytes(alloc, &data);
+        try std.testing.expectEqual(ref.len, rlpBytesLen(&data));
+        const buf = try alloc.alloc(u8, rlpBytesLen(&data));
+        _ = rlpBytesWrite(buf, 0, &data);
+        try std.testing.expectEqualSlices(u8, ref, buf);
+    }
+
+    // List header across short (<=55) and long (>55) payloads — compared against
+    // the prefix of updRlpList of a single payload-sized item.
+    const payloads = [_]usize{ 0, 1, 55, 56, 256, 1000 };
+    for (payloads) |p| {
+        const item = try alloc.alloc(u8, p);
+        @memset(item, 0xab);
+        const ref = try updRlpList(alloc, &.{item});
+        const hlen = rlpListHeaderLen(p);
+        try std.testing.expectEqual(ref.len - p, hlen);
+        const buf = try alloc.alloc(u8, hlen);
+        try std.testing.expectEqual(buf.len, rlpListHeaderWrite(buf, 0, p));
+        try std.testing.expectEqualSlices(u8, ref[0..hlen], buf);
+    }
 }
 
 test "updNode: deleting non-existent key (diverges from extension prefix) is a no-op" {
