@@ -1437,10 +1437,6 @@ fn extractPostState(
         while (stor_it.next()) |slot| {
             const key = slot.key_ptr.*;
             const present = slot.value_ptr.*.present_value;
-            // Track written slots (even no-op SSTORE with net-zero value change) for EIP-7928 BAL.
-            if (slot.value_ptr.*.was_written) {
-                acct.written_storage.put(arena, key, {}) catch {};
-            }
             if (!fresh_storage) {
                 // Skip slots unchanged vs. block start — no MPT update needed.
                 const pre_block = slot.value_ptr.*.pre_block_value;
