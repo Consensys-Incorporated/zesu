@@ -644,4 +644,27 @@ pub fn build(b: *std.Build) void {
             "| tar xz --strip-components=1 -C spec-tests/fixtures/zkevm/ && " ++
             "echo 'Done. Fixtures extracted to spec-tests/fixtures/zkevm/'",
     }).step);
+
+    // ── r2-stateless: execute latest R2 devnet batch natively ─────────────────
+    // The catalog URL is defined here (single source of truth) and baked into
+    // the tool as its default; the tool still accepts a runtime --catalog override.
+    const r2_catalog_url = "https://pub-5345007fbd06486bbb7cbbe9f3112c45.r2.dev/devnets/glamsterdam-devnet-5";
+    const r2_options = b.addOptions();
+    r2_options.addOption([]const u8, "catalog_url", r2_catalog_url);
+
+    const r2_exe = b.addExecutable(.{
+        .name = "r2-stateless",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/r2_stateless/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    r2_exe.root_module.addImport("ssz_decode", mods.ssz_decode);
+    r2_exe.root_module.addImport("ssz_output", mods.ssz_output);
+    r2_exe.root_module.addImport("executor", mods.executor);
+    r2_exe.root_module.addOptions("build_options", r2_options);
+    addCryptoLibraries(r2_exe, target, crypto_include, libblst_path, libmcl_path, is_linux);
+    b.installArtifact(r2_exe);
+    addRunStep(b, "r2-stateless", "Fetch and execute the latest R2 devnet batch", r2_exe, &.{});
 }
