@@ -603,7 +603,7 @@ pub fn build(b: *std.Build) void {
             .abi = .none,
         });
 
-        const obj_mods = buildModules(b, rv64im_target, optimize, false, b.path("src/zkvm/bump_alloc.zig"), crypto_prefix);
+        const obj_mods = buildModules(b, rv64im_target, optimize, false, b.path("src/zkvm/fl_alloc.zig"), crypto_prefix);
 
         const rv64_obj = b.addObject(.{
             .name = "zesu",
