@@ -184,7 +184,13 @@ pub fn main(init: std.process.Init) !void {
     try writeSummaries(init.io, gpa, summary_md, summary_json, network, catalog, batch_n, first_block, last_block, results.items, passed, failed, total);
 
     std.debug.print("\nSummary: {d}/{d} passed\n", .{ passed, total });
-    if (strict and failed > 0) std.process.exit(1);
+    if (strict) {
+        if (total == 0) {
+            std.debug.print("error: --strict: no blocks were executed\n", .{});
+            std.process.exit(1);
+        }
+        if (failed > 0) std.process.exit(1);
+    }
 }
 
 /// Iterate a tar archive (in memory), decompress each `*.json.zst` block
@@ -241,22 +247,30 @@ fn runArtifact(gpa: std.mem.Allocator, artifact_json: []const u8, results: *std.
         return;
     };
 
-    // Same entry point the zkVM guest wraps (run.zig → executeStatelessInput).
-    const exec_result = executor.executeStatelessInput(alloc, si, si.chain_config.fork_name);
-    const success = if (exec_result) |_| true else |_| false;
+    // Execute via the same entry point the zkVM guest wraps (run.zig →
+    // executeStatelessInput). The executor validates the block — including the
+    // post-state/receipts roots against the payload (StateRootMismatch /
+    // ReceiptsRootMismatch) alongside its gas/blob/BAL checks — so a successful
+    // return means the block validated; any error is the failure reason.
+    var ok = false;
+    var reason: []const u8 = "";
+    if (executor.executeStatelessInput(alloc, si, si.chain_config.fork_name)) |_| {
+        ok = true;
+    } else |err| {
+        reason = @errorName(err);
+    }
 
     // Serialize the SSZ output (the guest's public commitment): 32-byte
     // new_payload_request root + 1-byte success + 72-byte SszChainConfig.
-    const out = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id, success);
+    const out = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id, ok);
     const out_hex = std.fmt.bytesToHex(out, .lower);
 
-    if (exec_result) |_| {
+    if (ok) {
         std.debug.print("PASS block {d}  output=0x{s}\n", .{ number, &out_hex });
-        try appendResult(gpa, results, number, true, "");
-    } else |err| {
-        std.debug.print("FAIL block {d}  {s}  output=0x{s}\n", .{ number, @errorName(err), &out_hex });
-        try appendResult(gpa, results, number, false, @errorName(err));
+    } else {
+        std.debug.print("FAIL block {d}  {s}  output=0x{s}\n", .{ number, reason, &out_hex });
     }
+    try appendResult(gpa, results, number, ok, reason);
 }
 
 fn appendResult(gpa: std.mem.Allocator, results: *std.ArrayList(BlockResult), number: u64, ok: bool, reason: []const u8) !void {
@@ -291,9 +305,11 @@ fn zstdDecompress(gpa: std.mem.Allocator, comp: []const u8) ![]u8 {
     return d.reader.allocRemaining(gpa, .unlimited);
 }
 
+/// Caller only invokes this when a digest is present, so a malformed digest
+/// (not 32 bytes of hex) is treated as a verification failure, not skipped.
 fn sha256Matches(data: []const u8, want_hex: []const u8) bool {
     const h = if (std.mem.startsWith(u8, want_hex, "0x")) want_hex[2..] else want_hex;
-    if (h.len != 64) return true; // no/!32-byte digest → skip check
+    if (h.len != 64) return false;
     var want: [32]u8 = undefined;
     _ = std.fmt.hexToBytes(&want, h) catch return false;
     var got: [32]u8 = undefined;
