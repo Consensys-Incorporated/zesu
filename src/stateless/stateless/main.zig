@@ -172,27 +172,11 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("  receipts        = {d}\n", .{proof_out.receipts.len});
     std.debug.print("  pre_state_root  = 0x{x}\n", .{proof_out.pre_state_root});
 
-    const state_ok = std.mem.eql(u8, &proof_out.post_state_root, &ep.state_root);
-    const receipts_ok = std.mem.eql(u8, &proof_out.receipts_root, &ep.receipts_root);
-
-    if (state_ok) {
-        std.debug.print("  post_state_root = 0x{x}  ✓\n", .{proof_out.post_state_root});
-    } else {
-        std.debug.print("  post_state_root = 0x{x}  ✗  MISMATCH\n", .{proof_out.post_state_root});
-        std.debug.print("  expected        = 0x{x}\n", .{ep.state_root});
-    }
-
-    if (receipts_ok) {
-        std.debug.print("  receipts_root   = 0x{x}  ✓\n", .{proof_out.receipts_root});
-    } else {
-        std.debug.print("  receipts_root   = 0x{x}  ✗  MISMATCH\n", .{proof_out.receipts_root});
-        std.debug.print("  expected        = 0x{x}\n", .{ep.receipts_root});
-    }
-
-    if (!state_ok or !receipts_ok) {
-        std.debug.print("\nFAIL\n", .{});
-        std.process.exit(1);
-    }
+    // executeBlockStateless validates the computed roots against the payload
+    // (returning StateRootMismatch / ReceiptsRootMismatch, handled above), so
+    // reaching here means both matched.
+    std.debug.print("  post_state_root = 0x{x}  ✓\n", .{proof_out.post_state_root});
+    std.debug.print("  receipts_root   = 0x{x}  ✓\n", .{proof_out.receipts_root});
 
     // Emit output: SSZ 41-byte commitment for SSZ inputs; JSON summary for the dev --json path.
     switch (source) {

@@ -214,21 +214,15 @@ fn runBlock(
     }
 
     // successful_validation mirrors spec: True iff execution succeeds AND
-    // post_state_root and receipts_root match the expected values in the payload.
+    // post_state_root and receipts_root match the payload. executeStatelessInput
+    // now validates the roots itself (StateRootMismatch / ReceiptsRootMismatch),
+    // so a successful return is authoritative.
     var exec_err: anyerror = error.Success;
     const successful_validation = if (tx_root_mismatch) false else blk: {
-        const proof = executor.executeStatelessInput(alloc, si, fork_name) catch |err| {
+        _ = executor.executeStatelessInput(alloc, si, fork_name) catch |err| {
             exec_err = err;
             break :blk false;
         };
-        if (!std.mem.eql(u8, &proof.post_state_root, &ep.state_root)) {
-            exec_err = error.StateRootMismatch;
-            break :blk false;
-        }
-        if (!std.mem.eql(u8, &proof.receipts_root, &ep.receipts_root)) {
-            exec_err = error.ReceiptsRootMismatch;
-            break :blk false;
-        }
         break :blk true;
     };
 

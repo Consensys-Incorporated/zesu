@@ -331,7 +331,7 @@ pub fn executeBlockFromAlloc(
 ) !ExecuteBlockResult {
     try block_validation.validateBlock(env, spec);
     const result = try transition_mod.transition(alloc, pre_alloc, env, txs, spec, chain_id, reward);
-    try block_validation.validatePostExecution(alloc, env, spec, result.cumulative_gas, result.blob_gas_used, &.{}, &.{});
+    try block_validation.validatePostExecution(alloc, env, spec, result.cumulative_gas, result.blob_gas_used, &.{}, &.{}, null);
     const post_state_root = try output_mod.computeStateRoot(alloc, result.alloc, &.{});
     const receipts_root = try output_mod.computeReceiptsRoot(alloc, result.receipts);
     return .{
@@ -428,8 +428,17 @@ pub fn executeBlockStateless(
         try buildAccessedEntries(alloc, al, result.alloc, result.deleted_accounts, result.system_address_user_touched)
     else
         &.{};
-    try block_validation.validatePostExecution(alloc, env, spec, result.cumulative_gas, result.blob_gas_used, ep.block_access_list, accessed);
-    return finalizeOutput(alloc, pre_state_root, result, node_index, spec, ctx.getDb());
+    // Compute the commitments first so validatePostExecution can validate them
+    // against the payload alongside its gas/blob/BAL checks — giving every caller
+    // one authoritative verdict instead of re-comparing the roots itself.
+    const proof = try finalizeOutput(alloc, pre_state_root, result, node_index, spec, ctx.getDb());
+    try block_validation.validatePostExecution(alloc, env, spec, result.cumulative_gas, result.blob_gas_used, ep.block_access_list, accessed, .{
+        .computed_state_root = proof.post_state_root,
+        .expected_state_root = ep.state_root,
+        .computed_receipts_root = proof.receipts_root,
+        .expected_receipts_root = ep.receipts_root,
+    });
+    return proof;
 }
 
 /// High-level stateless execution from a fully-decoded StatelessInput.
