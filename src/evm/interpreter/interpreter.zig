@@ -197,9 +197,6 @@ pub const ExtBytecode = struct {
     pc: usize,
     /// Whether execution is still running (false after halt/stop/return)
     continue_execution: bool,
-    is_eof: bool,
-    eof_version: ?u8,
-    eof_sections: ?std.ArrayList(EofSection),
     /// If true, deinit() will free the bytecode's heap allocations.
     /// CALL frames share bytecode with account state (DB) and must NOT free it.
     /// CREATE init-code frames and test frames own their bytecode.
@@ -211,9 +208,6 @@ pub const ExtBytecode = struct {
             .bytecode = bytecode_data,
             .pc = 0,
             .continue_execution = true,
-            .is_eof = false,
-            .eof_version = null,
-            .eof_sections = null,
             .owns_bytecode = false,
         };
     }
@@ -225,9 +219,6 @@ pub const ExtBytecode = struct {
             .bytecode = bytecode_data,
             .pc = 0,
             .continue_execution = true,
-            .is_eof = false,
-            .eof_version = null,
-            .eof_sections = null,
             .owns_bytecode = true,
         };
     }
@@ -237,9 +228,6 @@ pub const ExtBytecode = struct {
             .bytecode = bytecode.Bytecode.new(),
             .pc = 0,
             .continue_execution = true,
-            .is_eof = false,
-            .eof_version = null,
-            .eof_sections = null,
             .owns_bytecode = false,
         };
     }
@@ -247,9 +235,6 @@ pub const ExtBytecode = struct {
     pub fn deinit(self: *ExtBytecode) void {
         if (self.owns_bytecode) {
             self.bytecode.deinit();
-        }
-        if (self.eof_sections) |*sections| {
-            sections.deinit(alloc_mod.get());
         }
     }
 
@@ -290,61 +275,8 @@ pub const ExtBytecode = struct {
         return self.bytecode;
     }
 
-    pub fn getIsEof(self: ExtBytecode) bool {
-        return self.is_eof;
-    }
-
-    pub fn getEofVersion(self: ExtBytecode) ?u8 {
-        return self.eof_version;
-    }
-
-    pub fn getEofSections(self: ExtBytecode) ?std.ArrayList(EofSection) {
-        return self.eof_sections;
-    }
-
     pub fn setBytecode(self: *ExtBytecode, bytecode_data: bytecode.Bytecode) void {
         self.bytecode = bytecode_data;
-    }
-
-    pub fn setIsEof(self: *ExtBytecode, is_eof: bool) void {
-        self.is_eof = is_eof;
-    }
-
-    pub fn setEofVersion(self: *ExtBytecode, version: ?u8) void {
-        self.eof_version = version;
-    }
-
-    pub fn setEofSections(self: *ExtBytecode, sections: ?std.ArrayList(EofSection)) void {
-        self.eof_sections = sections;
-    }
-};
-
-/// EOF section
-pub const EofSection = struct {
-    section_type: u8,
-    data: primitives.Bytes,
-
-    pub fn new(section_type: u8, data: primitives.Bytes) EofSection {
-        return EofSection{
-            .section_type = section_type,
-            .data = data,
-        };
-    }
-
-    pub fn getSectionType(self: EofSection) u8 {
-        return self.section_type;
-    }
-
-    pub fn getData(self: EofSection) primitives.Bytes {
-        return self.data;
-    }
-
-    pub fn setSectionType(self: *EofSection, section_type: u8) void {
-        self.section_type = section_type;
-    }
-
-    pub fn setData(self: *EofSection, data: primitives.Bytes) void {
-        self.data = data;
     }
 };
 
