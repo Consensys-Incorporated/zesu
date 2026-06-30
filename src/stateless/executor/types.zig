@@ -27,11 +27,6 @@ pub const AllocAccount = struct {
     /// (e.g. a touched contract whose code is not included in the stateless witness).
     /// When null, the hash is computed from `code` (backwards-compatible).
     code_hash: ?[32]u8 = null,
-    /// Set of storage keys that were explicitly written (SSTORE'd) during block execution,
-    /// even if the final value equals the pre-block value.
-    /// Used by buildAccessedEntries() to correctly classify no-op SSTORE operations
-    /// as storage_changes (per EIP-7928 semantics) rather than storage_reads.
-    written_storage: std.AutoHashMapUnmanaged(U256, void) = .{},
 };
 
 pub const AccessListEntry = struct {
