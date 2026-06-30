@@ -7,9 +7,8 @@
 ///   zesu-core (zkvm):  accel_impl = extern_bridge.zig  (extern fn zkvm_* → zisk_accel.o)
 const impl = @import("accel_impl");
 const std = @import("std");
-const builtin = @import("builtin");
 
-// ── keccak256 key-hash memo (zkVM only) ───────────────────────────────────────
+// ── keccak256 key-hash memo ───────────────────────────────────────────────────
 //
 // Secure-trie keys are keccak256 of a raw 20-byte address / 32-byte slot, and the
 // same address/slot is hashed repeatedly across a block (pre-state proof read AND
@@ -21,10 +20,12 @@ const builtin = @import("builtin");
 //
 // Static direct-mapped cache: no allocator, and under a sparse zkVM memory cost
 // model only touched buckets count toward proving cost, so generous capacity is
-// free. A bucket collision recomputes and overwrites, so the result is always correct.
-// zkVM-only (single-threaded → plain globals are safe; native recomputes and
-// keeps no shared state across parallel test runners). kmemo_len 0 = empty slot.
-const memo_enabled = builtin.target.os.tag == .freestanding;
+// free. A bucket collision recomputes and overwrites, so the result is always
+// correct. Because keccak256 is pure, the cache is sound to share across calls
+// regardless of target — and crucially it runs on native too, so the state-test /
+// spec-test suites exercise the exact code path the zkVM guest uses (zesu's
+// execution model is single-threaded, so the plain globals carry no race risk).
+// kmemo_len 0 = empty slot.
 const KMEMO_LEN = 1 << 14; // 16384 buckets
 var kmemo_len = [_]u8{0} ** KMEMO_LEN;
 var kmemo_key: [KMEMO_LEN][32]u8 = undefined;
@@ -71,7 +72,7 @@ pub const Bls12PairingPair = extern struct {
 // ── Public API — delegating to accel_impl ─────────────────────────────────────
 
 pub inline fn keccak256(data: []const u8, output: *Hash32) void {
-    if (memo_enabled and (data.len == 20 or data.len == 32)) {
+    if (data.len == 20 or data.len == 32) {
         const idx = std.mem.readInt(u32, data[0..4], .little) & (KMEMO_LEN - 1);
         if (kmemo_len[idx] == data.len and std.mem.eql(u8, kmemo_key[idx][0..data.len], data)) {
             output.* = kmemo_val[idx];
