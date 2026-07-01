@@ -3,23 +3,6 @@
 /// Design & diagrams: see src/zkvm/FREELIST_ALLOC.md
 ///
 /// Segregated free-list allocator backed by ZKVM_HEAP_POS / ZKVM_HEAP_TOP.
-///
-/// Replaces the naive bump allocator to avoid OOM on large blocks: freed
-/// memory is recycled, so execution with heavy alloc/free churn (EVM memory
-/// expansions, return-data buffers, trie node construction) no longer
-/// exhausts the heap linearly.
-///
-/// Design:
-///   - 29 size classes: 8, 16, 32, …, 2^31 bytes (power-of-2 buckets).
-///   - Each free list is an intrusive singly-linked list; the first 8 bytes
-///     of a freed block store the next-pointer (no external metadata).
-///   - alloc: pop from the matching free list if non-empty; otherwise
-///     bump-allocate a fresh block of classBytes(class) from the heap.
-///   - free: push onto the matching free list.
-///   - resize: allowed only when new_len falls in the same size class,
-///     so free() always recovers the right block.
-///   - Oversized allocations (>= 2^32 bytes) fall back to the bump with
-///     no recycling — these should never occur in practice.
 const std = @import("std");
 
 extern var ZKVM_HEAP_POS: usize;

@@ -5,41 +5,6 @@
 /// Segregated free-list allocator backed by ZKVM_HEAP_POS / ZKVM_HEAP_TOP.
 /// Functionally identical to fl_alloc.zig, but avoids @clz for size-class
 /// classification.
-///
-/// Why: the build target is RV64IM (no Zbb), so @clz lowers to a software
-/// bit-smear + popcount sequence (~30 instructions) rather than a single
-/// hardware instruction. That ran on every alloc() and free() call in
-/// fl_alloc.zig, which is the dominant source of its zkVM execution-cost
-/// regression vs. the no-op-free bump allocator. This file replaces the
-/// @clz-based ceilLog2 with an exact balanced binary-search ladder over the
-/// fixed set of size-class thresholds, which only executes the few branches
-/// on its single matching path (~12-20 instructions for typical small
-/// allocations, vs. ~59 fully-executed instructions before).
-///
-/// Design (same as fl_alloc.zig except where noted):
-///   - 22 size classes: 8, 16, 32, …, 2^24 bytes (power-of-2 buckets),
-///     covering 8 bytes .. 16 MiB. (fl_alloc.zig used 29 classes up to
-///     2 GiB; EVM allocations are gas-bounded well under 16 MiB, and
-///     anything larger takes the oversized bump path below, same as
-///     fl_alloc.zig's behavior for sizes beyond its own cap.)
-///   - Each free list is an intrusive singly-linked list; the first 8 bytes
-///     of a freed block store the next-pointer (no external metadata).
-///   - alloc: pop from the matching free list if non-empty; otherwise
-///     bump-allocate a fresh block of classBytes(class) from the heap.
-///   - free: push onto the matching free list.
-///   - resize: allowed only when new_len falls in the same size class,
-///     so free() always recovers the right block.
-///   - Oversized allocations (> 2^24 bytes) fall back to the bump with
-///     no recycling — these should never occur in practice.
-///   - The size class contributed by alignment is computed directly from
-///     `std.mem.Alignment`'s underlying value, which is already log2(align)
-///     — no log computation needed for it. The size class contributed by
-///     `len`/`buf.len` is computed by the branch ladder below. The two are
-///     combined with max(), which is valid because ceilLog2 is monotonic:
-///     ceilLog2(max(a, b)) == max(ceilLog2(a), ceilLog2(b)).
-///   - Byte alignment (`1 << log2_align`) is only materialized on the rare
-///     fresh-bump-allocation path, where it's actually needed; the hot
-///     free-list hit/push path on alloc/free never computes it.
 const std = @import("std");
 
 extern var ZKVM_HEAP_POS: usize;
