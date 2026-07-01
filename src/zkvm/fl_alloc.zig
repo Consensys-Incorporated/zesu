@@ -1,5 +1,7 @@
 /// zesu_allocator module for the relocatable rv64im object.
 ///
+/// Design & diagrams: see src/zkvm/FREELIST_ALLOC.md
+///
 /// Segregated free-list allocator backed by ZKVM_HEAP_POS / ZKVM_HEAP_TOP.
 ///
 /// Replaces the naive bump allocator to avoid OOM on large blocks: freed
