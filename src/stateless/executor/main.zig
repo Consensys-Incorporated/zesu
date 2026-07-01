@@ -150,9 +150,9 @@ fn buildAccessedEntries(
         // calls warm SYSTEM_ADDRESS (it is the caller) but those touches alone do
         // NOT belong in the BAL.
         if (std.mem.eql(u8, &address, &SYSTEM_ADDRESS) and !system_address_user_touched) {
-            if (post_alloc.get(address)) |p| {
-                if (p.balance == 0) continue;
-            } else continue;
+            const pre_bal = acc_kv.value_ptr.*.balance;
+            const post_bal = if (post_alloc.get(address)) |p| p.balance else pre_bal;
+            if (pre_bal == post_bal) continue;
         }
         const pre = acc_kv.value_ptr.*;
 
@@ -418,9 +418,16 @@ pub fn executeBlockStateless(
         public_keys,
     );
     if (ctx.ctx_error != .ok) return error.InvalidWitness;
-    var access_log = ctx.journaled_state.takeAccessLog();
-    defer access_log.deinit();
-    const accessed = try buildAccessedEntries(alloc, access_log, result.alloc, result.deleted_accounts, result.system_address_user_touched);
+    // EIP-7928 (Amsterdam+): the block access list is only validated on Amsterdam+
+    // (validatePostExecution gates the comparison). Pre-Amsterdam, skip draining the
+    // access log and building the accessed entries entirely; validatePostExecution
+    // still runs its all-fork gas/blob checks with an empty accessed slice.
+    var access_log = if (primitives.isEnabledIn(spec, .amsterdam)) ctx.journaled_state.takeAccessLog() else null;
+    defer if (access_log) |*al| al.deinit();
+    const accessed: []const types.AccessedEntry = if (access_log) |al|
+        try buildAccessedEntries(alloc, al, result.alloc, result.deleted_accounts, result.system_address_user_touched)
+    else
+        &.{};
     try block_validation.validatePostExecution(alloc, env, spec, result.cumulative_gas, result.blob_gas_used, ep.block_access_list, accessed);
     return finalizeOutput(alloc, pre_state_root, result, node_index, spec, ctx.getDb());
 }
