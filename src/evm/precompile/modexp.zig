@@ -90,8 +90,11 @@ fn calculateIterationCount(exp_length: u64, exp_highp: primitives.U256, multipli
 
 /// Calculate gas cost for Byzantium
 fn byzantiumGasCalc(base_len: u64, exp_len: u64, mod_len: u64, exp_highp: primitives.U256) u64 {
-    const max_len = @max(@max(base_len, exp_len), mod_len);
+    // EIP-198: complexity uses max(base_len, mod_len), not exp_len.
+    const max_len = @max(base_len, mod_len);
     const iteration_count = calculateIterationCount(exp_len, exp_highp, 8);
+    // EIP-198: multiply by max(adjusted_exp_length, 1), not raw iteration_count.
+    const effective_iter: u64 = @max(iteration_count, 1);
 
     // Use u128 for squaring to avoid overflow (max_len is u64, (u64_max)^2 fits in u128).
     const x: u128 = @as(u128, max_len);
@@ -104,8 +107,8 @@ fn byzantiumGasCalc(base_len: u64, exp_len: u64, mod_len: u64, exp_highp: primit
         complexity = (x * x) / 16 + 480 * x - 199680;
     }
 
-    // complexity * iteration_count may overflow u128 for huge inputs — saturate to maxInt(u64).
-    const product = std.math.mul(u128, complexity, @as(u128, iteration_count)) catch return std.math.maxInt(u64);
+    // complexity * effective_iter may overflow u128 for huge inputs — saturate to maxInt(u64).
+    const product = std.math.mul(u128, complexity, @as(u128, effective_iter)) catch return std.math.maxInt(u64);
     const result = product / 20;
     return if (result > std.math.maxInt(u64)) std.math.maxInt(u64) else @as(u64, @intCast(result));
 }
@@ -209,8 +212,10 @@ fn runInner(
         return main.PrecompileResult{ .err = main.PrecompileError.OutOfGas };
     }
 
-    // Handle empty case
-    if (base_len == 0 and mod_len == 0) {
+    // mod_len == 0 → output is always empty, regardless of base_len.
+    // Must check before computing total_data_len to avoid allocating a
+    // multi-TB buffer when base_len is large (e.g. truncated 96-byte header).
+    if (mod_len == 0) {
         return main.PrecompileResult{ .success = main.PrecompileOutput.new(gas_cost, &[_]u8{}) };
     }
 
