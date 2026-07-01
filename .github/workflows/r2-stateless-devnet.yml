@@ -1,0 +1,118 @@
+name: Stateless Devnet Replay
+
+# Follow a live devnet by executing its blocks through the `r2-stateless` tool
+# (in-process, via the same path the zkVM guest uses). The tool runs the latest
+# N batches; this workflow decides N:
+#   - schedule (every 2h) / manual: ~last `window_hours` of blocks, estimated
+#     from slot time with a buffer (over-fetching is harmless — idempotent).
+#     Informational unless the `strict` dispatch input is set.
+#   - pull_request: just the latest batch, strict — gates the PR on executing
+#     the most recent real devnet block correctly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      catalog_url:
+        description: Override the R2 catalog URL (blank = the default baked into the tool at build time)
+        required: false
+        default: ""
+        type: string
+      window_hours:
+        description: How many trailing hours of blocks to cover
+        required: false
+        default: "2"
+        type: string
+      strict:
+        description: Fail the job if any block fails execution
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    # Every 2 hours, on the hour.
+    - cron: "0 */2 * * *"
+  # Smoke test on PRs: execute just the latest batch (and gate the PR on it).
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Keyed by ref so PR runs don't cancel the scheduled run (or each other).
+  group: stateless-devnet-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  execute:
+    name: Execute recent blocks
+    runs-on: ubuntu-latest
+    env:
+      # Blank → the tool uses the catalog URL baked in at build time (build.zig,
+      # single source of truth). Only an explicit dispatch override is passed on.
+      CATALOG_URL: ${{ github.event.inputs.catalog_url || '' }}
+      WINDOW_HOURS: ${{ github.event.inputs.window_hours || '2' }}
+      STRICT_FLAG: ${{ github.event.inputs.strict == 'true' && '--strict' || '' }}
+      # Devnet assumptions for the batch estimate (need not be exact).
+      BLOCK_TIME_SECONDS: "12" # Ethereum slot time
+      BATCH_SIZE: "10" # blocks per R2 batch
+      SUMMARY_DIR: target/r2-stateless-devnet
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@abea47f85e598557f500fa1fd2ab7464fcb39406 # v2.2.1
+        with:
+          version: '0.16.0'
+
+      - name: Install dependencies
+        run: make install-deps
+
+      - name: Build tool
+        run: zig build install
+
+      - name: Run R2 stateless inputs
+        run: |
+          mkdir -p "$SUMMARY_DIR"
+          strict_flag="$STRICT_FLAG"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # PR smoke test: just the latest batch, and gate the PR on it.
+            batches=1
+            strict_flag="--strict"
+            echo "pull_request → latest 1 batch (strict)"
+          else
+            # blocks in the window / batch size, +25% +2 buffer for slot-time
+            # variance and missed slots. Over-fetching is harmless (idempotent).
+            blocks=$(( WINDOW_HOURS * 3600 / BLOCK_TIME_SECONDS ))
+            batches=$(( blocks / BATCH_SIZE ))
+            batches=$(( batches + batches / 4 + 2 ))
+            echo "window=${WINDOW_HOURS}h slot=${BLOCK_TIME_SECONDS}s → ~${blocks} blocks → --batches ${batches}"
+          fi
+          catalog_args=()
+          [ -n "$CATALOG_URL" ] && catalog_args=(--catalog "$CATALOG_URL")
+          ./zig-out/bin/r2-stateless \
+            "${catalog_args[@]}" \
+            --batches "$batches" \
+            --summary-md "$SUMMARY_DIR/summary.md" \
+            --summary-json "$SUMMARY_DIR/summary.json" \
+            $strict_flag
+
+      - name: Append summary
+        if: always()
+        run: |
+          if [ -f "$SUMMARY_DIR/summary.md" ]; then
+            cat "$SUMMARY_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No summary was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: r2-stateless-devnet-summary
+          path: |
+            ${{ env.SUMMARY_DIR }}/summary.json
+            ${{ env.SUMMARY_DIR }}/summary.md
+          if-no-files-found: warn
