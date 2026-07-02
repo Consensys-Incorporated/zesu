@@ -56,7 +56,8 @@ pub fn opDiv(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = if (b != 0) a / b else 0;
+    // Fast path: a < b means quotient is 0 — no division needed.
+    stack.setTopUnsafe().* = if (b == 0 or a < b) 0 else a / b;
 }
 
 /// SDIV opcode (0x05): a / b (signed, division by zero returns 0)
@@ -505,6 +506,9 @@ pub fn sdiv(a: primitives.U256, b: primitives.U256) primitives.U256 {
 
     const abs_a = if (a_negative) (~a) +% 1 else a;
     const abs_b = if (b_negative) (~b) +% 1 else b;
+
+    // Fast path: |a| < |b| means quotient magnitude is 0.
+    if (abs_a < abs_b) return 0;
 
     const abs_result = abs_a / abs_b;
 
