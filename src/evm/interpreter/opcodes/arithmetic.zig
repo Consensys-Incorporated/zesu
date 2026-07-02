@@ -211,7 +211,7 @@ pub fn mulmod(a: primitives.U256, b: primitives.U256, n: primitives.U256) primit
     const nl = toLimbs(n);
     const product = mulFull(a, b);
     // Fast path: product fits in 256 bits
-    if (product[4] | product[5] | product[6] | product[7] == 0) {
+    if ((product[4] | product[5] | product[6] | product[7]) == 0) {
         const pl = [4]u64{ product[0], product[1], product[2], product[3] };
         if (limbLessThan(pl, nl)) return fromLimbs(pl);
         return fromLimbs(limbMod(4, pl, nl));
