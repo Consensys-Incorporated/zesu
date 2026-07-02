@@ -225,6 +225,53 @@ test "SDIV: division by zero = 0" {
     try expectEqual(@as(U, 0), interp.stack.popUnsafe());
 }
 
+test "SDIV: negative dividend / positive divisor = negative" {
+    // -10 / 3 = -3
+    const neg10: U = 0 -% @as(U, 10);
+    const neg3: U = 0 -% @as(U, 3);
+    var interp = Interpreter.defaultExt();
+    interp.stack.pushUnsafe(@as(U, 3));
+    interp.stack.pushUnsafe(neg10);
+    var ctx = InstructionContext{ .interpreter = &interp };
+    opSdiv(&ctx);
+    try expectEqual(neg3, interp.stack.popUnsafe());
+}
+
+test "SDIV: positive dividend / negative divisor = negative" {
+    // 10 / -3 = -3
+    const neg3: U = 0 -% @as(U, 3);
+    var interp = Interpreter.defaultExt();
+    interp.stack.pushUnsafe(neg3);
+    interp.stack.pushUnsafe(@as(U, 10));
+    var ctx = InstructionContext{ .interpreter = &interp };
+    opSdiv(&ctx);
+    try expectEqual(neg3, interp.stack.popUnsafe());
+}
+
+test "SDIV: negative / negative = positive" {
+    // -10 / -3 = 3
+    const neg10: U = 0 -% @as(U, 10);
+    const neg3: U = 0 -% @as(U, 3);
+    var interp = Interpreter.defaultExt();
+    interp.stack.pushUnsafe(neg3);
+    interp.stack.pushUnsafe(neg10);
+    var ctx = InstructionContext{ .interpreter = &interp };
+    opSdiv(&ctx);
+    try expectEqual(@as(U, 3), interp.stack.popUnsafe());
+}
+
+test "SDIV: MIN_INT256 / -1 = MIN_INT256 (two's complement overflow)" {
+    // -2^255 / -1 mathematically = 2^255, which overflows back to MIN_INT256
+    const min_i256: U = @as(U, 1) << 255;
+    const neg1: U = MAX;
+    var interp = Interpreter.defaultExt();
+    interp.stack.pushUnsafe(neg1);
+    interp.stack.pushUnsafe(min_i256);
+    var ctx = InstructionContext{ .interpreter = &interp };
+    opSdiv(&ctx);
+    try expectEqual(min_i256, interp.stack.popUnsafe());
+}
+
 // --- SMOD tests ---
 
 test "SMOD: 10 smod 3 = 1" {
@@ -234,6 +281,52 @@ test "SMOD: 10 smod 3 = 1" {
     var ctx = InstructionContext{ .interpreter = &interp };
     opSmod(&ctx);
     try expectEqual(@as(U, 1), interp.stack.popUnsafe());
+}
+
+test "SMOD: negative dividend / positive divisor = negative remainder" {
+    // -10 % 3 = -1 (sign follows dividend)
+    const neg10: U = 0 -% @as(U, 10);
+    const neg1: U = MAX;
+    var interp = Interpreter.defaultExt();
+    interp.stack.pushUnsafe(@as(U, 3));
+    interp.stack.pushUnsafe(neg10);
+    var ctx = InstructionContext{ .interpreter = &interp };
+    opSmod(&ctx);
+    try expectEqual(neg1, interp.stack.popUnsafe());
+}
+
+test "SMOD: positive dividend / negative divisor = positive remainder" {
+    // 10 % -3 = 1 (sign follows dividend)
+    const neg3: U = 0 -% @as(U, 3);
+    var interp = Interpreter.defaultExt();
+    interp.stack.pushUnsafe(neg3);
+    interp.stack.pushUnsafe(@as(U, 10));
+    var ctx = InstructionContext{ .interpreter = &interp };
+    opSmod(&ctx);
+    try expectEqual(@as(U, 1), interp.stack.popUnsafe());
+}
+
+test "SMOD: negative / negative = negative remainder" {
+    // -10 % -3 = -1 (sign follows dividend)
+    const neg10: U = 0 -% @as(U, 10);
+    const neg3: U = 0 -% @as(U, 3);
+    const neg1: U = MAX;
+    var interp = Interpreter.defaultExt();
+    interp.stack.pushUnsafe(neg3);
+    interp.stack.pushUnsafe(neg10);
+    var ctx = InstructionContext{ .interpreter = &interp };
+    opSmod(&ctx);
+    try expectEqual(neg1, interp.stack.popUnsafe());
+}
+
+test "SMOD: smod by zero = 0" {
+    const neg10: U = 0 -% @as(U, 10);
+    var interp = Interpreter.defaultExt();
+    interp.stack.pushUnsafe(@as(U, 0));
+    interp.stack.pushUnsafe(neg10);
+    var ctx = InstructionContext{ .interpreter = &interp };
+    opSmod(&ctx);
+    try expectEqual(@as(U, 0), interp.stack.popUnsafe());
 }
 
 // --- ADDMOD tests ---

@@ -56,7 +56,7 @@ pub fn opDiv(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = if (b != 0) a / b else 0;
+    stack.setTopUnsafe().* = if (b == 0) 0 else fromLimbs(limbDivMod(toLimbs(a), toLimbs(b)).q);
 }
 
 /// SDIV opcode (0x05): a / b (signed, division by zero returns 0)
@@ -84,7 +84,7 @@ pub fn opMod(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = if (b != 0) a % b else 0;
+    stack.setTopUnsafe().* = if (b == 0) 0 else fromLimbs(limbDivMod(toLimbs(a), toLimbs(b)).r);
 }
 
 /// SMOD opcode (0x07): a % b (signed, mod by zero returns 0)
@@ -192,9 +192,11 @@ pub fn addmod(a: primitives.U256, b: primitives.U256, n: primitives.U256) primit
     }
     sum[4] = carry;
 
-    // Fast path: no carry and sum < n
-    if (carry == 0 and limbLessThan(.{ sum[0], sum[1], sum[2], sum[3] }, nl)) {
-        return fromLimbs(.{ sum[0], sum[1], sum[2], sum[3] });
+    if (carry == 0) {
+        // sum fits in 256 bits — use the 4-limb path; avoids a wasted Knuth iteration.
+        const sum4 = [4]u64{ sum[0], sum[1], sum[2], sum[3] };
+        if (limbLessThan(sum4, nl)) return fromLimbs(sum4);
+        return fromLimbs(limbMod(4, sum4, nl));
     }
 
     return fromLimbs(limbMod(5, sum, nl));
@@ -209,7 +211,7 @@ pub fn mulmod(a: primitives.U256, b: primitives.U256, n: primitives.U256) primit
     const nl = toLimbs(n);
     const product = mulFull(a, b);
     // Fast path: product fits in 256 bits
-    if (product[4] | product[5] | product[6] | product[7] == 0) {
+    if ((product[4] | product[5] | product[6] | product[7]) == 0) {
         const pl = [4]u64{ product[0], product[1], product[2], product[3] };
         if (limbLessThan(pl, nl)) return fromLimbs(pl);
         return fromLimbs(limbMod(4, pl, nl));
@@ -464,6 +466,161 @@ pub fn limbMod(comptime M: comptime_int, a: [M]u64, b: [4]u64) [4]u64 {
     return r_limbs;
 }
 
+/// Compute (a / b, a % b) for 4-limb operands using Knuth's Algorithm D.
+/// Returns .{ .q = quotient, .r = remainder } as [4]u64 limb arrays.
+/// When b == 0 or a < b the fast paths return immediately.
+pub fn limbDivMod(a: [4]u64, b: [4]u64) struct { q: [4]u64, r: [4]u64 } {
+    const zero = [_]u64{0} ** 4;
+
+    var n: usize = 0;
+    for (0..4) |i| {
+        if (b[3 - i] != 0) {
+            n = 4 - i;
+            break;
+        }
+    }
+    if (n == 0) return .{ .q = zero, .r = zero };
+
+    if (limbLessThan(a, b)) return .{ .q = zero, .r = a };
+
+    // Single-limb divisor: chain div128by64, collect quotient digits.
+    if (n == 1) {
+        const d = b[0];
+        const shift: u6 = @intCast(@clz(d));
+        const d_norm = d << shift;
+
+        var u_shifted: [5]u64 = [_]u64{0} ** 5;
+        if (shift == 0) {
+            for (0..4) |i| u_shifted[i] = a[i];
+        } else {
+            var carry: u64 = 0;
+            for (0..4) |i| {
+                u_shifted[i] = (a[i] << shift) | carry;
+                carry = a[i] >> @intCast(@as(u7, 64) - shift);
+            }
+            u_shifted[4] = carry;
+        }
+
+        var q_result = zero;
+        var rem: u64 = if (u_shifted[4] != 0) u_shifted[4] else 0;
+        var i: usize = 4;
+        while (i > 0) {
+            i -= 1;
+            const dv = div128by64(rem, u_shifted[i], d_norm);
+            q_result[i] = dv.q;
+            rem = dv.r;
+        }
+        rem >>= shift;
+        return .{ .q = q_result, .r = .{ rem, 0, 0, 0 } };
+    }
+
+    // Multi-limb divisor: Knuth Algorithm D.
+    const shift: u6 = @intCast(@clz(b[n - 1]));
+
+    var v = [_]u64{0} ** 4;
+    if (shift == 0) {
+        for (0..n) |i| v[i] = b[i];
+    } else {
+        var carry: u64 = 0;
+        for (0..n) |i| {
+            v[i] = (b[i] << shift) | carry;
+            carry = b[i] >> @intCast(@as(u7, 64) - shift);
+        }
+    }
+
+    var u: [5]u64 = [_]u64{0} ** 5;
+    if (shift == 0) {
+        for (0..4) |i| u[i] = a[i];
+    } else {
+        var carry: u64 = 0;
+        for (0..4) |i| {
+            u[i] = (a[i] << shift) | carry;
+            carry = a[i] >> @intCast(@as(u7, 64) - shift);
+        }
+        u[4] = carry;
+    }
+
+    const m = 4 - n;
+    var q_result = zero;
+
+    var j: usize = m + 1;
+    while (j > 0) {
+        j -= 1;
+
+        var q_hat: u64 = undefined;
+        var r_hat: u64 = undefined;
+        if (u[j + n] >= v[n - 1]) {
+            q_hat = std.math.maxInt(u64);
+            r_hat = u[j + n - 1] +% v[n - 1];
+            if (r_hat >= v[n - 1]) {
+                if (r_hat < u[j + n - 1]) {
+                    // overflowed, skip refinement
+                } else if (n >= 2) {
+                    const prod_check: u128 = @as(u128, q_hat) * v[n - 2];
+                    const rhs: u128 = (@as(u128, r_hat) << 64) | u[j + n - 2];
+                    if (prod_check > rhs) q_hat -= 1;
+                }
+            }
+        } else {
+            const dv = div128by64(u[j + n], u[j + n - 1], v[n - 1]);
+            q_hat = dv.q;
+            r_hat = dv.r;
+            if (n >= 2) {
+                while (true) {
+                    const prod_check: u128 = @as(u128, q_hat) * v[n - 2];
+                    const rhs: u128 = (@as(u128, r_hat) << 64) | u[j + n - 2];
+                    if (prod_check <= rhs) break;
+                    q_hat -= 1;
+                    const new_r = @addWithOverflow(r_hat, v[n - 1]);
+                    r_hat = new_r[0];
+                    if (new_r[1] != 0) break;
+                }
+            }
+        }
+
+        q_result[j] = q_hat;
+
+        var carry: u128 = 0;
+        var borrow: u128 = 0;
+        for (0..n) |i| {
+            const prod: u128 = @as(u128, q_hat) * v[i] + carry;
+            carry = prod >> 64;
+            const sub_val: u128 = (prod & 0xFFFFFFFFFFFFFFFF) + borrow;
+            const diff: u128 = @as(u128, u[j + i]) + (@as(u128, 1) << 64) - sub_val;
+            u[j + i] = @truncate(diff);
+            borrow = 1 - (diff >> 64);
+        }
+
+        const sub_final: u128 = carry + borrow;
+        const diff_final: u128 = @as(u128, u[j + n]) + (@as(u128, 1) << 64) - sub_final;
+        u[j + n] = @truncate(diff_final);
+        const final_borrow: u64 = @intCast(1 - (diff_final >> 64));
+
+        if (final_borrow != 0) {
+            q_result[j] -%= 1;
+            var add_carry: u64 = 0;
+            for (0..n) |i| {
+                const s: u128 = @as(u128, u[j + i]) + v[i] + add_carry;
+                u[j + i] = @truncate(s);
+                add_carry = @intCast(s >> 64);
+            }
+            u[j + n] +%= add_carry;
+        }
+    }
+
+    var r_limbs = zero;
+    if (shift == 0) {
+        for (0..n) |i| r_limbs[i] = u[i];
+    } else {
+        for (0..n - 1) |i| {
+            r_limbs[i] = (u[i] >> shift) | (u[i + 1] << @intCast(@as(u7, 64) - shift));
+        }
+        r_limbs[n - 1] = u[n - 1] >> shift;
+    }
+
+    return .{ .q = q_result, .r = r_limbs };
+}
+
 /// 512-bit mod 256-bit (wrapper around limbMod).
 pub fn mod512by256(a: [8]u64, b: [4]u64) primitives.U256 {
     return fromLimbs(limbMod(8, a, b));
@@ -506,8 +663,7 @@ pub fn sdiv(a: primitives.U256, b: primitives.U256) primitives.U256 {
     const abs_a = if (a_negative) (~a) +% 1 else a;
     const abs_b = if (b_negative) (~b) +% 1 else b;
 
-    const abs_result = abs_a / abs_b;
-
+    const abs_result = fromLimbs(limbDivMod(toLimbs(abs_a), toLimbs(abs_b)).q);
     const result_negative = a_negative != b_negative;
     return if (result_negative) (~abs_result) +% 1 else abs_result;
 }
@@ -525,8 +681,7 @@ pub fn smod(a: primitives.U256, b: primitives.U256) primitives.U256 {
     const abs_a = if (a_negative) (~a) +% 1 else a;
     const abs_b = if (b_negative) (~b) +% 1 else b;
 
-    const abs_result = abs_a % abs_b;
-
+    const abs_result = fromLimbs(limbDivMod(toLimbs(abs_a), toLimbs(abs_b)).r);
     return if (a_negative) (~abs_result) +% 1 else abs_result;
 }
 
