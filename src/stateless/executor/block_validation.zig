@@ -117,10 +117,21 @@ pub fn blobGasMax(spec: primitives.SpecId) u64 {
         6 * GAS_PER_BLOB;
 }
 
+/// Computed-vs-declared block commitments, validated by `validatePostExecution`.
+/// Pass `null` for paths that don't validate against a claimed header (e.g. the
+/// non-stateless executeBlock used by t8n).
+pub const RootCommitments = struct {
+    computed_state_root: [32]u8,
+    expected_state_root: [32]u8,
+    computed_receipts_root: [32]u8,
+    expected_receipts_root: [32]u8,
+};
+
 /// Post-execution block validation.
 /// Called after transition() with the actual gas totals.
 ///   total_gas_used — cumulative gas from all transactions (result.cumulative_gas)
 ///   blob_gas_used  — total blob gas from type-3 transactions (result.blob_gas_used)
+///   roots          — computed/declared state & receipts roots, or null to skip
 pub fn validatePostExecution(
     alloc: std.mem.Allocator,
     env: types.Env,
@@ -129,6 +140,7 @@ pub fn validatePostExecution(
     blob_gas_used: u64,
     block_access_list: []const u8,
     accessed: []const types.AccessedEntry,
+    roots: ?RootCommitments,
 ) !void {
     // INVALID_GAS_USED_ABOVE_LIMIT: header gasUsed > gasLimit
     if (env.gas_used_header) |declared| {
@@ -216,6 +228,14 @@ pub fn validatePostExecution(
                 }
             }
         }
+    }
+
+    // INVALID_STATE_ROOT / INVALID_RECEIPTS_ROOT: the computed commitments must
+    // match the values declared in the block header. Checked last so the more
+    // specific gas/blob/BAL errors take precedence.
+    if (roots) |r| {
+        if (!std.mem.eql(u8, &r.computed_state_root, &r.expected_state_root)) return error.StateRootMismatch;
+        if (!std.mem.eql(u8, &r.computed_receipts_root, &r.expected_receipts_root)) return error.ReceiptsRootMismatch;
     }
 }
 
