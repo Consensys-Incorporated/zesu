@@ -150,9 +150,9 @@ fn buildAccessedEntries(
         // calls warm SYSTEM_ADDRESS (it is the caller) but those touches alone do
         // NOT belong in the BAL.
         if (std.mem.eql(u8, &address, &SYSTEM_ADDRESS) and !system_address_user_touched) {
-            if (post_alloc.get(address)) |p| {
-                if (p.balance == 0) continue;
-            } else continue;
+            const pre_bal = acc_kv.value_ptr.*.balance;
+            const post_bal = if (post_alloc.get(address)) |p| p.balance else pre_bal;
+            if (pre_bal == post_bal) continue;
         }
         const pre = acc_kv.value_ptr.*;
 
