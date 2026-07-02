@@ -85,7 +85,8 @@ pub fn opMod(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = if (b != 0) a % b else 0;
+    // Fast path: a < b means a is already reduced — no division needed.
+    stack.setTopUnsafe().* = if (b == 0) 0 else if (a < b) a else a % b;
 }
 
 /// SMOD opcode (0x07): a % b (signed, mod by zero returns 0)
@@ -193,9 +194,11 @@ pub fn addmod(a: primitives.U256, b: primitives.U256, n: primitives.U256) primit
     }
     sum[4] = carry;
 
-    // Fast path: no carry and sum < n
-    if (carry == 0 and limbLessThan(.{ sum[0], sum[1], sum[2], sum[3] }, nl)) {
-        return fromLimbs(.{ sum[0], sum[1], sum[2], sum[3] });
+    if (carry == 0) {
+        // sum fits in 256 bits — use the 4-limb path; avoids a wasted Knuth iteration.
+        const sum4 = [4]u64{ sum[0], sum[1], sum[2], sum[3] };
+        if (limbLessThan(sum4, nl)) return fromLimbs(sum4);
+        return fromLimbs(limbMod(4, sum4, nl));
     }
 
     return fromLimbs(limbMod(5, sum, nl));
@@ -529,7 +532,7 @@ pub fn smod(a: primitives.U256, b: primitives.U256) primitives.U256 {
     const abs_a = if (a_negative) (~a) +% 1 else a;
     const abs_b = if (b_negative) (~b) +% 1 else b;
 
-    const abs_result = abs_a % abs_b;
+    const abs_result = if (abs_a < abs_b) abs_a else abs_a % abs_b;
 
     return if (a_negative) (~abs_result) +% 1 else abs_result;
 }
