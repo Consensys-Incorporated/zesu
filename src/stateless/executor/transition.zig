@@ -1173,7 +1173,7 @@ pub fn transitionWithContext(
 
         // Pre-Byzantium (EIP-658 not yet active): compute per-tx intermediate state root.
         if (!primitives.isEnabledIn(spec, .byzantium)) {
-            const per_tx_alloc = extractPostState(arena, pre_alloc_in, ctx) catch null;
+            const per_tx_alloc = extractPostState(arena, pre_alloc_in, ctx, spec) catch null;
             if (per_tx_alloc) |pa| {
                 const sr = output_mod.computeStateRoot(arena, pa, &.{}) catch null;
                 receipts.items[receipts.items.len - 1].state_root = sr;
@@ -1215,14 +1215,19 @@ pub fn transitionWithContext(
     if (tracker) |*t| t.detectAndRecord(txs.len + 1, ctx, txs.len);
 
     // ── Extract post-state ────────────────────────────────────────────────────
-    const post_alloc = try extractPostState(arena, pre_alloc_in, ctx);
+    const post_alloc = try extractPostState(arena, pre_alloc_in, ctx, spec);
 
-    // Collect selfdestructed accounts for delta-root deletion
+    // Collect selfdestructed accounts for delta-root deletion.
+    // EIP-8246 (Amsterdam+): a self-destructed account with a preserved non-zero balance
+    // is NOT deleted from the trie (it survives as a cleared account); only truly-empty
+    // (zero-balance) self-destructs are removed.
+    const amsterdam_no_burn = primitives.isEnabledIn(spec, .amsterdam);
     var deleted = std.ArrayListUnmanaged(input.Address).empty;
     {
         var del_it = ctx.journaled_state.inner.evm_state.iterator();
         while (del_it.next()) |e| {
             if (e.value_ptr.*.status.self_destructed) {
+                if (amsterdam_no_burn and e.value_ptr.*.info.balance != 0) continue;
                 try deleted.append(arena, e.key_ptr.*);
             }
         }
@@ -1233,6 +1238,8 @@ pub fn transitionWithContext(
     // ── EIP-7685 requests_hash ────────────────────────────────────────────────
     const deposits = if (primitives.isEnabledIn(spec, .prague)) try collectDeposits(arena, receipts.items) else &.{};
     const requests_hash = try computeRequestsHash(arena, deposits, post_block_reqs.withdrawal_requests, post_block_reqs.consolidation_requests);
+        arena,
+    );
 
     return TransitionResult{
         .alloc = post_alloc,
@@ -1312,12 +1319,17 @@ fn computeRequestsHash(
     consolidations: []const u8,
 ) ![32]u8 {
     const max_len = @max(deposits.len, @max(withdrawals.len, consolidations.len));
+    const max_len = @max(
+    );
     const scratch = try arena.alloc(u8, 1 + max_len);
 
     var outer_buf: [96]u8 = undefined;
+    var outer_buf: [160]u8 = undefined;
     var outer_len: usize = 0;
 
     inline for (.{ .{ @as(u8, 0x00), deposits }, .{ @as(u8, 0x01), withdrawals }, .{ @as(u8, 0x02), consolidations } }) |pair| {
+    inline for (.{
+    }) |pair| {
         const data: []const u8 = pair[1];
         if (data.len > 0) {
             scratch[0] = pair[0];
@@ -1338,6 +1350,7 @@ fn extractPostState(
     arena: std.mem.Allocator,
     pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
     ctx: anytype,
+    spec: primitives.SpecId,
 ) !std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) {
     // Start with a mutable copy of pre_alloc (use arena allocation for storage maps)
     var post = std.AutoHashMapUnmanaged(input.Address, input.AllocAccount).empty;
@@ -1373,8 +1386,24 @@ fn extractPostState(
         // Skip accounts that were loaded as non-existent and never touched
         if (account.status.loaded_as_not_existing and !account.status.touched) continue;
 
-        // Remove self-destructed accounts
+        // Self-destructed accounts.
+        // Pre-Amsterdam: removed entirely (balance burned if beneficiary == self).
+        // EIP-8246 (Amsterdam+): SELFDESTRUCT no longer burns. The account is cleared
+        // (nonce=0, code empty, storage wiped) but its balance is preserved; it is only
+        // removed when the final balance is zero (EIP-161 empty-account clearing).
         if (account.status.self_destructed) {
+            if (primitives.isEnabledIn(spec, .amsterdam) and account.info.balance != 0) {
+                var acct = input.AllocAccount{
+                    .balance = account.info.balance,
+                    .nonce = 0,
+                    .code = &.{},
+                    .pre_storage_root = if (post.getPtr(addr)) |p| p.pre_storage_root else null,
+                };
+                // Storage is wiped by SELFDESTRUCT — leave acct.storage empty.
+                _ = &acct;
+                try post.put(arena, addr, acct);
+                continue;
+            }
             _ = post.remove(addr);
             continue;
         }
