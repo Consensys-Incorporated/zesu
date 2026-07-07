@@ -114,7 +114,10 @@ pub fn opExtcodesize(ctx: *InstructionContext) void {
 
     // Post-Berlin: charge dynamic warm/cold cost BEFORE loading the code.
     if (primitives.isEnabledIn(ctx.interpreter.runtime_flags.spec_id, .berlin)) {
-        const dyn_gas: u64 = if (h.isAddressCold(addr)) gas_costs.COLD_ACCOUNT_ACCESS else gas_costs.WARM_ACCOUNT_ACCESS;
+        var dyn_gas: u64 = if (h.isAddressCold(addr)) gas_costs.coldAccountAccess(ctx.interpreter.runtime_flags.spec_id) else gas_costs.WARM_ACCOUNT_ACCESS;
+        // EIP-8038 (Amsterdam+): EXTCODESIZE is charged an additional WARM_ACCESS
+        // on top of the cold/warm access cost (unlike BALANCE / EXTCODEHASH).
+        if (primitives.isEnabledIn(ctx.interpreter.runtime_flags.spec_id, .amsterdam)) dyn_gas += gas_costs.WARM_ACCOUNT_ACCESS;
         if (!ctx.interpreter.gas.spend(dyn_gas)) {
             ctx.interpreter.halt(.out_of_gas);
             return;
@@ -158,7 +161,10 @@ pub fn opExtcodecopy(ctx: *InstructionContext) void {
 
     // Post-Berlin: charge dynamic warm/cold cost.
     if (primitives.isEnabledIn(ctx.interpreter.runtime_flags.spec_id, .berlin)) {
-        const dyn_gas: u64 = if (h.isAddressCold(addr)) gas_costs.COLD_ACCOUNT_ACCESS else gas_costs.WARM_ACCOUNT_ACCESS;
+        var dyn_gas: u64 = if (h.isAddressCold(addr)) gas_costs.coldAccountAccess(ctx.interpreter.runtime_flags.spec_id) else gas_costs.WARM_ACCOUNT_ACCESS;
+        // EIP-8038 (Amsterdam+): EXTCODECOPY is charged an additional WARM_ACCESS
+        // on top of the cold/warm access cost (unlike BALANCE / EXTCODEHASH).
+        if (primitives.isEnabledIn(ctx.interpreter.runtime_flags.spec_id, .amsterdam)) dyn_gas += gas_costs.WARM_ACCOUNT_ACCESS;
         if (!ctx.interpreter.gas.spend(dyn_gas)) {
             ctx.interpreter.halt(.out_of_gas);
             return;
