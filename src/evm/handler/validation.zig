@@ -604,6 +604,10 @@ pub const InitialAndFloorGas = struct {
     /// EIP-8037 (Amsterdam+): state gas refunded for valid auths to existing accounts.
     /// 112*cpsb per valid auth applied to an existing (non-empty) account. Bypasses 1/5 cap.
     auth_state_refund: u64 = 0,
+    /// EIP-8037 (Amsterdam+): regular gas refunded for valid auths to existing accounts.
+    /// AM_ACCOUNT_WRITE (8000) per valid auth to an existing account — the regular-lane
+    /// counterpart of the new-account pre-payment. Bypasses the 1/5 cap.
+    auth_regular_refund: u64 = 0,
 };
 
 /// Validation errors
