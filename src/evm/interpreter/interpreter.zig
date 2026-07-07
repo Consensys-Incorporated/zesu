@@ -316,6 +316,10 @@ pub const PendingCallData = struct {
     checkpoint: JournalCheckpoint,
     ret_off: usize,
     ret_size: usize,
+    /// EIP-8037 (Amsterdam+): state gas charged for a new account created by a
+    /// value-bearing CALL. Refunded to the parent reservoir if the call fails
+    /// (the account is not created), matching credit_state_gas_refund(NEW_ACCOUNT).
+    new_account_state_gas: u64 = 0,
 };
 
 /// Data stored when a CREATE/CREATE2 suspends the interpreter.

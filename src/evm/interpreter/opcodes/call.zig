@@ -170,7 +170,7 @@ fn callImpl(
             // target from the DB — avoids tracking it in the BAL during gas calculation.
             // The sub-frame's setupCall will load it properly and track it there.
             const del_addr = info.bytecode.eip7702.address;
-            delegation_gas = if (h.isAddressCold(del_addr)) gas_costs.COLD_ACCOUNT_ACCESS else gas_costs.WARM_ACCOUNT_ACCESS;
+            delegation_gas = if (h.isAddressCold(del_addr)) gas_costs.coldAccountAccess(spec) else gas_costs.WARM_ACCOUNT_ACCESS;
         }
     }
 
@@ -323,16 +323,16 @@ fn callImpl(
         .failed => |r| {
             // setupCall failed (depth limit, balance, etc.).
             // EIP-8037: return the reservoir (call_reservoir) that was saved+zeroed.
-            // The new_account state gas (if charged) stays consumed — it's part of the
-            // parent's state usage for attempting to create a new account.
+            // resumeCall refunds new_account_state_gas because the call failed (the
+            // account was not created) — matching credit_state_gas_refund(NEW_ACCOUNT).
             var result = r;
             result.state_gas_remaining = call_reservoir;
-            resumeCall(ctx.interpreter, result, ret_off_u, ret_size_u);
+            resumeCall(ctx.interpreter, result, ret_off_u, ret_size_u, new_account_state_gas);
         },
         .precompile => |r| {
             // Precompile ran. It doesn't use state gas, so reservoir comes back intact.
             // state_gas_remaining is already set to inputs.reservoir in setupCall.
-            resumeCall(ctx.interpreter, r, ret_off_u, ret_size_u);
+            resumeCall(ctx.interpreter, r, ret_off_u, ret_size_u, new_account_state_gas);
         },
         .ready => |s| {
             ctx.interpreter.pending = .{ .call = PendingCallData{
@@ -341,6 +341,7 @@ fn callImpl(
                 .checkpoint = s.checkpoint,
                 .ret_off = ret_off_u,
                 .ret_size = ret_size_u,
+                .new_account_state_gas = new_account_state_gas,
             } };
         },
     }
@@ -349,12 +350,14 @@ fn callImpl(
 /// Resume a suspended CALL frame after the sub-frame has completed.
 /// Called by the frame runner (or synchronous helper) with the final CallResult.
 pub fn resumeCall(interp: *Interpreter, result: host_module.CallResult, ret_off: usize, ret_size: usize) void {
+pub fn resumeCall(interp: *Interpreter, result: host_module.CallResult, ret_off: usize, ret_size: usize, new_account_state_gas: u64) void {
     interp.gas.remaining +|= result.gas_remaining;
     interp.gas.refunded += result.gas_refunded;
     interp.gas.addStateGasFromChild(result.state_gas_used);
     // EIP-8037: restore the reservoir from the child (on success: child's remaining reservoir;
     // on failure: all child state gas + reservoir returned as state_gas_remaining).
     interp.gas.reservoir += result.state_gas_remaining;
+    // EIP-8037: a value-bearing CALL that creates a new account pre-charges NEW_ACCOUNT
 
     const actual = @min(result.return_data.len, ret_size);
     if (actual > 0) {
@@ -450,6 +453,10 @@ pub fn opCreate(ctx: *InstructionContext) void {
     // Base cost: EIP-8037 (Amsterdam+) reduces regular CREATE cost from 32000 to 9000;
     // state gas for new account + code deposit is charged separately in finalizeCreate.
     const create_base_cost: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) 9000 else gas_costs.G_CREATE;
+    // Base cost: EIP-8037 (Amsterdam+) replaces the 32000 regular CREATE cost with
+    // CREATE_ACCESS = ACCOUNT_WRITE(8000) + COLD_STORAGE_ACCESS(3000) = 11000; the
+    // NEW_ACCOUNT + code-deposit state gas is charged separately.
+    const create_base_cost: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) 11000 else gas_costs.G_CREATE;
     if (!ctx.interpreter.gas.spend(create_base_cost)) {
         ctx.interpreter.halt(.out_of_gas);
         return;
@@ -602,6 +609,8 @@ pub fn opCreate2(ctx: *InstructionContext) void {
 
     // EIP-8037 (Amsterdam+): same reduced regular cost as CREATE.
     const create2_base_cost: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) 9000 else gas_costs.G_CREATE;
+    // EIP-8037 (Amsterdam+): CREATE_ACCESS = ACCOUNT_WRITE(8000) + COLD_STORAGE_ACCESS(3000).
+    const create2_base_cost: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) 11000 else gas_costs.G_CREATE;
     if (!ctx.interpreter.gas.spend(create2_base_cost)) {
         ctx.interpreter.halt(.out_of_gas);
         return;
