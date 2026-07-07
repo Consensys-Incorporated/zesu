@@ -452,6 +452,12 @@ pub fn executeStatelessInput(
 ) !output.ProofOutput {
     const ep = &si.new_payload_request.execution_payload;
 
+    // EIP-8025: reject blocks where the active fork has not yet activated.
+    const cc = si.chain_config;
+    if (cc.activation_block == null and cc.activation_timestamp == null) return error.ChainConfigInvalid;
+    if (cc.activation_block) |b| if (ep.block_number < b) return error.ChainConfigInvalid;
+    if (cc.activation_timestamp) |t| if (ep.timestamp < t) return error.ChainConfigInvalid;
+
     const pre_state_root_raw = rlp_decode.findPreStateRoot(si.witness.headers, ep.block_number);
     const pre_state_root = pre_state_root_raw orelse ep.state_root;
 

@@ -178,6 +178,13 @@ pub const ChainConfig = struct {
     /// (e.g. the `--fork` CLI override) wins; otherwise this field is used; if both
     /// are null, the executor falls back to mainnet timestamp-based spec lookup.
     fork_name: ?[]const u8 = null,
+    /// EIP-8025: the input's active_fork enum index (ProtocolFork). Amsterdam-specific
+    /// validation (see the runner) rejects a chain config whose active fork is not Amsterdam.
+    active_fork_idx: u64 = 0,
+    /// EIP-8025: active_fork.activation block/timestamp (SSZ optionals; null = unset). The
+    /// fork must be active for the target payload — payload block/timestamp >= these.
+    activation_block: ?u64 = null,
+    activation_timestamp: ?u64 = null,
 };
 
 /// Top-level input (matches Amsterdam spec StatelessInput).

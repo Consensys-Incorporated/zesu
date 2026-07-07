@@ -262,7 +262,7 @@ fn runArtifact(gpa: std.mem.Allocator, artifact_json: []const u8, results: *std.
 
     // Serialize the SSZ output (the guest's public commitment): 32-byte
     // new_payload_request root + 1-byte success + 72-byte SszChainConfig.
-    const out = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id, ok);
+    const out = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id, ok, si.chain_config.activation_timestamp orelse 0);
     const out_hex = std.fmt.bytesToHex(out, .lower);
 
     if (ok) {

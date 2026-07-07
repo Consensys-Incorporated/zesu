@@ -189,13 +189,24 @@ fn runBlock(
     const input_bytes = try alloc.alloc(u8, in_stripped.len / 2);
     _ = try std.fmt.hexToBytes(input_bytes, in_stripped);
 
+    // EIP-8025 (optional proofs): when the stateless input cannot be decoded, the guest
+    // emits the sentinel "default failed" result (root=0, successful_validation=false,
+    // default ChainConfig chain_id=0 / fork=Frontier) — reference stateless_guest
+    // run_stateless_guest / _default_failed_stateless_output. Its SSZ encoding is a fixed
+    // 73-byte string. Mirror that here: on decode failure, compare against the sentinel.
+    const REJECTED_INPUT_OUTPUT = "0000000000000000000000000000000000000000000000000000000000000000002500000000000000000000000c000000000000000000000010000000180000000800000008000000";
+    const si = ssz_decode.decode(alloc, input_bytes) catch {
+        if (std.ascii.eqlIgnoreCase(out_stripped, REJECTED_INPUT_OUTPUT)) return true;
+        std.debug.print("FAIL {s}[{}]  expected non-rejection output but input failed to decode\n  expected: 0x{s}\n", .{ test_name, block_idx, out_stripped });
+        return false;
+    };
+
     // bal-devnet-7 / zkevm@v0.4.1: SszStatelessValidationResult grew from 41 to 105 bytes
     // (SszChainConfig now embeds the full active_fork + blob_schedule).
     if (out_stripped.len != 210) return error.BadOutputLength;
     var expected: [105]u8 = undefined;
     _ = try std.fmt.hexToBytes(&expected, out_stripped);
 
-    const si = try ssz_decode.decode(alloc, input_bytes);
     const ep = &si.new_payload_request.execution_payload;
 
     // Pre-execution: check that the SSZ transactions match the block's transactionsTrie
@@ -215,8 +226,9 @@ fn runBlock(
 
     // successful_validation mirrors spec: True iff execution succeeds AND
     // post_state_root and receipts_root match the payload. executeStatelessInput
-    // now validates the roots itself (StateRootMismatch / ReceiptsRootMismatch),
-    // so a successful return is authoritative.
+    // validates the roots itself (StateRootMismatch / ReceiptsRootMismatch) and
+    // the chain_config activation (ChainConfigInvalid / EIP-8025), so a successful
+    // return is authoritative.
     var exec_err: anyerror = error.Success;
     const successful_validation = if (tx_root_mismatch) false else blk: {
         _ = executor.executeStatelessInput(alloc, si, fork_name) catch |err| {
@@ -226,7 +238,7 @@ fn runBlock(
         break :blk true;
     };
 
-    const computed = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id, successful_validation);
+    const computed = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id, successful_validation, si.chain_config.activation_timestamp orelse 0);
     if (!std.mem.eql(u8, &computed, &expected)) {
         const got_valid = computed[32] == 0x01;
         const expected_valid = expected[32] == 0x01;
