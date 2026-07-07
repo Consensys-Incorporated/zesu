@@ -503,7 +503,11 @@ pub const MainnetHandler = struct {
                             // interpreter path spends it via spendStateGas (reservoir first,
                             // spilling into regular gas); the precompile fast-path returns
                             // early and must replicate that arithmetic here.
-                            var pc_reservoir = tx_reservoir;
+                            // EIP-7702 (Amsterdam+): seed the reservoir with auth_state_refund,
+                            // matching the interpreter path — a type-4 tx targeting a precompile
+                            // must still return the state-lane new-account refund for auths to
+                            // existing accounts (else the sender is overcharged 120*cpsb per auth).
+                            var pc_reservoir = tx_reservoir + (if (primitives.isEnabledIn(spec, .amsterdam)) initial.auth_state_refund else 0);
                             var pc_gas_remaining = tx_regular_exec_gas - out.gas_used;
                             if (top_new_account_state_gas > 0) {
                                 if (top_new_account_state_gas <= pc_reservoir) {
