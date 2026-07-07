@@ -998,7 +998,7 @@ pub fn transitionWithContext(
         {
             // EIP-3860 / EIP-7954: reject CREATE txs with oversized initcode.
             if (tx.to == null and primitives.isEnabledIn(spec, .shanghai)) {
-                const max_initcode: usize = if (primitives.isEnabledIn(spec, .amsterdam)) 65536 else 49152;
+                const max_initcode: usize = if (primitives.isEnabledIn(spec, .amsterdam)) primitives.AMSTERDAM_MAX_INITCODE_SIZE else primitives.MAX_INITCODE_SIZE;
                 if (tx.data.len > max_initcode) {
                     ctx.journaled_state.discardTx();
                     if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());

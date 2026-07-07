@@ -106,11 +106,12 @@ pub const CALL_STACK_LIMIT: u64 = 1024;
 
 /// EIP-170: maximum deployed contract code size (24576 bytes)
 pub const MAX_CODE_SIZE: usize = 24576;
-/// EIP-7954 (Amsterdam+): maximum deployed contract code size doubled (32768 bytes)
-pub const AMSTERDAM_MAX_CODE_SIZE: usize = 32768;
+/// EIP-7954 (Amsterdam+): maximum deployed contract code size = 0x10000 (65536 bytes).
+/// Matches the reference amsterdam MAX_CODE_SIZE = 0x10000.
+pub const AMSTERDAM_MAX_CODE_SIZE: usize = 0x10000;
 /// EIP-3860: maximum initcode size = 2 * MAX_CODE_SIZE (49152 bytes)
 pub const MAX_INITCODE_SIZE: usize = 2 * MAX_CODE_SIZE;
-/// EIP-7954 (Amsterdam+): maximum initcode size = 2 * AMSTERDAM_MAX_CODE_SIZE (65536 bytes)
+/// EIP-7954 (Amsterdam+): maximum initcode size = 2 * AMSTERDAM_MAX_CODE_SIZE (131072 bytes)
 pub const AMSTERDAM_MAX_INITCODE_SIZE: usize = 2 * AMSTERDAM_MAX_CODE_SIZE;
 
 /// Blob base fee update fraction for Cancun hardfork (EIP-4844)
