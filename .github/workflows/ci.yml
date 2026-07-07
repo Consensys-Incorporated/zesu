@@ -72,7 +72,7 @@ jobs:
         run: zig build test
 
   zkevm-tests:
-    name: zkEVM Tests (${{ needs.versions.outputs.zkevm }})
+    name: zkEVM Tests / ${{ needs.versions.outputs.zkevm }}
     needs: versions
     runs-on: ubuntu-latest
 
@@ -106,7 +106,7 @@ jobs:
         run: ./zig-out/bin/zkevm-blockchain-test-runner
 
   blockchain-tests:
-    name: Blockchain Tests (${{ matrix.suite }}) ${{ needs.versions.outputs.bal }}
+    name: Blockchain Tests / ${{ needs.versions.outputs.bal }} / ${{ matrix.suite }}
     needs: versions
     runs-on: ubuntu-latest
     strategy:
@@ -149,7 +149,7 @@ jobs:
             --fixtures spec-tests/fixtures/blockchain_tests/${{ matrix.suite }}
 
   blockchain-tests-result:
-    name: Blockchain Tests ${{ needs.versions.outputs.bal }}
+    name: Blockchain Tests / ${{ needs.versions.outputs.bal }}
     if: always()
     needs: [versions, blockchain-tests]
     runs-on: ubuntu-latest
