@@ -29,6 +29,26 @@ const FLOOR_TOKEN_GAS_AMSTERDAM: u64 = 16;
 const ACCESS_LIST_ADDRESS_FLOOR_TOKENS: u64 = 20 * FLOOR_NONZERO_TOKEN_COST;
 const ACCESS_LIST_STORAGE_KEY_FLOOR_TOKENS: u64 = 32 * FLOOR_NONZERO_TOKEN_COST;
 
+// ── EIP-2780 (Amsterdam+) decomposed intrinsic gas constants ──────────────────
+// glamsterdam-devnet: the flat 21000 base is decomposed into measured primitives.
+// See execution-specs amsterdam/vm/gas.py GasCosts and amsterdam/transactions.py
+// calculate_intrinsic_cost.
+const AM_TX_BASE: u64 = 12000; // sender cost (ECDSA recovery + sender access/write)
+const AM_COLD_ACCOUNT_ACCESS: u64 = 3000; // recipient touch (non-self call)
+const AM_COLD_STORAGE_ACCESS: u64 = 3000;
+const AM_ACCOUNT_WRITE: u64 = 8000;
+const AM_CREATE_ACCESS: u64 = AM_ACCOUNT_WRITE + AM_COLD_STORAGE_ACCESS; // 11000
+const AM_TX_VALUE_COST: u64 = 4244; // recipient balance write for a value transfer
+const AM_TRANSFER_LOG_COST: u64 = 1756; // EIP-7708 transfer log
+const AM_TX_DATA_TOKEN_STANDARD: u64 = 4; // regular gas per calldata token
+const AM_TX_DATA_TOKEN_FLOOR: u64 = 16; // floor gas per calldata token
+const AM_TX_ACCESS_LIST_ADDRESS: u64 = AM_COLD_ACCOUNT_ACCESS; // 3000
+const AM_TX_ACCESS_LIST_STORAGE_KEY: u64 = AM_COLD_STORAGE_ACCESS; // 3000
+// REGULAR_PER_AUTH_BASE_COST = AUTH_TUPLE_BYTES(101)*TX_DATA_TOKEN_FLOOR(16)
+//   + PRECOMPILE_ECRECOVER(3000) + COLD_ACCOUNT_ACCESS(3000) + 2*WARM_ACCESS(100)
+const AM_REGULAR_PER_AUTH_BASE_COST: u64 = 101 * 16 + 3000 + 3000 + 2 * 100; // 7816
+const AM_CODE_INIT_PER_WORD: u64 = 2; // EIP-3860 init code word cost
+
 /// Validation utilities
 pub const Validation = struct {
     /// Validate environment (block, tx, cfg) — no DB access needed.
@@ -132,7 +152,9 @@ pub const Validation = struct {
         // floor_gas is the exec-portion only; the 21000 base is the fixed floor minimum.
         // Skipped if disable_eip7623 is set (floor_gas will be 0 in that case).
         if (primitives.isEnabledIn(spec, .prague)) {
-            if (floor_gas > 0 and tx.gas_limit < TX_BASE_COST + floor_gas) {
+            // EIP-2780 (Amsterdam+): the floor base drops from 21000 to TX_BASE (12000).
+            const floor_base: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) AM_TX_BASE else TX_BASE_COST;
+            if (floor_gas > 0 and tx.gas_limit < floor_base + floor_gas) {
                 return ValidationError.InsufficientGas;
             }
         }
@@ -300,11 +322,13 @@ pub const Validation = struct {
     /// + 25,000 per EIP-7702 authorization list entry (pre-Amsterdam) or 7,500 + 135*cpsb (Amsterdam+)
     /// + GAS_PER_BLOB per EIP-4844 blob hash
     pub fn calculateInitialGas(tx: *const context.TxEnv, spec: primitives.SpecId, block_gas_limit: u64) u64 {
+        // EIP-2780 (Amsterdam+): decomposed intrinsic gas model. Returns regular + state.
+        if (primitives.isEnabledIn(spec, .amsterdam)) {
+            return calculateInitialGasAmsterdam(tx, block_gas_limit);
+        }
+
         const gas_costs = interpreter_mod.gas_costs;
-        const cpsb: u64 = if (primitives.isEnabledIn(spec, .amsterdam))
-            gas_costs.costPerStateByte(block_gas_limit)
-        else
-            0;
+        const cpsb: u64 = 0;
         var gas: u64 = TX_BASE_COST;
 
         // CREATE adds extra base cost (EIP-2, Homestead+).
@@ -377,6 +401,78 @@ pub const Validation = struct {
         }
 
         return gas;
+    }
+
+    /// EIP-2780 (Amsterdam+) decomposed intrinsic gas: returns regular + state total.
+    /// Mirrors execution-specs amsterdam/transactions.py calculate_intrinsic_cost.
+    pub fn calculateInitialGasAmsterdam(tx: *const context.TxEnv, block_gas_limit: u64) u64 {
+        const gas_costs = interpreter_mod.gas_costs;
+        const cpsb = gas_costs.costPerStateByte(block_gas_limit);
+
+        var regular: u64 = AM_TX_BASE;
+        var state_gas: u64 = 0;
+
+        // Calldata data cost: tokens = zeros*1 + nonzeros*4, gas = tokens * 4.
+        var tokens_in_calldata: u64 = 0;
+        const calldata_len: u64 = if (tx.data) |d| @intCast(d.items.len) else 0;
+        if (tx.data) |data| {
+            for (data.items) |byte| {
+                tokens_in_calldata += if (byte == 0) 1 else AM_TX_DATA_TOKEN_STANDARD;
+            }
+        }
+        regular += tokens_in_calldata * AM_TX_DATA_TOKEN_STANDARD;
+
+        // Recipient cost.
+        const has_value = tx.value > 0;
+        switch (tx.kind) {
+            .Create => {
+                regular += AM_CREATE_ACCESS + AM_CODE_INIT_PER_WORD * ((calldata_len + 31) / 32);
+                state_gas += gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * cpsb;
+                if (has_value) regular += AM_TRANSFER_LOG_COST;
+            },
+            .Call => |target| {
+                const is_self_transfer = std.mem.eql(u8, &target, &tx.caller);
+                if (!is_self_transfer) {
+                    regular += AM_COLD_ACCOUNT_ACCESS;
+                    if (has_value) regular += AM_TRANSFER_LOG_COST + AM_TX_VALUE_COST;
+                }
+            },
+        }
+
+        // Access list: 3000 per address, 3000 per storage key, plus floor-token surcharge.
+        var access_list_floor_tokens: u64 = 0;
+        if (tx.access_list.items) |items| {
+            for (items.items) |item| {
+                regular += AM_TX_ACCESS_LIST_ADDRESS;
+                regular += @as(u64, item.storage_keys.items.len) * AM_TX_ACCESS_LIST_STORAGE_KEY;
+                access_list_floor_tokens += ACCESS_LIST_ADDRESS_FLOOR_TOKENS;
+                access_list_floor_tokens += @as(u64, item.storage_keys.items.len) * ACCESS_LIST_STORAGE_KEY_FLOOR_TOKENS;
+            }
+        }
+        regular += access_list_floor_tokens * AM_TX_DATA_TOKEN_FLOOR;
+
+        // EIP-7702 authorizations.
+        if (tx.authorization_list) |auth_list| {
+            const num_auths: u64 = @intCast(auth_list.items.len);
+            regular += num_auths * (AM_ACCOUNT_WRITE + AM_REGULAR_PER_AUTH_BASE_COST);
+            state_gas += num_auths * ((gas_costs.STATE_BYTES_PER_NEW_ACCOUNT + gas_costs.STATE_BYTES_PER_AUTH_BASE) * cpsb);
+        }
+
+        return regular + state_gas;
+    }
+
+    /// EIP-2780 (Amsterdam+) calldata floor: total_floor_tokens * 16 + TX_BASE(12000).
+    /// Mirrors calculate_intrinsic_cost's `data_floor_gas_cost`. Includes the base,
+    /// unlike calculateFloorGas which returns only the exec-portion.
+    pub fn calculateFloorGasAmsterdam(tx: *const context.TxEnv) u64 {
+        var floor_tokens: u64 = if (tx.data) |d| @as(u64, @intCast(d.items.len)) * FLOOR_NONZERO_TOKEN_COST else 0;
+        if (tx.access_list.items) |items| {
+            for (items.items) |item| {
+                floor_tokens += ACCESS_LIST_ADDRESS_FLOOR_TOKENS;
+                floor_tokens += @as(u64, item.storage_keys.items.len) * ACCESS_LIST_STORAGE_KEY_FLOOR_TOKENS;
+            }
+        }
+        return floor_tokens * AM_TX_DATA_TOKEN_FLOOR + AM_TX_BASE;
     }
 
     /// Validate EIP-7702 set-code transaction fields (Prague+).

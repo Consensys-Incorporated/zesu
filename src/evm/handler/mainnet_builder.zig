@@ -345,11 +345,17 @@ pub const MainnetHandler = struct {
                         exec_result.return_data = alloc_mod.get().dupe(u8, cr.return_data) catch @constCast(&[_]u8{});
                         var fr = main.FrameResult.new(exec_result, cr.gas_remaining, cr.gas_refunded);
                         fr.reservoir_remaining = cr.state_gas_remaining;
-                        // EIP-8037 (Amsterdam, bal-devnet-7): on top-level CREATE-tx exceptional
-                        // halt or revert, refund the spilled state_gas_used plus the intrinsic
-                        // NEW_ACCOUNT*CPSB charge — the account was never created.
+                        // EIP-8037 (Amsterdam): a top-level CREATE-tx whose target address was
+                        // already alive before creation (pre-funded / pre-existing) does not add
+                        // a NEW account, so the reference refunds the intrinsic NEW_ACCOUNT state
+                        // gas (fork.py: `tx.to == Bytes0 and created_target_alive`). The intrinsic
+                        // was charged via initial_gas rather than the reservoir, so refund it here
+                        // on success. (The create-failure/halt path below refunds it separately,
+                        // matching the `error is not None` arm of the same condition.)
+                        if (primitives.isEnabledIn(spec, .amsterdam) and cr.success and s.target_alive) {
+                            fr.reservoir_remaining += initial.initial_state_gas;
+                        }
                         if (primitives.isEnabledIn(spec, .amsterdam) and !cr.success) {
-                            fr.reservoir_remaining += ir.state_gas_used + initial.initial_state_gas;
                             fr.result.state_gas_used = 0;
                         }
                         return fr;
@@ -362,7 +368,11 @@ pub const MainnetHandler = struct {
                 var callee_code = if (callee_load.data.info.code) |c| c else bytecode.Bytecode.new();
 
                 // EIP-7702: follow delegation one hop.
-                if (callee_code.isEip7702()) {
+                // EIP-2780 (Amsterdam+): a delegated top-level recipient incurs an extra
+                // COLD_ACCOUNT_ACCESS regular charge for the delegation target (charged on
+                // the root frame below, mirroring EELS interpreter.py process_message).
+                const top_delegation = callee_code.isEip7702();
+                if (top_delegation) {
                     const del_addr = callee_code.eip7702.address;
                     if (ctx.journaled_state.loadAccountWithCode(del_addr)) |del_load| {
                         callee_code = if (del_load.data.info.code) |del_code| del_code else bytecode.Bytecode.new();
@@ -370,6 +380,20 @@ pub const MainnetHandler = struct {
                         callee_code = bytecode.Bytecode.new();
                     }
                 }
+                const top_delegation_gas: u64 = if (top_delegation and primitives.isEnabledIn(spec, .amsterdam))
+                    interpreter_mod.gas_costs.coldAccountAccess(spec)
+                else
+                    0;
+
+                // EIP-2780/8037 (Amsterdam+): top-frame NEW_ACCOUNT state gas. A value
+                // transfer that creates the recipient (recipient is empty pre-transfer)
+                // charges NEW_ACCOUNT state gas, charged on the root frame below. Read
+                // aliveness from the pre-transfer account (callee_load). Self-transfers
+                // and transfers to existing accounts are exempt (recipient already alive).
+                    tx.value > 0 and callee_load.data.stateClearAwareIsEmpty(spec))
+                    interpreter_mod.gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * interpreter_mod.gas_costs.costPerStateByte(ctx.block.gas_limit)
+                else
+                    0;
 
                 // Take checkpoint for top-level CALL: state is reverted through this on failure.
                 const call_checkpoint = ctx.journaled_state.getCheckpoint();
@@ -451,6 +475,21 @@ pub const MainnetHandler = struct {
                 // authorities, set_delegation returns the new-account state gas to the reservoir
                 // so it can be consumed by execution (e.g. SSTORE) or returned as gas_left.
                 root_interp.gas.reservoir = tx_reservoir + (if (primitives.isEnabledIn(spec, .amsterdam)) initial.auth_state_refund else 0);
+                // EIP-2780/8037 (Amsterdam+): charge the top-frame NEW_ACCOUNT state gas
+                // before execution. spendStateGas draws from the reservoir, spilling into
+                // gas; the standard non-success refund path (below) returns it if the frame
+                // fails and the recipient was never created.
+                        ctx.journaled_state.checkpointRevert(call_checkpoint);
+                        return main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
+                    }
+                }
+                // EIP-2780 (Amsterdam+): top-frame delegation cold-access regular charge.
+                if (top_delegation_gas > 0) {
+                    if (!root_interp.gas.spend(top_delegation_gas)) {
+                        ctx.journaled_state.checkpointRevert(call_checkpoint);
+                        return main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
+                    }
+                }
                 const ir = try executeIterative(root_interp, &host, &return_data_buf);
 
                 if (ir.raw_result.isSuccess()) {
@@ -534,8 +573,10 @@ pub const MainnetHandler = struct {
         var final_cost = total_gas_spent - capped_refund;
 
         if (primitives.isEnabledIn(spec, .prague) and !ctx.cfg.disable_eip7623 and initial_gas.floor_gas > 0) {
-            // floor_total = TX_BASE_COST + floor_exec_gas (validated: gas_limit >= floor_total)
-            const floor_total = 21000 + initial_gas.floor_gas;
+            // floor_total = floor_base + floor_exec_gas (validated: gas_limit >= floor_total).
+            // EIP-2780 (Amsterdam+): floor base drops from 21000 to TX_BASE (12000).
+            const floor_base: u64 = if (is_amsterdam) 12000 else 21000;
+            const floor_total = floor_base + initial_gas.floor_gas;
             if (final_cost < floor_total) {
                 final_cost = floor_total;
                 capped_refund = 0;
