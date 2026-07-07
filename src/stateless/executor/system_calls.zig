@@ -61,6 +61,19 @@ const EIP7251_ADDRESS: input.Address = .{
     0x57, 0x9f, 0x8b, 0x00, 0xf3, 0xa5, 0x90, 0x00, 0x72, 0x51,
 };
 
+// EIP-8282 (Amsterdam+): builder execution requests system contracts.
+// Builder deposit requests (request type 0x03).
+const EIP8282_DEPOSIT_ADDRESS: input.Address = .{
+    0x00, 0x00, 0x88, 0x4d, 0x2a, 0xa3, 0x2e, 0xaa, 0x15, 0x5f,
+    0x59, 0xa2, 0xf2, 0x4e, 0xfa, 0x73, 0xd9, 0x00, 0x82, 0x82,
+};
+
+// Builder exit requests (request type 0x04).
+const EIP8282_EXIT_ADDRESS: input.Address = .{
+    0x00, 0x00, 0x14, 0x57, 0x4a, 0x74, 0xc8, 0x05, 0x59, 0x0a,
+    0xff, 0x94, 0x99, 0xfc, 0x7a, 0x69, 0x0f, 0x00, 0x82, 0x82,
+};
+
 // ─── Shared execution helper ──────────────────────────────────────────────────
 
 /// Execute a single privileged system call as SYSTEM_ADDRESS.
@@ -211,6 +224,10 @@ pub const PostBlockRequestBytes = struct {
     withdrawal_requests: []const u8,
     /// Raw return bytes from the EIP-7251 system contract (116 bytes × n consolidations).
     consolidation_requests: []const u8,
+    /// EIP-8282 (Amsterdam+): raw return bytes from the builder deposit system contract.
+    builder_deposit_requests: []const u8 = &.{},
+    /// EIP-8282 (Amsterdam+): raw return bytes from the builder exit system contract.
+    builder_exit_requests: []const u8 = &.{},
 };
 
 /// Like applyPostBlockCalls but captures and returns the raw output bytes from
@@ -227,10 +244,18 @@ pub fn applyPostBlockCallsCapture(
     chain_id: u64,
 ) error{SystemContractCallFailed}!PostBlockRequestBytes {
     if (!primitives.isEnabledIn(spec, .prague)) return .{ .withdrawal_requests = &.{}, .consolidation_requests = &.{} };
-    return .{
+    var out: PostBlockRequestBytes = .{
         .withdrawal_requests = try runSystemCallCapture(alloc, ctx, instructions, precompiles, EIP7002_ADDRESS, &.{}, chain_id),
         .consolidation_requests = try runSystemCallCapture(alloc, ctx, instructions, precompiles, EIP7251_ADDRESS, &.{}, chain_id),
     };
+    // EIP-8282 (Amsterdam+): builder deposit (type 0x03) and builder exit (type 0x04)
+    // requests. Called after the withdrawal/consolidation contracts so all post-block
+    // system calls land at the same block access index for the BAL.
+    if (primitives.isEnabledIn(spec, .amsterdam)) {
+        out.builder_deposit_requests = try runSystemCallCapture(alloc, ctx, instructions, precompiles, EIP8282_DEPOSIT_ADDRESS, &.{}, chain_id);
+        out.builder_exit_requests = try runSystemCallCapture(alloc, ctx, instructions, precompiles, EIP8282_EXIT_ADDRESS, &.{}, chain_id);
+    }
+    return out;
 }
 
 /// Like runSystemCall but returns a caller-owned copy of the return data.

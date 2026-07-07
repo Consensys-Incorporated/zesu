@@ -1237,8 +1237,13 @@ pub fn transitionWithContext(
 
     // ── EIP-7685 requests_hash ────────────────────────────────────────────────
     const deposits = if (primitives.isEnabledIn(spec, .prague)) try collectDeposits(arena, receipts.items) else &.{};
-    const requests_hash = try computeRequestsHash(arena, deposits, post_block_reqs.withdrawal_requests, post_block_reqs.consolidation_requests);
+    const requests_hash = try computeRequestsHash(
         arena,
+        deposits,
+        post_block_reqs.withdrawal_requests,
+        post_block_reqs.consolidation_requests,
+        post_block_reqs.builder_deposit_requests,
+        post_block_reqs.builder_exit_requests,
     );
 
     return TransitionResult{
@@ -1310,25 +1315,34 @@ fn collectDeposits(arena: std.mem.Allocator, receipts: []const Receipt) error{In
 
 /// Compute EIP-7685 requests_hash.
 ///
-/// Hash = SHA256(SHA256(0x00||deposits) || SHA256(0x01||withdrawals) || SHA256(0x02||consolidations))
-/// where each type is omitted if its data is empty.
+/// Hash = SHA256( SHA256(0x00||deposits) || SHA256(0x01||withdrawals)
+///                || SHA256(0x02||consolidations) || SHA256(0x03||builder_deposits)
+///                || SHA256(0x04||builder_exits) )
+/// where each type is omitted if its data is empty. Types 0x03/0x04 are the
+/// EIP-8282 (Amsterdam+) builder execution requests.
 fn computeRequestsHash(
     arena: std.mem.Allocator,
     deposits: []const u8,
     withdrawals: []const u8,
     consolidations: []const u8,
+    builder_deposits: []const u8,
+    builder_exits: []const u8,
 ) ![32]u8 {
-    const max_len = @max(deposits.len, @max(withdrawals.len, consolidations.len));
     const max_len = @max(
+        deposits.len,
+        @max(withdrawals.len, @max(consolidations.len, @max(builder_deposits.len, builder_exits.len))),
     );
     const scratch = try arena.alloc(u8, 1 + max_len);
 
-    var outer_buf: [96]u8 = undefined;
     var outer_buf: [160]u8 = undefined;
     var outer_len: usize = 0;
 
-    inline for (.{ .{ @as(u8, 0x00), deposits }, .{ @as(u8, 0x01), withdrawals }, .{ @as(u8, 0x02), consolidations } }) |pair| {
     inline for (.{
+        .{ @as(u8, 0x00), deposits },
+        .{ @as(u8, 0x01), withdrawals },
+        .{ @as(u8, 0x02), consolidations },
+        .{ @as(u8, 0x03), builder_deposits },
+        .{ @as(u8, 0x04), builder_exits },
     }) |pair| {
         const data: []const u8 = pair[1];
         if (data.len > 0) {
