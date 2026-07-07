@@ -556,7 +556,10 @@ pub fn verifyKzgProof(commitment: [48]u8, z: [32]u8, y: [32]u8, proof: [48]u8) !
     var y_g1_neg: c.blst_p1 = y_g1;
     c.blst_p1_cneg(&y_g1_neg, true); // Negate y_g1
     var p_minus_y: c.blst_p1 = undefined;
-    c.blst_p1_add(&p_minus_y, &commitment_proj, &y_g1_neg);
+    // Use add_or_double: commitment and -[y]G1 may be the same point (the
+    // "g1_doubling_in_final_add" KZG edge case), which plain blst_p1_add
+    // mishandles — it does not use the doubling formula for P == Q.
+    c.blst_p1_add_or_double(&p_minus_y, &commitment_proj, &y_g1_neg);
     var p_minus_y_affine: c.blst_p1_affine = undefined;
     c.blst_p1_to_affine(&p_minus_y_affine, &p_minus_y);
 
@@ -574,7 +577,8 @@ pub fn verifyKzgProof(commitment: [48]u8, z: [32]u8, y: [32]u8, proof: [48]u8) !
     var z_g2_neg_for_x: c.blst_p2 = z_g2;
     c.blst_p2_cneg(&z_g2_neg_for_x, true); // Negate z_g2
     var x_minus_z: c.blst_p2 = undefined;
-    c.blst_p2_add(&x_minus_z, &tau_g2_proj, &z_g2_neg_for_x);
+    // add_or_double for the same doubling reason as the G1 subtraction above.
+    c.blst_p2_add_or_double(&x_minus_z, &tau_g2_proj, &z_g2_neg_for_x);
     var x_minus_z_affine: c.blst_p2_affine = undefined;
     c.blst_p2_to_affine(&x_minus_z_affine, &x_minus_z);
 
