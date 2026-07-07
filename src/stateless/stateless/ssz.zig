@@ -24,7 +24,7 @@ inline fn readU64(data: []const u8, off: usize) u64 {
     return std.mem.readInt(u64, data[off..][0..8], .little);
 }
 
-// ── Fork enum (bal-devnet-7 / zkevm@v0.4.1) ──────────────────────────────────
+// ── Fork enum (glamsterdam-devnet-6 / zkevm@v0.5.0) ──────────────────────────────────
 
 /// ProtocolFork enum values from execution-specs amsterdam stateless.py.
 /// Indices are assigned by PROTOCOL_FORKS = tuple(ProtocolFork) and used by
@@ -38,25 +38,24 @@ fn forkNameFromIndex(idx: u64) []const u8 {
         3 => "TangerineWhistle",
         4 => "SpuriousDragon",
         5 => "Byzantium",
-        6 => "Constantinople",
-        7 => "ConstantinopleFix",
-        8 => "Istanbul",
-        9 => "MuirGlacier",
-        10 => "Berlin",
-        11 => "London",
-        12 => "ArrowGlacier",
-        13 => "GrayGlacier",
-        14 => "Paris",
-        15 => "Shanghai",
-        16 => "Cancun",
-        17 => "Prague",
-        18 => "Osaka",
-        19 => "BPO1",
-        20 => "BPO2",
-        21 => "BPO3",
-        22 => "BPO4",
-        23 => "BPO5",
-        24 => "Amsterdam",
+        // glamsterdam-devnet-6 / zkevm@v0.5.0: PR#2926 removed ConstantinopleFix (merged into
+        // StPetersburg at index 6) and BPO3-5; all indices from 7 onwards shift by -1 vs v0.4.1.
+        6 => "StPetersburg",
+        7 => "Istanbul",
+        8 => "MuirGlacier",
+        9 => "Berlin",
+        10 => "London",
+        11 => "ArrowGlacier",
+        12 => "GrayGlacier",
+        13 => "Paris",
+        14 => "Shanghai",
+        15 => "Cancun",
+        16 => "Prague",
+        17 => "Osaka",
+        18 => "BPO1",
+        19 => "BPO2",
+        20 => "Amsterdam",
+        24 => "Amsterdam", // v0.4.1 backwards-compat: old fixtures encoded Amsterdam as 24
         else => "",
     };
 }
@@ -320,7 +319,7 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     const codes = try decodeByteListList(alloc, witness_data[off_codes..off_headers]);
     const headers = try decodeByteListList(alloc, witness_data[off_headers..]);
 
-    // ── Public keys: List[ByteVector[65], N] (bal-devnet-7 / zkevm@v0.4.1) ────
+    // ── Public keys: List[ByteVector[65], N] (glamsterdam-devnet-6 / zkevm@v0.5.0) ────
     // Pre-recovered secp256k1 public keys, one per transaction in order.
     // SSZ schema is now SszList[ByteVector[PUBLIC_KEY_BYTES=65], MAX_PUBLIC_KEYS],
     // i.e. fixed-size elements → encoded as packed 65-byte chunks (no offset table).

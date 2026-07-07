@@ -590,7 +590,7 @@ pub const MainnetHandler = struct {
             // auth_state_refund is a pre-payment correction applied against initial_state_gas below.
             const block_base = final_cost + capped_refund;
             if (result.result.status == .Success) {
-                // bal-devnet-7: block_gas_used is the 2D max(regular, state). Intrinsic state
+                // glamsterdam-devnet-6: block_gas_used is the 2D max(regular, state). Intrinsic state
                 // gas is pre-paid via balance and excluded from the block accounting — only
                 // EXECUTION state gas (SSTORE etc., spends via spendStateGas) counts toward
                 // the block-level state lane.
