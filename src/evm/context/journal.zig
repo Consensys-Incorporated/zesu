@@ -442,6 +442,12 @@ pub const JournalInner = struct {
     bal_pending_storage: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80),
     // Slots committed to a non-pre-block value at any tx boundary.
     bal_committed_changed: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void), primitives.AddressContext, 80),
+    // EIP-7928: addresses whose account was loaded via loadAccountMutOptionalCode
+    // (the reference's get_account_optional). This is the reference's `account_reads`
+    // set, which — unioned with account_writes and storage — determines BAL membership.
+    // Crucially it EXCLUDES accounts merely created (never read), so a same-tx
+    // create+selfdestruct ephemeral does not appear in the BAL. Block-scoped.
+    bal_account_reads: std.HashMap(primitives.Address, void, primitives.AddressContext, 80),
 
     pub fn new() JournalInner {
         return .{
@@ -458,6 +464,7 @@ pub const JournalInner = struct {
             .bal_pending_accounts = std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80).init(alloc_mod.get()),
             .bal_pending_storage = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80).init(alloc_mod.get()),
             .bal_committed_changed = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void), primitives.AddressContext, 80).init(alloc_mod.get()),
+            .bal_account_reads = std.HashMap(primitives.Address, void, primitives.AddressContext, 80).init(alloc_mod.get()),
         };
     }
 
@@ -480,6 +487,13 @@ pub const JournalInner = struct {
         var cc_it = self.bal_committed_changed.valueIterator();
         while (cc_it.next()) |m| m.deinit();
         self.bal_committed_changed.deinit();
+        self.bal_account_reads.deinit();
+    }
+
+    /// EIP-7928: returns true if the account was loaded (read) during the block —
+    /// the reference's `account_reads` membership used for BAL inclusion.
+    pub fn isAccountRead(self: *const JournalInner, address: primitives.Address) bool {
+        return self.bal_account_reads.contains(address);
     }
 
     // ── EIP-7928 BAL tracking helpers ─────────────────────────────────────────
@@ -1184,6 +1198,10 @@ pub const JournalInner = struct {
 
     /// Loads account. If account is already loaded it will be marked as warm.
     pub fn loadAccountMutOptionalCode(self: *JournalInner, db: anytype, address: primitives.Address, load_code: bool, skip_cold_load: bool) !StateLoad(JournaledAccount) {
+        // EIP-7928 (Amsterdam+): record the account read (reference get_account_optional).
+        // This is the authoritative BAL-membership source; created-only accounts never
+        // reach this path, so same-tx create+selfdestruct ephemerals are excluded.
+        if (primitives.isEnabledIn(self.spec, .amsterdam)) self.bal_account_reads.put(address, {}) catch {};
         var is_cold: bool = undefined;
         var account_ptr: *state.Account = undefined;
 

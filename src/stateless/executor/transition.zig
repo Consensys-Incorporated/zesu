@@ -176,12 +176,13 @@ const BaTracker = struct {
                     self.committed.put(self.alloc, addr, k) catch {};
                     break :blk k;
                 };
-                // Only record a balance change if the account had pre-existing ETH that was
-                // transferred out (known.balance > 0 → balance decreased to some new value).
-                // Ephemeral accounts (created and destroyed in the same tx, known.balance = 0)
-                // may receive ETH after their SELFDESTRUCT (e.g. as a selfdestruct target),
-                // but that ETH is immediately burned — don't record it as a balance change.
-                if (known.balance != 0 and acct.info.balance != known.balance) {
+                // Record any balance change on a self-destructed account. EIP-8246 (Amsterdam+)
+                // no longer burns ETH, so a self-destructed account that keeps a non-zero balance
+                // survives as a cleared account and its balance change must be recorded (including
+                // 0→N for a same-tx self-beneficiary victim). Truly-destroyed accounts are absent
+                // from account_reads and dropped at entry assembly, so recording here is safe and
+                // mirrors the reference's diff of post-tx account state against pre.
+                if (acct.info.balance != known.balance) {
                     const entry = self.bal_chg.getOrPutValue(a, addr, .empty) catch {
                         continue;
                     };
@@ -342,28 +343,15 @@ const BaTracker = struct {
             }
         }
 
-        // Collect all addresses that were accessed during block execution.
+        // Collect all addresses in the BAL. Per EIP-7928 (reference build_block_access_list):
+        // an address appears iff it is in account_reads (get_account_optional — our
+        // journal bal_account_reads) OR has storage activity. Account-level changes
+        // (balance/nonce/code) only ever occur on accounts that were also read, so we do
+        // NOT seed from the change maps — doing so would resurrect created-only accounts
+        // (same-tx create+selfdestruct ephemerals) that the reference never reads or writes.
         var all_addrs = std.AutoHashMapUnmanaged(input.Address, void).empty;
         {
-            var it = ctx.journaled_state.inner.evm_state.iterator();
-            while (it.next()) |e| {
-                const addr = e.key_ptr.*;
-                const acct = e.value_ptr.*;
-                // Exclude OOG-phantom accounts: loaded for gas calc but operation went OOG.
-                if (!acct.status.touched and !ctx.journaled_state.isTrackedAddress(addr)) continue;
-                all_addrs.put(a, addr, {}) catch {};
-            }
-        }
-        {
-            var it = self.bal_chg.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
-        }
-        {
-            var it = self.nonce_chg.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
-        }
-        {
-            var it = self.code_chg.keyIterator();
+            var it = ctx.journaled_state.inner.bal_account_reads.keyIterator();
             while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
         }
         {
