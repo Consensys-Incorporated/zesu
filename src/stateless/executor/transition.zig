@@ -828,10 +828,14 @@ pub fn transitionWithContext(
             ctx.tx.authorization_list = null;
         }
 
-        // Chain ID
+        // Chain ID. A tx that carries a chain id must match the block's chain id
+        // (EIP-155): keep cfg.chain_id as the block's and enable the check so a
+        // mismatched tx (e.g. a legacy signature for a different chain) is rejected.
+        // Overwriting cfg.chain_id with the tx's id would make the check tautological.
         if (tx.chain_id) |cid| {
             ctx.tx.chain_id = cid;
-            ctx.cfg.chain_id = cid;
+            ctx.cfg.chain_id = chain_id;
+            ctx.cfg.tx_chain_id_check = true;
         } else if (tx.type == 0 and !tx.protected) {
             ctx.tx.chain_id = null;
             ctx.cfg.tx_chain_id_check = false;
