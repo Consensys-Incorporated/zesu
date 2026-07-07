@@ -330,6 +330,10 @@ pub const PendingCreateData = struct {
     /// EIP-8037 (Amsterdam+): state gas charged for new account creation.
     /// On child CREATE halt/invalid, this is returned to the parent's reservoir.
     new_account_state_gas: u64 = 0,
+    /// EIP-8037 (Amsterdam+): the CREATE target address was already alive (pre-funded
+    /// balance) before creation. On success the NEW_ACCOUNT state gas is refunded,
+    /// mirroring the reference `credit_state_gas_refund` when `target_alive`.
+    target_alive: bool = false,
 };
 
 /// Pending sub-call state: set by CALL/CREATE opcodes, cleared by frame runner.

@@ -304,12 +304,16 @@ pub const MainnetHandler = struct {
                         const status: main.ExecutionStatus = if (r.is_revert) .Revert else .Halt;
                         var exec_result = main.ExecutionResult.new(status, exec_gas - r.gas_remaining);
                         exec_result.return_data = alloc_mod.get().dupe(u8, r.return_data) catch @constCast(&[_]u8{});
-                        // EIP-8037 (Amsterdam, bal-devnet-7): top-level CREATE tx halt/revert refunds
-                        // the intrinsic NEW_ACCOUNT*CPSB state gas to the reservoir. setupCreate
-                        // failures (collision/balance/nonce) burn regular gas but not state gas.
+                        // EIP-8037 (Amsterdam): a setupCreate failure (collision/balance/nonce)
+                        // burns the regular create gas but never touches the state-gas reservoir,
+                        // and the intrinsic NEW_ACCOUNT*CPSB is refilled (reference generic_create
+                        // collision path: state_gas_left += reservoir; credit_state_gas_refund).
+                        // Return the full untouched reservoir plus the intrinsic new-account gas —
+                        // for a tx whose gas_limit exceeds TX_MAX_GAS_LIMIT, tx_reservoir holds the
+                        // large excess that must not be charged to the sender.
                         var fr = main.FrameResult.new(exec_result, r.gas_remaining, r.gas_refunded);
                         if (primitives.isEnabledIn(spec, .amsterdam)) {
-                            fr.reservoir_remaining = initial.initial_state_gas;
+                            fr.reservoir_remaining = tx_reservoir + initial.initial_state_gas;
                         }
                         return fr;
                     },
@@ -355,7 +359,14 @@ pub const MainnetHandler = struct {
                         if (primitives.isEnabledIn(spec, .amsterdam) and cr.success and s.target_alive) {
                             fr.reservoir_remaining += initial.initial_state_gas;
                         }
+                        // EIP-8037 (Amsterdam): on top-level CREATE-tx halt/revert the account
+                        // was never created, so return the non-spilled initcode state gas plus
+                        // the intrinsic NEW_ACCOUNT*CPSB to the reservoir. The spilled portion was
+                        // drawn from regular gas — on revert it returns to regular gas, on halt it
+                        // stays burned (reference refill_frame_state_gas, gas_left burned on halt).
                         if (primitives.isEnabledIn(spec, .amsterdam) and !cr.success) {
+                            fr.reservoir_remaining += (ir.state_gas_used -| ir.state_gas_spilled) + initial.initial_state_gas;
+                            if (cr_status == .Revert) fr.gas_remaining += ir.state_gas_spilled;
                             fr.result.state_gas_used = 0;
                         }
                         return fr;
@@ -390,6 +401,7 @@ pub const MainnetHandler = struct {
                 // charges NEW_ACCOUNT state gas, charged on the root frame below. Read
                 // aliveness from the pre-transfer account (callee_load). Self-transfers
                 // and transfers to existing accounts are exempt (recipient already alive).
+                const top_new_account_state_gas: u64 = if (primitives.isEnabledIn(spec, .amsterdam) and
                     tx.value > 0 and callee_load.data.stateClearAwareIsEmpty(spec))
                     interpreter_mod.gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * interpreter_mod.gas_costs.costPerStateByte(ctx.block.gas_limit)
                 else
@@ -433,13 +445,24 @@ pub const MainnetHandler = struct {
                                     0,
                                 );
                             }
+                            // precompile account charges NEW_ACCOUNT state gas. The main
+                            // spilling into regular gas); the precompile fast-path returns
+                            var pc_reservoir = tx_reservoir;
+                            var pc_gas_remaining = tx_regular_exec_gas - out.gas_used;
+                            if (top_new_account_state_gas > 0) {
+                                if (top_new_account_state_gas <= pc_reservoir) {
+                                    pc_reservoir -= top_new_account_state_gas;
+                                    const spill = top_new_account_state_gas - pc_reservoir;
+                                    pc_reservoir = 0;
+                                    if (pc_gas_remaining < spill) {
+                                    pc_gas_remaining -= spill;
                             ctx.journaled_state.checkpointCommit();
                             var fr = main.FrameResult.new(
                                 main.ExecutionResult.new(.Success, out.gas_used),
-                                tx_regular_exec_gas - out.gas_used,
+                                pc_gas_remaining,
                                 0,
                             );
-                            fr.reservoir_remaining = tx_reservoir;
+                            fr.reservoir_remaining = pc_reservoir;
                             return fr;
                         },
                         .err => {
@@ -479,6 +502,8 @@ pub const MainnetHandler = struct {
                 // before execution. spendStateGas draws from the reservoir, spilling into
                 // gas; the standard non-success refund path (below) returns it if the frame
                 // fails and the recipient was never created.
+                if (top_new_account_state_gas > 0) {
+                    if (!root_interp.gas.spendStateGas(top_new_account_state_gas)) {
                         ctx.journaled_state.checkpointRevert(call_checkpoint);
                         return main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
                     }
@@ -503,19 +528,23 @@ pub const MainnetHandler = struct {
                     .revert => .Revert,
                     else => .Halt,
                 };
-                // EIP-8037 (Amsterdam, bal-devnet-7): on top-level non-success (halt or revert),
-                // refund the full state_gas_used (including any portion that spilled into gas_left)
-                // back to the reservoir — the journal was rolled back, so no state was grown.
+                // EIP-8037 (Amsterdam): on top-level non-success (halt or revert), the journal
+                // was rolled back so no state grew — return the non-spilled state gas to the
+                // reservoir. The spilled portion was drawn from regular gas: on revert it returns
+                // to regular gas (→ sender), on halt it stays burned (reference
+                // refill_frame_state_gas then gas_left is burned on halt, kept on revert).
                 var top_state_gas_used = ir.state_gas_used;
                 var top_reservoir = ir.reservoir_remaining;
+                var top_gas_remaining = ir.gas_remaining;
                 if (primitives.isEnabledIn(spec, .amsterdam) and status != .Success) {
-                    top_reservoir += top_state_gas_used;
+                    top_reservoir += top_state_gas_used -| ir.state_gas_spilled;
+                    if (status == .Revert) top_gas_remaining += ir.state_gas_spilled;
                     top_state_gas_used = 0;
                 }
                 var exec_result = main.ExecutionResult.new(status, 0);
                 exec_result.state_gas_used = top_state_gas_used;
                 exec_result.return_data = alloc_mod.get().dupe(u8, ir.return_data) catch @constCast(&[_]u8{});
-                var fr = main.FrameResult.new(exec_result, ir.gas_remaining, ir.gas_refunded);
+                var fr = main.FrameResult.new(exec_result, top_gas_remaining, ir.gas_refunded);
                 fr.reservoir_remaining = top_reservoir;
                 return fr;
             },
@@ -674,6 +703,8 @@ const IterativeResult = struct {
     state_gas_used: u64,
     /// EIP-8037 (Amsterdam+): state gas reservoir remaining in the root frame after execution.
     reservoir_remaining: u64,
+    /// EIP-8037 (Amsterdam+): state gas that spilled into the root frame's regular gas.
+    state_gas_spilled: u64 = 0,
 };
 
 /// One entry on the iterative call stack.
@@ -785,6 +816,7 @@ fn executeIterative(
                 const gas_ref = frame.interp.gas.refunded;
                 const root_state_gas = frame.interp.gas.state_gas_used;
                 const root_reservoir = frame.interp.gas.reservoir;
+                const root_state_gas_spilled = frame.interp.gas.state_gas_spilled;
                 const rd_raw: []const u8 = if (raw.isSuccess() or raw == .revert)
                     frame.interp.return_data.data
                 else
@@ -805,6 +837,7 @@ fn executeIterative(
                     .return_data = return_data_buf.items,
                     .state_gas_used = root_state_gas,
                     .reservoir_remaining = root_reservoir,
+                    .state_gas_spilled = root_state_gas_spilled,
                 };
             }
 
@@ -816,6 +849,10 @@ fn executeIterative(
             const sub_reservoir = frame.interp.gas.reservoir;
             const sub_state_spent = frame.interp.gas.state_gas_spent;
             const sub_state_refunded = frame.interp.gas.state_gas_refunded;
+            // EIP-8037: state gas that spilled into the child's regular gas. On revert it is
+            // returned to the parent's regular gas (LIFO); on halt it stays burned. The reservoir
+            // contribution therefore excludes it in both cases.
+            const sub_spilled = frame.interp.gas.state_gas_spilled;
             // EIP-8037: on revert, parent's reservoir should be restored to call_reservoir
             // (the value passed to the child). Derived as:
             //   call_reservoir = sub_reservoir + sub_state_spent - sub_state_refunded
@@ -856,6 +893,9 @@ fn executeIterative(
                         r.state_gas_remaining = sub_reservoir;
                         parent.interp.gas.state_gas_spent += sub_state_spent;
                         parent.interp.gas.state_gas_refunded += sub_state_refunded;
+                        // Propagate the child's spilled state gas so a later parent refund
+                        // returns to regular gas in LIFO order (incorporate_child_on_success).
+                        parent.interp.gas.state_gas_spilled += sub_spilled;
                     } else if (sub_result == .invalid_static) {
                         // invalid_static: opCreate charged state gas before the static check
                         // fires. State gas is forfeited (account was being created in a static
@@ -863,11 +903,14 @@ fn executeIterative(
                         r.state_gas_used = 0;
                         r.state_gas_remaining = sub_reservoir;
                     } else {
-                        // Revert/halt: restore parent.reservoir to call_reservoir.
+                        // Revert/halt: restore parent.reservoir to call_reservoir, but the spilled
+                        // portion was drawn from regular gas — on revert it returns to regular gas
+                        // (gas_remaining), on halt it stays burned (already consumed from remaining).
                         r.state_gas_used = 0;
-                        r.state_gas_remaining = sub_call_reservoir;
+                        r.state_gas_remaining = sub_call_reservoir -| sub_spilled;
+                        if (sub_result == .revert) r.gas_remaining += sub_spilled;
                     }
-                    call_ops.resumeCall(parent.interp, r, pc.ret_off, pc.ret_size);
+                    call_ops.resumeCall(parent.interp, r, pc.ret_off, pc.ret_size, pc.new_account_state_gas);
                 },
                 .create => |pc| {
                     var r = host.finalizeCreate(pc.checkpoint, pc.new_addr, sub_result, sub_gas_rem, sub_gas_ref, return_data_buf.items, parent_spec, true, sub_reservoir);
@@ -888,11 +931,27 @@ fn executeIterative(
                         r.state_gas_used += sub_state_gas;
                         parent.interp.gas.state_gas_spent += code_deposit_state_gas + sub_state_spent;
                         parent.interp.gas.state_gas_refunded += sub_state_refunded;
+                        parent.interp.gas.state_gas_spilled += sub_spilled;
+                        // EIP-8037: CREATE onto an already-alive (pre-funded) address grows no
+                        // new account, so refund the NEW_ACCOUNT state gas charged in opCreate
+                        // (reference generic_create: credit_state_gas_refund when target_alive).
+                        if (pc.target_alive and pc.new_account_state_gas > 0) {
+                            parent.interp.gas.refundStateGas(pc.new_account_state_gas);
+                        }
                     } else {
                         // finalizeCreate set state_gas_remaining = sub_reservoir; adjust to
                         // call_reservoir + new_account_state_gas (the latter wasn't actually
-                        // consumed since no account was created).
-                        r.state_gas_remaining = sub_call_reservoir + pc.new_account_state_gas;
+                        // consumed since no account was created). The spilled portion was drawn
+                        // from regular gas — on revert it returns to regular gas, on halt burned.
+                        r.state_gas_remaining = sub_call_reservoir -| sub_spilled;
+                        if (sub_result == .revert) r.gas_remaining += sub_spilled;
+                        // LIFO-refund the parent's NEW_ACCOUNT pre-charge (credit_state_gas_refund):
+                        // to regular gas first if that charge spilled, else the reservoir. Routing
+                        // to regular gas matters — if the parent frame later halts it is burned.
+                        const na_from_gas_left = @min(pc.new_account_state_gas, parent.interp.gas.state_gas_spilled);
+                        parent.interp.gas.remaining += na_from_gas_left;
+                        parent.interp.gas.state_gas_spilled -= na_from_gas_left;
+                        parent.interp.gas.reservoir += pc.new_account_state_gas - na_from_gas_left;
                         parent.interp.gas.state_gas_used -|= pc.new_account_state_gas;
                         parent.interp.gas.state_gas_spent -|= pc.new_account_state_gas;
                     }
