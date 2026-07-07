@@ -7,13 +7,29 @@ on:
     branches: [ main, develop ]
 
 jobs:
+  versions:
+    name: Extract Versions
+    runs-on: ubuntu-latest
+    outputs:
+      bal: ${{ steps.extract.outputs.bal }}
+      zkevm: ${{ steps.extract.outputs.zkevm }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Extract fixture versions
+        id: extract
+        run: |
+          BAL=$(grep -oP 'spec_test_version = "\K[^"]*' build.zig)
+          ZKEVM=$(grep -oP 'zkevm_version = "\K[^"]*' build.zig)
+          echo "bal=$BAL" >> $GITHUB_OUTPUT
+          echo "zkevm=$ZKEVM" >> $GITHUB_OUTPUT
+
   build-and-test:
     name: Build and Test
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        zig-version: ['0.16.0']
 
     steps:
       - name: Checkout code
@@ -22,7 +38,7 @@ jobs:
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@abea47f85e598557f500fa1fd2ab7464fcb39406 # v2.2.1
         with:
-          version: ${{ matrix.zig-version }}
+          version: '0.16.0'
 
       - name: Verify Zig installation
         run: zig version
@@ -56,11 +72,9 @@ jobs:
         run: zig build test
 
   zkevm-tests:
-    name: zkEVM Tests
+    name: zkEVM Tests (${{ needs.versions.outputs.zkevm }})
+    needs: versions
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        zig-version: ['0.16.0']
 
     steps:
       - name: Checkout code
@@ -69,7 +83,7 @@ jobs:
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@abea47f85e598557f500fa1fd2ab7464fcb39406 # v2.2.1
         with:
-          version: ${{ matrix.zig-version }}
+          version: '0.16.0'
 
       - name: Install dependencies
         run: make install-deps
@@ -92,7 +106,8 @@ jobs:
         run: ./zig-out/bin/zkevm-blockchain-test-runner
 
   blockchain-tests:
-    name: Blockchain Tests (${{ matrix.suite }})
+    name: Blockchain Tests (${{ matrix.suite }}) ${{ needs.versions.outputs.bal }}
+    needs: versions
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -134,9 +149,9 @@ jobs:
             --fixtures spec-tests/fixtures/blockchain_tests/${{ matrix.suite }}
 
   blockchain-tests-result:
-    name: Blockchain Tests
+    name: Blockchain Tests ${{ needs.versions.outputs.bal }}
     if: always()
-    needs: blockchain-tests
+    needs: [versions, blockchain-tests]
     runs-on: ubuntu-latest
     steps:
       - name: Check all suites passed
