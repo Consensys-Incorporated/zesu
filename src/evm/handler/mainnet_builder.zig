@@ -263,7 +263,7 @@ pub const MainnetHandler = struct {
                                         journaled.account.info.balance > 0 or
                                         !std.mem.eql(u8, &journaled.account.info.code_hash, &primitives.KECCAK_EMPTY);
                                     if (is_existing) {
-                                        if (primitives.isEnabledIn(spec, .amsterdam)) {
+                                        if (is_amsterdam) {
                                             initial_gas.auth_state_refund += interpreter_mod.gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * amsterdam_cpsb;
                                             // Regular-lane counterpart: the intrinsic charges ACCOUNT_WRITE (8000)
                                             // per auth assuming a new account; an existing authority creates none,
@@ -281,7 +281,7 @@ pub const MainnetHandler = struct {
                                     //     delegated by a prior same-tx auth but not pre-tx.
                                     //   setting (addr != 0): refund AUTH_BASE if delegated now OR pre-tx
                                     //     (no new delegation slot is allocated).
-                                    if (primitives.isEnabledIn(spec, .amsterdam)) {
+                                    if (is_amsterdam) {
                                         const delegated_now = authority_had_delegation;
                                         const gop_pd = authority_pre_delegated.getOrPut(authority_addr) catch null;
                                         const delegated_before_tx = if (gop_pd) |g| blk: {
