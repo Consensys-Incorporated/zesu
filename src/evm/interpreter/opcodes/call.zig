@@ -354,11 +354,9 @@ fn callImpl(
 /// spilled out of the reservoir, else the reservoir — and unwind it from the frame's totals.
 pub fn refundNewAccountLifo(interp: *Interpreter, amount: u64) void {
     if (amount == 0) return;
-    const from_gas_left = @min(amount, interp.gas.state_gas_spilled);
-    interp.gas.remaining += from_gas_left;
-    interp.gas.state_gas_spilled -= from_gas_left;
-    interp.gas.reservoir += amount - from_gas_left;
-    interp.gas.state_gas_used -|= amount;
+    // Shared LIFO routing (regular gas first, then reservoir); the tail differs from
+    // refundStateGas — unwind the never-consumed charge from spent, not the refund credit.
+    interp.gas.creditStateGasLifo(amount);
     interp.gas.state_gas_spent -|= amount;
 }
 

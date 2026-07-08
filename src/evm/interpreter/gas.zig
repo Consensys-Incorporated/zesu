@@ -124,17 +124,24 @@ pub const Gas = struct {
         return true;
     }
 
-    /// EIP-8037 (Amsterdam+): Refund state gas in LIFO order — return to `remaining`
-    /// (regular gas) first, up to what previously spilled, then to the reservoir.
-    /// Mirrors the reference credit_state_gas_refund so a spilled-then-refunded charge
-    /// restores regular gas (affecting subsequent 63/64 forwarding). When nothing spilled
-    /// (state_gas_spilled == 0) this is equivalent to crediting the reservoir.
-    pub fn refundStateGas(self: *Gas, amount: u64) void {
+    /// EIP-8037 (Amsterdam+): LIFO-route `amount` of previously-charged state gas back
+    /// out — to `remaining` (regular gas) first, up to what previously spilled, then to
+    /// the reservoir — and drop it from state_gas_used. Mirrors the reference
+    /// credit_state_gas_refund routing so a spilled-then-refunded charge restores regular
+    /// gas (affecting subsequent 63/64 forwarding); when nothing spilled it credits the
+    /// reservoir. Callers apply their own tail counter (refunded credit vs spent unwind).
+    pub fn creditStateGasLifo(self: *Gas, amount: u64) void {
         const from_gas_left = @min(amount, self.state_gas_spilled);
         self.remaining += from_gas_left;
         self.state_gas_spilled -= from_gas_left;
         self.reservoir += amount - from_gas_left;
         self.state_gas_used -|= amount;
+    }
+
+    /// EIP-8037 (Amsterdam+): Refund state gas (e.g. SSTORE clear) — LIFO-route it out
+    /// and credit the refund counter, which is discarded if the frame later reverts.
+    pub fn refundStateGas(self: *Gas, amount: u64) void {
+        self.creditStateGasLifo(amount);
         self.state_gas_refunded += amount;
     }
 
