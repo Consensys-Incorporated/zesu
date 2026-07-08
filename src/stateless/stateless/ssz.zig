@@ -55,7 +55,6 @@ fn forkNameFromIndex(idx: u64) []const u8 {
         18 => "BPO1",
         19 => "BPO2",
         20 => "Amsterdam",
-        24 => "Amsterdam", // v0.4.1 backwards-compat: old fixtures encoded Amsterdam as 24
         else => "",
     };
 }
