@@ -145,6 +145,16 @@ pub const VERSIONED_HASH_VERSION_KZG: u8 = 0x01;
 /// Transaction gas limit cap (EIP-7825)
 pub const TX_GAS_LIMIT_CAP: u64 = 16777216;
 
+/// The protocol system-call caller (0xff...fe). EIP-4788/7002/7251/8282 system
+/// calls run as this address; the reference never reads it from pre-state
+/// (process_message_call with should_transfer_value=false), so its witness proof
+/// is legitimately absent. Shares the 0xff...fe value with EIP7708_LOG_ADDRESS but
+/// is a distinct concept — kept separate so neither moves if the other changes.
+pub const SYSTEM_ADDRESS: Address = [20]u8{
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+};
+
 /// EIP-7708: Address that emits synthetic ETH transfer/burn logs (0xff...fe).
 pub const EIP7708_LOG_ADDRESS: Address = [20]u8{
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,

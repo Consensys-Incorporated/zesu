@@ -62,10 +62,7 @@ const DUMMY_BLOCK_HASH: input.Hash = blk: {
 
 // ─── EIP-7928 Block Access List tracker ──────────────────────────────────────
 
-const SYSTEM_ADDRESS: input.Address = .{
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
-};
+const SYSTEM_ADDRESS = primitives.SYSTEM_ADDRESS;
 
 const KnownAcct = struct {
     balance: u256 = 0,

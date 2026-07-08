@@ -27,10 +27,7 @@ pub const DbError = error{
 /// EIP-4788/7002/7251 system calls run as this address; the reference never
 /// reads it from pre-state (process_message_call with should_transfer_value=false),
 /// so its proof is legitimately absent from the witness.
-const SYSTEM_ADDRESS: primitives.Address = .{
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
-};
+const SYSTEM_ADDRESS = primitives.SYSTEM_ADDRESS;
 
 const EMPTY_TRIE_HASH: primitives.Hash = .{
     0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6,

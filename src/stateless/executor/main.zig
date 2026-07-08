@@ -125,11 +125,7 @@ fn u256ToHashLocal(value: u256) types.Hash {
 }
 
 /// EIP system caller — accessed during system contract calls but excluded from the BAL.
-const SYSTEM_ADDRESS: types.Address = .{
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xff, 0xff, 0xff, 0xfe,
-};
+const SYSTEM_ADDRESS = primitives.SYSTEM_ADDRESS;
 
 /// Build a sorted slice of AccessedEntry from the WitnessDatabase access log
 /// and the post-execution alloc delta.  The result is sorted ascending by address.
