@@ -1198,10 +1198,6 @@ pub const JournalInner = struct {
 
     /// Loads account. If account is already loaded it will be marked as warm.
     pub fn loadAccountMutOptionalCode(self: *JournalInner, db: anytype, address: primitives.Address, load_code: bool, skip_cold_load: bool) !StateLoad(JournaledAccount) {
-        // EIP-7928 (Amsterdam+): record the account read (reference get_account_optional).
-        // This is the authoritative BAL-membership source; created-only accounts never
-        // reach this path, so same-tx create+selfdestruct ephemerals are excluded.
-        if (primitives.isEnabledIn(self.spec, .amsterdam)) self.bal_account_reads.put(address, {}) catch {};
         var is_cold: bool = undefined;
         var account_ptr: *state.Account = undefined;
 
@@ -1237,7 +1233,14 @@ pub const JournalInner = struct {
             is_cold = acct_is_cold;
             account_ptr = existing;
         } else {
-            // Account not yet loaded — fetch from DB and insert
+            // Account not yet loaded — fetch from DB and insert.
+            // EIP-7928 (Amsterdam+): record the account read here (reference
+            // get_account_optional). This else branch is the sole evm_state insertion
+            // path, so recording it covers every account exactly on its first load in the
+            // block; warm re-accesses hit the branch above and are already in the set.
+            // (Same-tx create+selfdestruct ephemerals reach this via setupCreateCore's
+            // loadAccount, matching the reference — they are dropped later at BAL assembly.)
+            if (primitives.isEnabledIn(self.spec, .amsterdam)) self.bal_account_reads.put(address, {}) catch {};
             const acct_is_cold = self.warm_addresses.isCold(address);
             if (acct_is_cold and skip_cold_load) {
                 return JournalLoadError.ColdLoadSkipped;
