@@ -190,14 +190,16 @@ fn runBlock(
     _ = try std.fmt.hexToBytes(input_bytes, in_stripped);
 
     // EIP-8025 (optional proofs): when the stateless input cannot be decoded, the guest
-    // emits the sentinel "default failed" result (root=0, successful_validation=false,
-    // default ChainConfig chain_id=0 / fork=Frontier) — reference stateless_guest
-    // run_stateless_guest / _default_failed_stateless_output. Its SSZ encoding is a fixed
-    // 73-byte string. Mirror that here: on decode failure, compare against the sentinel.
-    const REJECTED_INPUT_OUTPUT = "0000000000000000000000000000000000000000000000000000000000000000002500000000000000000000000c000000000000000000000010000000180000000800000008000000";
+    // emits the "default failed" result (root=0, successful_validation=false, default
+    // ChainConfig chain_id=0 / fork=Frontier) — reference stateless_guest
+    // run_stateless_guest / _default_failed_stateless_output. Assert the fixture's expected
+    // output equals the exact bytes the guest commits (ssz_output.DEFAULT_FAILED_OUTPUT),
+    // byte-for-byte including its 73-byte length — so a regression in the guest's
+    // failed-output encoding or length is caught here instead of silently passing.
     const si = ssz_decode.decode(alloc, input_bytes) catch {
-        if (std.ascii.eqlIgnoreCase(out_stripped, REJECTED_INPUT_OUTPUT)) return true;
-        std.debug.print("FAIL {s}[{}]  expected non-rejection output but input failed to decode\n  expected: 0x{s}\n", .{ test_name, block_idx, out_stripped });
+        const failed_hex = std.fmt.bytesToHex(ssz_output.DEFAULT_FAILED_OUTPUT, .lower);
+        if (std.ascii.eqlIgnoreCase(out_stripped, &failed_hex)) return true;
+        std.debug.print("FAIL {s}[{}]  input failed to decode; fixture expects 0x{s} but guest emits default-failed 0x{s}\n", .{ test_name, block_idx, out_stripped, &failed_hex });
         return false;
     };
 

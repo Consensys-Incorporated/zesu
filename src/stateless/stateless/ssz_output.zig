@@ -548,6 +548,30 @@ const SSZ_CHAIN_CONFIG_AMSTERDAM_MAINNET: [72]u8 = .{
     0x00, 0x00, 0x00, 0x00,
 };
 
+/// EIP-8025: canonical "default failed" stateless output, emitted when the SSZ
+/// input cannot be decoded (reference stateless_guest `_default_failed_stateless_output`):
+/// root=0, successful_validation=0, and a DEFAULT SszChainConfig (chain_id=0,
+/// fork=Frontier, empty activation + blob-schedule lists). Unlike a successful
+/// result — whose chain_config carries the full Amsterdam body (105 bytes total) —
+/// the default config is empty, so this output is exactly 73 bytes. The guest must
+/// commit these 73 bytes (not a zero-padded 105) for a rejected input to match.
+pub const DEFAULT_FAILED_OUTPUT: [73]u8 = blk: {
+    var b: [73]u8 = .{0} ** 73;
+    // [33..37] offset to chain_config = 37 (0x25)
+    b[33] = 0x25;
+    // [45..49] chain_config.offset_active_fork = 12 (0x0c)
+    b[45] = 0x0c;
+    // [57..61] active_fork.offset_activation = 16 (0x10)
+    b[57] = 0x10;
+    // [61..65] active_fork.offset_blob_schedule = 24 (0x18)
+    b[61] = 0x18;
+    // [65..69] activation.bn_offset = 8 (empty block_number list)
+    b[65] = 0x08;
+    // [69..73] activation.ts_offset = 8 (empty timestamp list)
+    b[69] = 0x08;
+    break :blk b;
+};
+
 /// Serialize SszStatelessValidationResult (glamsterdam-devnet-6 / zkevm@v0.5.0):
 ///   [0..32]   new_payload_request_root  Bytes32
 ///   [32]      successful_validation     boolean (0x01 = valid, 0x00 = invalid)
