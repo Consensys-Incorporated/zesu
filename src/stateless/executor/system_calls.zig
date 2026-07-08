@@ -197,24 +197,6 @@ pub fn applyPreBlockCalls(
 
 // ─── Post-block system calls ──────────────────────────────────────────────────
 
-/// Call the EIP-7002 (withdrawal requests) and EIP-7251 (consolidation requests)
-/// system contracts after all user transactions (Prague+).
-///
-/// Per EIP-7002/7251: if the contract has no code the call is silently skipped,
-/// matching the same fail-safe behaviour as the pre-block system calls.
-pub fn applyPostBlockCalls(
-    ctx: anytype,
-    instructions: *handler_mod.Instructions,
-    precompiles: *handler_mod.Precompiles,
-    spec: primitives.SpecId,
-    chain_id: u64,
-) void {
-    if (!primitives.isEnabledIn(spec, .prague)) return;
-    for ([_]input.Address{ EIP7002_ADDRESS, EIP7251_ADDRESS }) |sc_addr| {
-        runSystemCall(ctx, instructions, precompiles, sc_addr, &.{}, chain_id);
-    }
-}
-
 pub const PostBlockRequestBytes = struct {
     /// Raw return bytes from the EIP-7002 system contract (76 bytes × n withdrawals).
     withdrawal_requests: []const u8,
@@ -226,8 +208,9 @@ pub const PostBlockRequestBytes = struct {
     builder_exit_requests: []const u8 = &.{},
 };
 
-/// Like applyPostBlockCalls but captures and returns the raw output bytes from
-/// each system contract so the caller can compute the EIP-7685 requests_hash.
+/// Call the post-block system contracts (Prague+: EIP-7002 withdrawals, EIP-7251
+/// consolidations; Amsterdam+: EIP-8282 builder deposits/exits) and capture the raw
+/// output bytes from each so the caller can compute the EIP-7685 requests_hash.
 /// Caller owns the returned slices (allocated with `alloc`).
 /// Returns error.SystemContractCallFailed if any post-block system contract
 /// call reverts, halts, or runs out of gas (per EIP-7685: such blocks are invalid).
