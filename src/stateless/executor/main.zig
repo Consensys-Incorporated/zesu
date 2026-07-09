@@ -125,11 +125,7 @@ fn u256ToHashLocal(value: u256) types.Hash {
 }
 
 /// EIP system caller — accessed during system contract calls but excluded from the BAL.
-const SYSTEM_ADDRESS: types.Address = .{
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xff, 0xff, 0xff, 0xfe,
-};
+const SYSTEM_ADDRESS = primitives.SYSTEM_ADDRESS;
 
 /// Build a sorted slice of AccessedEntry from the WitnessDatabase access log
 /// and the post-execution alloc delta.  The result is sorted ascending by address.
@@ -451,6 +447,12 @@ pub fn executeStatelessInput(
     fork_name: ?[]const u8,
 ) !output.ProofOutput {
     const ep = &si.new_payload_request.execution_payload;
+
+    // EIP-8025: reject blocks where the active fork has not yet activated.
+    const cc = si.chain_config;
+    if (cc.activation_block == null and cc.activation_timestamp == null) return error.ChainConfigInvalid;
+    if (cc.activation_block) |b| if (ep.block_number < b) return error.ChainConfigInvalid;
+    if (cc.activation_timestamp) |t| if (ep.timestamp < t) return error.ChainConfigInvalid;
 
     const pre_state_root_raw = rlp_decode.findPreStateRoot(si.witness.headers, ep.block_number);
     const pre_state_root = pre_state_root_raw orelse ep.state_root;

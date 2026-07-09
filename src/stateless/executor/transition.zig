@@ -62,10 +62,7 @@ const DUMMY_BLOCK_HASH: input.Hash = blk: {
 
 // ─── EIP-7928 Block Access List tracker ──────────────────────────────────────
 
-const SYSTEM_ADDRESS: input.Address = .{
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
-};
+const SYSTEM_ADDRESS = primitives.SYSTEM_ADDRESS;
 
 const KnownAcct = struct {
     balance: u256 = 0,
@@ -176,12 +173,13 @@ const BaTracker = struct {
                     self.committed.put(self.alloc, addr, k) catch {};
                     break :blk k;
                 };
-                // Only record a balance change if the account had pre-existing ETH that was
-                // transferred out (known.balance > 0 → balance decreased to some new value).
-                // Ephemeral accounts (created and destroyed in the same tx, known.balance = 0)
-                // may receive ETH after their SELFDESTRUCT (e.g. as a selfdestruct target),
-                // but that ETH is immediately burned — don't record it as a balance change.
-                if (known.balance != 0 and acct.info.balance != known.balance) {
+                // Record any balance change on a self-destructed account. EIP-8246 (Amsterdam+)
+                // no longer burns ETH, so a self-destructed account that keeps a non-zero balance
+                // survives as a cleared account and its balance change must be recorded (including
+                // 0→N for a same-tx self-beneficiary victim). Truly-destroyed accounts are absent
+                // from account_reads and dropped at entry assembly, so recording here is safe and
+                // mirrors the reference's diff of post-tx account state against pre.
+                if (acct.info.balance != known.balance) {
                     const entry = self.bal_chg.getOrPutValue(a, addr, .empty) catch {
                         continue;
                     };
@@ -342,28 +340,15 @@ const BaTracker = struct {
             }
         }
 
-        // Collect all addresses that were accessed during block execution.
+        // Collect all addresses in the BAL. Per EIP-7928 (reference build_block_access_list):
+        // an address appears iff it is in account_reads (get_account_optional — our
+        // journal bal_account_reads) OR has storage activity. Account-level changes
+        // (balance/nonce/code) only ever occur on accounts that were also read, so we do
+        // NOT seed from the change maps — doing so would resurrect created-only accounts
+        // (same-tx create+selfdestruct ephemerals) that the reference never reads or writes.
         var all_addrs = std.AutoHashMapUnmanaged(input.Address, void).empty;
         {
-            var it = ctx.journaled_state.inner.evm_state.iterator();
-            while (it.next()) |e| {
-                const addr = e.key_ptr.*;
-                const acct = e.value_ptr.*;
-                // Exclude OOG-phantom accounts: loaded for gas calc but operation went OOG.
-                if (!acct.status.touched and !ctx.journaled_state.isTrackedAddress(addr)) continue;
-                all_addrs.put(a, addr, {}) catch {};
-            }
-        }
-        {
-            var it = self.bal_chg.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
-        }
-        {
-            var it = self.nonce_chg.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
-        }
-        {
-            var it = self.code_chg.keyIterator();
+            var it = ctx.journaled_state.inner.bal_account_reads.keyIterator();
             while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
         }
         {
@@ -828,10 +813,14 @@ pub fn transitionWithContext(
             ctx.tx.authorization_list = null;
         }
 
-        // Chain ID
+        // Chain ID. A tx that carries a chain id must match the block's chain id
+        // (EIP-155): keep cfg.chain_id as the block's and enable the check so a
+        // mismatched tx (e.g. a legacy signature for a different chain) is rejected.
+        // Overwriting cfg.chain_id with the tx's id would make the check tautological.
         if (tx.chain_id) |cid| {
             ctx.tx.chain_id = cid;
-            ctx.cfg.chain_id = cid;
+            ctx.cfg.chain_id = chain_id;
+            ctx.cfg.tx_chain_id_check = true;
         } else if (tx.type == 0 and !tx.protected) {
             ctx.tx.chain_id = null;
             ctx.cfg.tx_chain_id_check = false;
@@ -998,7 +987,7 @@ pub fn transitionWithContext(
         {
             // EIP-3860 / EIP-7954: reject CREATE txs with oversized initcode.
             if (tx.to == null and primitives.isEnabledIn(spec, .shanghai)) {
-                const max_initcode: usize = if (primitives.isEnabledIn(spec, .amsterdam)) 65536 else 49152;
+                const max_initcode: usize = if (primitives.isEnabledIn(spec, .amsterdam)) primitives.AMSTERDAM_MAX_INITCODE_SIZE else primitives.MAX_INITCODE_SIZE;
                 if (tx.data.len > max_initcode) {
                     ctx.journaled_state.discardTx();
                     if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
@@ -1173,7 +1162,7 @@ pub fn transitionWithContext(
 
         // Pre-Byzantium (EIP-658 not yet active): compute per-tx intermediate state root.
         if (!primitives.isEnabledIn(spec, .byzantium)) {
-            const per_tx_alloc = extractPostState(arena, pre_alloc_in, ctx) catch null;
+            const per_tx_alloc = extractPostState(arena, pre_alloc_in, ctx, spec) catch null;
             if (per_tx_alloc) |pa| {
                 const sr = output_mod.computeStateRoot(arena, pa, &.{}) catch null;
                 receipts.items[receipts.items.len - 1].state_root = sr;
@@ -1215,14 +1204,19 @@ pub fn transitionWithContext(
     if (tracker) |*t| t.detectAndRecord(txs.len + 1, ctx, txs.len);
 
     // ── Extract post-state ────────────────────────────────────────────────────
-    const post_alloc = try extractPostState(arena, pre_alloc_in, ctx);
+    const post_alloc = try extractPostState(arena, pre_alloc_in, ctx, spec);
 
-    // Collect selfdestructed accounts for delta-root deletion
+    // Collect selfdestructed accounts for delta-root deletion.
+    // EIP-8246 (Amsterdam+): a self-destructed account with a preserved non-zero balance
+    // is NOT deleted from the trie (it survives as a cleared account); only truly-empty
+    // (zero-balance) self-destructs are removed.
+    const amsterdam_no_burn = primitives.isEnabledIn(spec, .amsterdam);
     var deleted = std.ArrayListUnmanaged(input.Address).empty;
     {
         var del_it = ctx.journaled_state.inner.evm_state.iterator();
         while (del_it.next()) |e| {
             if (e.value_ptr.*.status.self_destructed) {
+                if (amsterdam_no_burn and e.value_ptr.*.info.balance != 0) continue;
                 try deleted.append(arena, e.key_ptr.*);
             }
         }
@@ -1232,7 +1226,14 @@ pub fn transitionWithContext(
 
     // ── EIP-7685 requests_hash ────────────────────────────────────────────────
     const deposits = if (primitives.isEnabledIn(spec, .prague)) try collectDeposits(arena, receipts.items) else &.{};
-    const requests_hash = try computeRequestsHash(arena, deposits, post_block_reqs.withdrawal_requests, post_block_reqs.consolidation_requests);
+    const requests_hash = try computeRequestsHash(
+        arena,
+        deposits,
+        post_block_reqs.withdrawal_requests,
+        post_block_reqs.consolidation_requests,
+        post_block_reqs.builder_deposit_requests,
+        post_block_reqs.builder_exit_requests,
+    );
 
     return TransitionResult{
         .alloc = post_alloc,
@@ -1303,21 +1304,35 @@ fn collectDeposits(arena: std.mem.Allocator, receipts: []const Receipt) error{In
 
 /// Compute EIP-7685 requests_hash.
 ///
-/// Hash = SHA256(SHA256(0x00||deposits) || SHA256(0x01||withdrawals) || SHA256(0x02||consolidations))
-/// where each type is omitted if its data is empty.
+/// Hash = SHA256( SHA256(0x00||deposits) || SHA256(0x01||withdrawals)
+///                || SHA256(0x02||consolidations) || SHA256(0x03||builder_deposits)
+///                || SHA256(0x04||builder_exits) )
+/// where each type is omitted if its data is empty. Types 0x03/0x04 are the
+/// EIP-8282 (Amsterdam+) builder execution requests.
 fn computeRequestsHash(
     arena: std.mem.Allocator,
     deposits: []const u8,
     withdrawals: []const u8,
     consolidations: []const u8,
+    builder_deposits: []const u8,
+    builder_exits: []const u8,
 ) ![32]u8 {
-    const max_len = @max(deposits.len, @max(withdrawals.len, consolidations.len));
+    const max_len = @max(
+        deposits.len,
+        @max(withdrawals.len, @max(consolidations.len, @max(builder_deposits.len, builder_exits.len))),
+    );
     const scratch = try arena.alloc(u8, 1 + max_len);
 
-    var outer_buf: [96]u8 = undefined;
+    var outer_buf: [160]u8 = undefined;
     var outer_len: usize = 0;
 
-    inline for (.{ .{ @as(u8, 0x00), deposits }, .{ @as(u8, 0x01), withdrawals }, .{ @as(u8, 0x02), consolidations } }) |pair| {
+    inline for (.{
+        .{ @as(u8, 0x00), deposits },
+        .{ @as(u8, 0x01), withdrawals },
+        .{ @as(u8, 0x02), consolidations },
+        .{ @as(u8, 0x03), builder_deposits },
+        .{ @as(u8, 0x04), builder_exits },
+    }) |pair| {
         const data: []const u8 = pair[1];
         if (data.len > 0) {
             scratch[0] = pair[0];
@@ -1338,6 +1353,7 @@ fn extractPostState(
     arena: std.mem.Allocator,
     pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
     ctx: anytype,
+    spec: primitives.SpecId,
 ) !std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) {
     // Start with a mutable copy of pre_alloc (use arena allocation for storage maps)
     var post = std.AutoHashMapUnmanaged(input.Address, input.AllocAccount).empty;
@@ -1373,8 +1389,24 @@ fn extractPostState(
         // Skip accounts that were loaded as non-existent and never touched
         if (account.status.loaded_as_not_existing and !account.status.touched) continue;
 
-        // Remove self-destructed accounts
+        // Self-destructed accounts.
+        // Pre-Amsterdam: removed entirely (balance burned if beneficiary == self).
+        // EIP-8246 (Amsterdam+): SELFDESTRUCT no longer burns. The account is cleared
+        // (nonce=0, code empty, storage wiped) but its balance is preserved; it is only
+        // removed when the final balance is zero (EIP-161 empty-account clearing).
         if (account.status.self_destructed) {
+            if (primitives.isEnabledIn(spec, .amsterdam) and account.info.balance != 0) {
+                var acct = input.AllocAccount{
+                    .balance = account.info.balance,
+                    .nonce = 0,
+                    .code = &.{},
+                    .pre_storage_root = if (post.getPtr(addr)) |p| p.pre_storage_root else null,
+                };
+                // Storage is wiped by SELFDESTRUCT — leave acct.storage empty.
+                _ = &acct;
+                try post.put(arena, addr, acct);
+                continue;
+            }
             _ = post.remove(addr);
             continue;
         }

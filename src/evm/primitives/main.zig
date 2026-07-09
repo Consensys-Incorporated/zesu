@@ -106,11 +106,12 @@ pub const CALL_STACK_LIMIT: u64 = 1024;
 
 /// EIP-170: maximum deployed contract code size (24576 bytes)
 pub const MAX_CODE_SIZE: usize = 24576;
-/// EIP-7954 (Amsterdam+): maximum deployed contract code size doubled (32768 bytes)
-pub const AMSTERDAM_MAX_CODE_SIZE: usize = 32768;
+/// EIP-7954 (Amsterdam+): maximum deployed contract code size = 0x10000 (65536 bytes).
+/// Matches the reference amsterdam MAX_CODE_SIZE = 0x10000.
+pub const AMSTERDAM_MAX_CODE_SIZE: usize = 0x10000;
 /// EIP-3860: maximum initcode size = 2 * MAX_CODE_SIZE (49152 bytes)
 pub const MAX_INITCODE_SIZE: usize = 2 * MAX_CODE_SIZE;
-/// EIP-7954 (Amsterdam+): maximum initcode size = 2 * AMSTERDAM_MAX_CODE_SIZE (65536 bytes)
+/// EIP-7954 (Amsterdam+): maximum initcode size = 2 * AMSTERDAM_MAX_CODE_SIZE (131072 bytes)
 pub const AMSTERDAM_MAX_INITCODE_SIZE: usize = 2 * AMSTERDAM_MAX_CODE_SIZE;
 
 /// Blob base fee update fraction for Cancun hardfork (EIP-4844)
@@ -143,6 +144,16 @@ pub const VERSIONED_HASH_VERSION_KZG: u8 = 0x01;
 
 /// Transaction gas limit cap (EIP-7825)
 pub const TX_GAS_LIMIT_CAP: u64 = 16777216;
+
+/// The protocol system-call caller (0xff...fe). EIP-4788/7002/7251/8282 system
+/// calls run as this address; the reference never reads it from pre-state
+/// (process_message_call with should_transfer_value=false), so its witness proof
+/// is legitimately absent. Shares the 0xff...fe value with EIP7708_LOG_ADDRESS but
+/// is a distinct concept — kept separate so neither moves if the other changes.
+pub const SYSTEM_ADDRESS: Address = [20]u8{
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+};
 
 /// EIP-7708: Address that emits synthetic ETH transfer/burn logs (0xff...fe).
 pub const EIP7708_LOG_ADDRESS: Address = [20]u8{

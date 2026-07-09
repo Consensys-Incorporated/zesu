@@ -24,6 +24,11 @@ pub const DbError = error{
     InvalidWitness,
 };
 
+/// EIP-4788/7002/7251 system calls run as this address; the reference never
+/// reads it from pre-state (process_message_call with should_transfer_value=false),
+/// so its proof is legitimately absent from the witness.
+const SYSTEM_ADDRESS = primitives.SYSTEM_ADDRESS;
+
 const EMPTY_TRIE_HASH: primitives.Hash = .{
     0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6,
     0xff, 0x83, 0x45, 0xe6, 0x92, 0xc0, 0xf8, 0x6e,
@@ -99,9 +104,18 @@ pub const WitnessDatabase = struct {
             address,
             self.node_index,
         ) catch |err| switch (err) {
-            // InvalidProof means the witness doesn't include proof nodes for this account.
-            // Treat as non-existent (e.g., precompile addresses have no witness proof).
-            error.InvalidProof => return null,
+            // EIP-8025 witness completeness: InvalidProof means a trie node needed to
+            // resolve this account is missing from the witness. A COMPLETE witness proves
+            // every touched account's (non-)existence — a truly-absent account resolves to
+            // null via an exclusion proof, never InvalidProof — so a missing node means the
+            // witness is incomplete for a touched account and replay must fail.
+            // Exception: SYSTEM_ADDRESS (EIP-4788/7002/7251 system-call caller) is never
+            // read from pre-state by the reference (process_message_call with
+            // should_transfer_value=false), so its proof is legitimately absent.
+            error.InvalidProof => {
+                if (std.mem.eql(u8, &address, &SYSTEM_ADDRESS)) return null;
+                return DbError.InvalidWitness;
+            },
             else => return DbError.InvalidWitness,
         };
 

@@ -442,6 +442,12 @@ pub const JournalInner = struct {
     bal_pending_storage: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80),
     // Slots committed to a non-pre-block value at any tx boundary.
     bal_committed_changed: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void), primitives.AddressContext, 80),
+    // EIP-7928: addresses whose account was loaded via loadAccountMutOptionalCode
+    // (the reference's get_account_optional). This is the reference's `account_reads`
+    // set, which — unioned with account_writes and storage — determines BAL membership.
+    // Crucially it EXCLUDES accounts merely created (never read), so a same-tx
+    // create+selfdestruct ephemeral does not appear in the BAL. Block-scoped.
+    bal_account_reads: std.HashMap(primitives.Address, void, primitives.AddressContext, 80),
 
     pub fn new() JournalInner {
         return .{
@@ -458,6 +464,7 @@ pub const JournalInner = struct {
             .bal_pending_accounts = std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80).init(alloc_mod.get()),
             .bal_pending_storage = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80).init(alloc_mod.get()),
             .bal_committed_changed = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void), primitives.AddressContext, 80).init(alloc_mod.get()),
+            .bal_account_reads = std.HashMap(primitives.Address, void, primitives.AddressContext, 80).init(alloc_mod.get()),
         };
     }
 
@@ -480,6 +487,13 @@ pub const JournalInner = struct {
         var cc_it = self.bal_committed_changed.valueIterator();
         while (cc_it.next()) |m| m.deinit();
         self.bal_committed_changed.deinit();
+        self.bal_account_reads.deinit();
+    }
+
+    /// EIP-7928: returns true if the account was loaded (read) during the block —
+    /// the reference's `account_reads` membership used for BAL inclusion.
+    pub fn isAccountRead(self: *const JournalInner, address: primitives.Address) bool {
+        return self.bal_account_reads.contains(address);
     }
 
     // ── EIP-7928 BAL tracking helpers ─────────────────────────────────────────
@@ -1078,7 +1092,12 @@ pub const JournalInner = struct {
         const journal_entry: ?JournalEntry = entry_blk: {
             if (acc.isCreatedLocally() or !is_cancun_enabled) {
                 _ = acc.markSelfdestructedLocally();
-                acc.info.balance = @as(primitives.U256, 0);
+                // EIP-8246 (Amsterdam+): SELFDESTRUCT no longer burns ETH. When the
+                // beneficiary is the account itself, move_ether(self, self) is a no-op,
+                // so the balance is preserved. For a different beneficiary the balance
+                // was already added to the target above, so zeroing reflects that move.
+                const preserve_self_balance = primitives.isEnabledIn(spec, .amsterdam) and std.mem.eql(u8, &address, &target);
+                if (!preserve_self_balance) acc.info.balance = @as(primitives.U256, 0);
                 break :entry_blk JournalEntryFactory.accountDestroyed(address, target, destroyed_status, balance);
             } else if (!std.mem.eql(u8, &address, &target)) {
                 acc.info.balance = @as(primitives.U256, 0);
@@ -1121,28 +1140,13 @@ pub const JournalInner = struct {
         //
         // Reference: ethereum/execution-specs — amsterdam/vm/instructions/system.py
         //            (selfdestruct) and amsterdam/fork.py (process_transaction finalization).
+        // EIP-8246 (Amsterdam+): SELFDESTRUCT no longer burns ETH, so there are no burn
+        // logs. EIP-7708 still requires a Transfer log for a real ETH move to a
+        // *different* beneficiary. Self-beneficiary is a no-op (balance preserved).
         if (primitives.isEnabledIn(self.spec, .amsterdam)) {
-            if (!std.mem.eql(u8, &address, &target)) {
-                // Case 1a: SELFDESTRUCT to a different beneficiary.
-                // Emit Transfer log immediately for the ETH moved by `entry_blk` above.
-                if (balance > 0) self.addEip7708TransferLog(address, target, balance);
-                // If this account is also in `accounts_to_delete`, register it for the
-                // finalization burn check: a payer may still send ETH to this address
-                // within the same transaction after the opcode returns.
-                if (acc.isCreatedLocally() or !is_cancun_enabled) {
-                    self.addPendingBurn(address, 0);
-                }
-            } else if (acc.isCreatedLocally() or !is_cancun_enabled) {
-                // Case 1b: SELFDESTRUCT to self (same-tx-created or pre-Cancun).
-                // Emit Burn log immediately for the ETH destroyed right now, then register
-                // for the finalization burn check so that any ETH arriving *after* this
-                // opcode (payer call, coinbase priority fee) also gets a Burn log.
-                // The two logs are intentionally separate, matching the EELS reference.
-                if (balance > 0) self.addEip7708BurnLog(address, balance);
-                self.addPendingBurn(address, 0);
+            if (!std.mem.eql(u8, &address, &target) and balance > 0) {
+                self.addEip7708TransferLog(address, target, balance);
             }
-            // Case 2: SELFDESTRUCT to self on a pre-existing account (Cancun+).
-            // EIP-6780 makes this a no-op — state is unchanged, no log is emitted.
         }
 
         return StateLoad(SelfDestructResult).new(SelfDestructResult{
@@ -1208,7 +1212,13 @@ pub const JournalInner = struct {
                 acct_is_cold = should_be_cold;
                 _ = existing.markWarmWithTransactionId(self.transaction_id);
                 if (existing.isSelfdestructedLocally()) {
+                    // EIP-8246 (Amsterdam+): SELFDESTRUCT no longer burns. A selfdestructed
+                    // account that retains a non-zero balance is NOT deleted, so re-accessing
+                    // it must preserve that balance (only code/storage/nonce are wiped).
+                    // Pre-8246: the account is reborn empty (balance burned).
+                    const preserved_balance: primitives.U256 = if (primitives.isEnabledIn(self.spec, .amsterdam)) existing.info.balance else 0;
                     existing.selfdestruct();
+                    existing.info.balance = preserved_balance;
                     existing.unmarkSelfdestructedLocally();
                     // Clear the global self_destructed flag: when a new tx accesses a
                     // previously-selfdestructed account, it is reborn as an empty account.
@@ -1223,7 +1233,14 @@ pub const JournalInner = struct {
             is_cold = acct_is_cold;
             account_ptr = existing;
         } else {
-            // Account not yet loaded — fetch from DB and insert
+            // Account not yet loaded — fetch from DB and insert.
+            // EIP-7928 (Amsterdam+): record the account read here (reference
+            // get_account_optional). This else branch is the sole evm_state insertion
+            // path, so recording it covers every account exactly on its first load in the
+            // block; warm re-accesses hit the branch above and are already in the set.
+            // (Same-tx create+selfdestruct ephemerals reach this via setupCreateCore's
+            // loadAccount, matching the reference — they are dropped later at BAL assembly.)
+            if (primitives.isEnabledIn(self.spec, .amsterdam)) self.bal_account_reads.put(address, {}) catch {};
             const acct_is_cold = self.warm_addresses.isCold(address);
             if (acct_is_cold and skip_cold_load) {
                 return JournalLoadError.ColdLoadSkipped;

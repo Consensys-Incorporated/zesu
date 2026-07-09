@@ -316,6 +316,10 @@ pub const PendingCallData = struct {
     checkpoint: JournalCheckpoint,
     ret_off: usize,
     ret_size: usize,
+    /// EIP-8037 (Amsterdam+): state gas charged for a new account created by a
+    /// value-bearing CALL. Refunded to the parent reservoir if the call fails
+    /// (the account is not created), matching credit_state_gas_refund(NEW_ACCOUNT).
+    new_account_state_gas: u64 = 0,
 };
 
 /// Data stored when a CREATE/CREATE2 suspends the interpreter.
@@ -326,6 +330,10 @@ pub const PendingCreateData = struct {
     /// EIP-8037 (Amsterdam+): state gas charged for new account creation.
     /// On child CREATE halt/invalid, this is returned to the parent's reservoir.
     new_account_state_gas: u64 = 0,
+    /// EIP-8037 (Amsterdam+): the CREATE target address was already alive (pre-funded
+    /// balance) before creation. On success the NEW_ACCOUNT state gas is refunded,
+    /// mirroring the reference `credit_state_gas_refund` when `target_alive`.
+    target_alive: bool = false,
 };
 
 /// Pending sub-call state: set by CALL/CREATE opcodes, cleared by frame runner.

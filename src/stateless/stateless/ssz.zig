@@ -24,7 +24,7 @@ inline fn readU64(data: []const u8, off: usize) u64 {
     return std.mem.readInt(u64, data[off..][0..8], .little);
 }
 
-// ── Fork enum (bal-devnet-7 / zkevm@v0.4.1) ──────────────────────────────────
+// ── Fork enum (glamsterdam-devnet-6 / zkevm@v0.5.0) ──────────────────────────────────
 
 /// ProtocolFork enum values from execution-specs amsterdam stateless.py.
 /// Indices are assigned by PROTOCOL_FORKS = tuple(ProtocolFork) and used by
@@ -38,25 +38,23 @@ fn forkNameFromIndex(idx: u64) []const u8 {
         3 => "TangerineWhistle",
         4 => "SpuriousDragon",
         5 => "Byzantium",
-        6 => "Constantinople",
-        7 => "ConstantinopleFix",
-        8 => "Istanbul",
-        9 => "MuirGlacier",
-        10 => "Berlin",
-        11 => "London",
-        12 => "ArrowGlacier",
-        13 => "GrayGlacier",
-        14 => "Paris",
-        15 => "Shanghai",
-        16 => "Cancun",
-        17 => "Prague",
-        18 => "Osaka",
-        19 => "BPO1",
-        20 => "BPO2",
-        21 => "BPO3",
-        22 => "BPO4",
-        23 => "BPO5",
-        24 => "Amsterdam",
+        // glamsterdam-devnet-6 / zkevm@v0.5.0: PR#2926 removed ConstantinopleFix (merged into
+        // StPetersburg at index 6) and BPO3-5; all indices from 7 onwards shift by -1 vs v0.4.1.
+        6 => "StPetersburg",
+        7 => "Istanbul",
+        8 => "MuirGlacier",
+        9 => "Berlin",
+        10 => "London",
+        11 => "ArrowGlacier",
+        12 => "GrayGlacier",
+        13 => "Paris",
+        14 => "Shanghai",
+        15 => "Cancun",
+        16 => "Prague",
+        17 => "Osaka",
+        18 => "BPO1",
+        19 => "BPO2",
+        20 => "Amsterdam",
         else => "",
     };
 }
@@ -181,6 +179,27 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     const off_active_fork: usize = readU32(chain_config_data, 8);
     if (off_active_fork + 8 > chain_config_data.len) return error.InvalidSsz;
     const fork_idx: u64 = readU64(chain_config_data, off_active_fork);
+
+    // SszForkConfig: fork uint64 [0..8], activation offset [8..12], blob_schedule offset [12..16].
+    // SszForkActivation: block_number list offset [0..4], timestamp list offset [4..8]; each
+    // SszOptional list is 0 bytes (None) or 8 bytes (a single uint64). Decode the activation so
+    // EIP-8025 chain-config validation can reject a fork not yet active for the target payload.
+    var activation_block: ?u64 = null;
+    var activation_timestamp: ?u64 = null;
+    if (off_active_fork + 16 <= chain_config_data.len) {
+        const af = chain_config_data[off_active_fork..];
+        const off_activation: usize = readU32(af, 8);
+        const off_blob_sched: usize = readU32(af, 12);
+        if (off_activation + 8 <= off_blob_sched and off_blob_sched <= af.len) {
+            const act = af[off_activation..off_blob_sched];
+            const off_bn: usize = readU32(act, 0);
+            const off_ts: usize = readU32(act, 4);
+            if (off_bn <= off_ts and off_ts <= act.len) {
+                if (off_ts - off_bn >= 8) activation_block = readU64(act, off_bn);
+                if (act.len - off_ts >= 8) activation_timestamp = readU64(act, off_ts);
+            }
+        }
+    }
 
     const fork_name_bytes = forkNameFromIndex(fork_idx);
     const npr_data = body[off_npr..off_witness];
@@ -320,7 +339,7 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     const codes = try decodeByteListList(alloc, witness_data[off_codes..off_headers]);
     const headers = try decodeByteListList(alloc, witness_data[off_headers..]);
 
-    // ── Public keys: List[ByteVector[65], N] (bal-devnet-7 / zkevm@v0.4.1) ────
+    // ── Public keys: List[ByteVector[65], N] (glamsterdam-devnet-6 / zkevm@v0.5.0) ────
     // Pre-recovered secp256k1 public keys, one per transaction in order.
     // SSZ schema is now SszList[ByteVector[PUBLIC_KEY_BYTES=65], MAX_PUBLIC_KEYS],
     // i.e. fixed-size elements → encoded as packed 65-byte chunks (no offset table).
@@ -371,6 +390,9 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
         .chain_config = .{
             .chain_id = if (chain_id != 0) chain_id else 1,
             .fork_name = if (fork_name_bytes.len > 0) fork_name_bytes else null,
+            .active_fork_idx = fork_idx,
+            .activation_block = activation_block,
+            .activation_timestamp = activation_timestamp,
         },
         .public_keys = public_keys,
     };

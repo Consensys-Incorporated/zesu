@@ -21,6 +21,22 @@ pub const COLD_ACCOUNT_ACCESS = 2600;
 pub const WARM_ACCOUNT_ACCESS = 100;
 pub const COLD_SLOAD = 2100;
 pub const WARM_SLOAD = 100;
+
+// EIP-8037 (Amsterdam+): cold access repricing. Both cold account access and
+// cold storage access rise to 3000 (from Berlin's 2600 / 2100). Warm access
+// stays 100. See execution-specs amsterdam/vm/gas.py GasCosts.
+pub const COLD_ACCOUNT_ACCESS_AMSTERDAM = 3000;
+pub const COLD_STORAGE_ACCESS_AMSTERDAM = 3000;
+
+/// Cold account-access cost for the active spec (EIP-2929 / EIP-8037).
+pub inline fn coldAccountAccess(spec: primitives.SpecId) u64 {
+    return if (primitives.isEnabledIn(spec, .amsterdam)) COLD_ACCOUNT_ACCESS_AMSTERDAM else COLD_ACCOUNT_ACCESS;
+}
+
+/// Cold storage-access (SLOAD) cost for the active spec (EIP-2929 / EIP-8037).
+pub inline fn coldStorageAccess(spec: primitives.SpecId) u64 {
+    return if (primitives.isEnabledIn(spec, .amsterdam)) COLD_STORAGE_ACCESS_AMSTERDAM else COLD_SLOAD;
+}
 pub const CALL_STIPEND = 2300; // Gas gifted to callee on value-bearing CALL (not deducted from caller)
 
 // Storage costs - Pre-Berlin
@@ -42,6 +58,13 @@ pub const SSTORE_CLEARS_SCHEDULE_LONDON = 4800;
 // EIP-8037 (Amsterdam): State creation gas constants
 // GAS_STORAGE_UPDATE replaces SSTORE_SET for 0→nonzero writes (regular portion only)
 pub const GAS_STORAGE_UPDATE: u64 = 5000;
+// EIP-8037 (Amsterdam+): SSTORE regular write cost on first change to a slot.
+pub const STORAGE_WRITE_AMSTERDAM: u64 = 10000;
+// EIP-8037 (Amsterdam+): storage-clear refund = (STORAGE_WRITE + COLD_STORAGE_ACCESS) * 4800/5000 = 12480.
+pub const REFUND_STORAGE_CLEAR_AMSTERDAM: i64 = @intCast((STORAGE_WRITE_AMSTERDAM + COLD_STORAGE_ACCESS_AMSTERDAM) * 4800 / 5000);
+// EIP-8037 (Amsterdam+): regular-lane cost to write a new account (CALL_VALUE, CREATE,
+// EIP-7702 delegation). Pairs with STATE_BYTES_PER_NEW_ACCOUNT for the state lane.
+pub const ACCOUNT_WRITE_COST: u64 = 8000;
 // State bytes charged per operation (used with cost_per_state_byte)
 pub const STATE_BYTES_PER_STORAGE_SET: u64 = 64;
 pub const STATE_BYTES_PER_NEW_ACCOUNT: u64 = 120;
@@ -125,8 +148,12 @@ pub fn getSloadCost(spec: primitives.SpecId, is_cold: bool) u64 {
         .berlin, .london, .arrow_glacier, .gray_glacier => {
             return if (is_cold) G_SLOAD_BERLIN_COLD else G_SLOAD_BERLIN_WARM;
         },
-        .merge, .shanghai, .cancun, .prague, .osaka, .amsterdam => {
+        .merge, .shanghai, .cancun, .prague, .osaka => {
             return if (is_cold) G_SLOAD_BERLIN_COLD else G_SLOAD_BERLIN_WARM;
+        },
+        // EIP-8037 (Amsterdam+): cold storage access repriced to 3000.
+        .amsterdam => {
+            return if (is_cold) COLD_STORAGE_ACCESS_AMSTERDAM else G_SLOAD_BERLIN_WARM;
         },
     };
 }
@@ -159,6 +186,12 @@ pub fn getSstoreCost(
     is_cold: bool,
     block_gas_limit: u64,
 ) SstoreGas {
+    // EIP-8037 (Amsterdam+): fully repriced SSTORE model — see execution-specs
+    // amsterdam/vm/instructions/storage.py sstore().
+    if (primitives.isEnabledIn(spec, .amsterdam)) {
+        return getSstoreCostAmsterdam(original, current, new, is_cold, block_gas_limit);
+    }
+
     // Pre-Istanbul: simple gas model based only on current and new values.
     // EIP-2200 "original" tracking did not exist before Istanbul.
     // Every SSTORE is evaluated independently:
@@ -257,6 +290,42 @@ pub fn getSstoreCost(
     return .{ .gas_cost = dirty_base + cold_cost, .gas_refund = refund, .state_gas_refund = state_gas_refund };
 }
 
+/// EIP-8037 (Amsterdam+) SSTORE gas. Mirrors amsterdam/vm/instructions/storage.py:
+///   access:  cold 3000 / warm 100 (always)
+///   write:   +STORAGE_WRITE (10000) regular, only on first change this tx
+///   set:     +STORAGE_SET state gas (64*cpsb) when creating a slot from zero
+///   refunds: REFUND_STORAGE_CLEAR (12480) on clear; STORAGE_WRITE on restore-to-original;
+///            STORAGE_SET state-gas credit when a same-tx-set slot is cleared again.
+fn getSstoreCostAmsterdam(
+    original: primitives.U256,
+    current: primitives.U256,
+    new: primitives.U256,
+    is_cold: bool,
+    block_gas_limit: u64,
+) SstoreGas {
+    const cpsb = costPerStateByte(block_gas_limit);
+    const storage_set_state = STATE_BYTES_PER_STORAGE_SET * cpsb;
+
+    var gas_cost: u64 = if (is_cold) COLD_STORAGE_ACCESS_AMSTERDAM else WARM_SLOAD;
+    var refund: i64 = 0;
+    var state_gas: u64 = 0;
+    var state_gas_refund: u64 = 0;
+
+    const first_change = (original == current and current != new);
+    if (first_change) gas_cost += STORAGE_WRITE_AMSTERDAM;
+
+    if (current != new) {
+        if (original != 0 and current != 0 and new == 0) refund += REFUND_STORAGE_CLEAR_AMSTERDAM;
+        if (original != 0 and current == 0) refund -= REFUND_STORAGE_CLEAR_AMSTERDAM;
+        if (original == new) refund += @as(i64, @intCast(STORAGE_WRITE_AMSTERDAM));
+    }
+
+    if (first_change and original == 0) state_gas = storage_set_state;
+    if (current != new and original == new and original == 0) state_gas_refund = storage_set_state;
+
+    return .{ .gas_cost = gas_cost, .gas_refund = refund, .state_gas = state_gas, .state_gas_refund = state_gas_refund };
+}
+
 // Calculate call gas cost
 pub fn getCallGasCost(
     spec: primitives.SpecId,
@@ -269,15 +338,16 @@ pub fn getCallGasCost(
     //   Tangerine+ (EIP-150) through pre-Berlin: flat 700
     //   Frontier/Homestead (pre-Tangerine): flat 40
     var cost: u64 = if (primitives.isEnabledIn(spec, .berlin))
-        (if (is_cold) COLD_ACCOUNT_ACCESS else WARM_ACCOUNT_ACCESS)
+        (if (is_cold) coldAccountAccess(spec) else WARM_ACCOUNT_ACCESS)
     else if (primitives.isEnabledIn(spec, .tangerine))
         G_CALL
     else
         G_CALL_FRONTIER;
 
-    // Value transfer cost (G_CALLVALUE = 9000, unchanged across all forks)
+    // Value transfer cost. Pre-Amsterdam: G_CALLVALUE = 9000.
+    // EIP-8037 (Amsterdam+): CALL_VALUE = ACCOUNT_WRITE(8000) + CALL_STIPEND(2300) = 10300.
     if (transfers_value) {
-        cost += 9000;
+        cost += if (primitives.isEnabledIn(spec, .amsterdam)) 10300 else 9000;
         // New account creation cost (G_NEWACCOUNT = 25000).
         // EIP-8037 (Amsterdam+): G_NEWACCOUNT regular cost removed; state gas charged separately
         // in opCall via spendStateGas(STATE_BYTES_PER_NEW_ACCOUNT * cost_per_state_byte).

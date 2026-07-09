@@ -59,7 +59,7 @@ pub fn opBalance(ctx: *InstructionContext) void {
     // This prevents loading the account from the database when the opcode runs OOG,
     // which would incorrectly add the address to the EIP-7928 block access list.
     if (primitives.isEnabledIn(ctx.interpreter.runtime_flags.spec_id, .berlin)) {
-        const dyn_gas: u64 = if (h.isAddressCold(addr)) gas_costs.COLD_ACCOUNT_ACCESS else gas_costs.WARM_ACCOUNT_ACCESS;
+        const dyn_gas: u64 = if (h.isAddressCold(addr)) gas_costs.coldAccountAccess(ctx.interpreter.runtime_flags.spec_id) else gas_costs.WARM_ACCOUNT_ACCESS;
         if (!ctx.interpreter.gas.spend(dyn_gas)) {
             ctx.interpreter.halt(.out_of_gas);
             return;
@@ -114,7 +114,10 @@ pub fn opExtcodesize(ctx: *InstructionContext) void {
 
     // Post-Berlin: charge dynamic warm/cold cost BEFORE loading the code.
     if (primitives.isEnabledIn(ctx.interpreter.runtime_flags.spec_id, .berlin)) {
-        const dyn_gas: u64 = if (h.isAddressCold(addr)) gas_costs.COLD_ACCOUNT_ACCESS else gas_costs.WARM_ACCOUNT_ACCESS;
+        var dyn_gas: u64 = if (h.isAddressCold(addr)) gas_costs.coldAccountAccess(ctx.interpreter.runtime_flags.spec_id) else gas_costs.WARM_ACCOUNT_ACCESS;
+        // EIP-8038 (Amsterdam+): EXTCODESIZE is charged an additional WARM_ACCESS
+        // on top of the cold/warm access cost (unlike BALANCE / EXTCODEHASH).
+        if (primitives.isEnabledIn(ctx.interpreter.runtime_flags.spec_id, .amsterdam)) dyn_gas += gas_costs.WARM_ACCOUNT_ACCESS;
         if (!ctx.interpreter.gas.spend(dyn_gas)) {
             ctx.interpreter.halt(.out_of_gas);
             return;
@@ -158,7 +161,10 @@ pub fn opExtcodecopy(ctx: *InstructionContext) void {
 
     // Post-Berlin: charge dynamic warm/cold cost.
     if (primitives.isEnabledIn(ctx.interpreter.runtime_flags.spec_id, .berlin)) {
-        const dyn_gas: u64 = if (h.isAddressCold(addr)) gas_costs.COLD_ACCOUNT_ACCESS else gas_costs.WARM_ACCOUNT_ACCESS;
+        var dyn_gas: u64 = if (h.isAddressCold(addr)) gas_costs.coldAccountAccess(ctx.interpreter.runtime_flags.spec_id) else gas_costs.WARM_ACCOUNT_ACCESS;
+        // EIP-8038 (Amsterdam+): EXTCODECOPY is charged an additional WARM_ACCESS
+        // on top of the cold/warm access cost (unlike BALANCE / EXTCODEHASH).
+        if (primitives.isEnabledIn(ctx.interpreter.runtime_flags.spec_id, .amsterdam)) dyn_gas += gas_costs.WARM_ACCOUNT_ACCESS;
         if (!ctx.interpreter.gas.spend(dyn_gas)) {
             ctx.interpreter.halt(.out_of_gas);
             return;
@@ -241,7 +247,7 @@ pub fn opExtcodehash(ctx: *InstructionContext) void {
 
     // Post-Berlin: charge dynamic warm/cold cost BEFORE loading the code hash.
     if (primitives.isEnabledIn(ctx.interpreter.runtime_flags.spec_id, .berlin)) {
-        const dyn_gas: u64 = if (h.isAddressCold(addr)) gas_costs.COLD_ACCOUNT_ACCESS else gas_costs.WARM_ACCOUNT_ACCESS;
+        const dyn_gas: u64 = if (h.isAddressCold(addr)) gas_costs.coldAccountAccess(ctx.interpreter.runtime_flags.spec_id) else gas_costs.WARM_ACCOUNT_ACCESS;
         if (!ctx.interpreter.gas.spend(dyn_gas)) {
             ctx.interpreter.halt(.out_of_gas);
             return;
@@ -309,7 +315,7 @@ pub fn opSload(ctx: *InstructionContext) void {
     // Dynamic gas for Berlin+ (static_gas is 0 for Berlin+).
     // Charge BEFORE loading to avoid a DB read on OOG (EIP-7928 BAL correctness).
     if (primitives.isEnabledIn(spec, .berlin)) {
-        const dyn_gas: u64 = if (h.isStorageCold(self_addr, key)) gas_costs.COLD_SLOAD else gas_costs.WARM_SLOAD;
+        const dyn_gas: u64 = if (h.isStorageCold(self_addr, key)) gas_costs.coldStorageAccess(spec) else gas_costs.WARM_SLOAD;
         if (!ctx.interpreter.gas.spend(dyn_gas)) {
             ctx.interpreter.halt(.out_of_gas);
             return;
@@ -600,7 +606,7 @@ pub fn opSelfdestruct(ctx: *InstructionContext) void {
     // G_NEWACCOUNT depends on target_exists (only known after loading), so we check it
     // inline after calling selfdestruct() with an explicit OOG return.
     const pre_is_cold = h.isAddressCold(target);
-    const cold_guard: u64 = if (primitives.isEnabledIn(spec, .berlin) and pre_is_cold) gas_costs.COLD_ACCOUNT_ACCESS else 0;
+    const cold_guard: u64 = if (primitives.isEnabledIn(spec, .berlin) and pre_is_cold) gas_costs.coldAccountAccess(spec) else 0;
     if (ctx.interpreter.gas.remaining < cold_guard) {
         ctx.interpreter.halt(.out_of_gas);
         return;
@@ -616,7 +622,7 @@ pub fn opSelfdestruct(ctx: *InstructionContext) void {
 
     // Berlin+: cold account access cost for target (EIP-2929)
     if (primitives.isEnabledIn(spec, .berlin) and result.is_cold) {
-        dyn_gas += gas_costs.COLD_ACCOUNT_ACCESS;
+        dyn_gas += gas_costs.coldAccountAccess(spec);
     }
 
     // G_NEWACCOUNT (25000) when the target account is new/empty:
@@ -628,8 +634,11 @@ pub fn opSelfdestruct(ctx: *InstructionContext) void {
     const selfdestruct_charges_new_account = !result.target_exists and
         primitives.isEnabledIn(spec, .tangerine) and
         (if (primitives.isEnabledIn(spec, .spurious_dragon)) result.had_value else true);
-    if (selfdestruct_charges_new_account and !primitives.isEnabledIn(spec, .amsterdam)) {
-        dyn_gas += 25000;
+    // Pre-Amsterdam: flat G_NEWACCOUNT (25000) regular.
+    // EIP-8037/8246 (Amsterdam+): ACCOUNT_WRITE (8000) regular, plus NEW_ACCOUNT state gas
+    // (charged below). Positive balance sent to an empty beneficiary.
+    if (selfdestruct_charges_new_account) {
+        dyn_gas += if (primitives.isEnabledIn(spec, .amsterdam)) 8000 else 25000;
     }
 
     if (!ctx.interpreter.gas.spend(dyn_gas)) {

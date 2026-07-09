@@ -170,7 +170,7 @@ fn callImpl(
             // target from the DB — avoids tracking it in the BAL during gas calculation.
             // The sub-frame's setupCall will load it properly and track it there.
             const del_addr = info.bytecode.eip7702.address;
-            delegation_gas = if (h.isAddressCold(del_addr)) gas_costs.COLD_ACCOUNT_ACCESS else gas_costs.WARM_ACCOUNT_ACCESS;
+            delegation_gas = if (h.isAddressCold(del_addr)) gas_costs.coldAccountAccess(spec) else gas_costs.WARM_ACCOUNT_ACCESS;
         }
     }
 
@@ -323,16 +323,16 @@ fn callImpl(
         .failed => |r| {
             // setupCall failed (depth limit, balance, etc.).
             // EIP-8037: return the reservoir (call_reservoir) that was saved+zeroed.
-            // The new_account state gas (if charged) stays consumed — it's part of the
-            // parent's state usage for attempting to create a new account.
+            // resumeCall refunds new_account_state_gas because the call failed (the
+            // account was not created) — matching credit_state_gas_refund(NEW_ACCOUNT).
             var result = r;
             result.state_gas_remaining = call_reservoir;
-            resumeCall(ctx.interpreter, result, ret_off_u, ret_size_u);
+            resumeCall(ctx.interpreter, result, ret_off_u, ret_size_u, new_account_state_gas);
         },
         .precompile => |r| {
             // Precompile ran. It doesn't use state gas, so reservoir comes back intact.
             // state_gas_remaining is already set to inputs.reservoir in setupCall.
-            resumeCall(ctx.interpreter, r, ret_off_u, ret_size_u);
+            resumeCall(ctx.interpreter, r, ret_off_u, ret_size_u, new_account_state_gas);
         },
         .ready => |s| {
             ctx.interpreter.pending = .{ .call = PendingCallData{
@@ -341,6 +341,7 @@ fn callImpl(
                 .checkpoint = s.checkpoint,
                 .ret_off = ret_off_u,
                 .ret_size = ret_size_u,
+                .new_account_state_gas = new_account_state_gas,
             } };
         },
     }
@@ -348,13 +349,30 @@ fn callImpl(
 
 /// Resume a suspended CALL frame after the sub-frame has completed.
 /// Called by the frame runner (or synchronous helper) with the final CallResult.
-pub fn resumeCall(interp: *Interpreter, result: host_module.CallResult, ret_off: usize, ret_size: usize) void {
+/// EIP-8037 credit_state_gas_refund for a NEW_ACCOUNT pre-charge that was not consumed
+/// (failed value-CALL / CREATE): refund in LIFO order — to regular gas first if the charge
+/// spilled out of the reservoir, else the reservoir — and unwind it from the frame's totals.
+pub fn refundNewAccountLifo(interp: *Interpreter, amount: u64) void {
+    if (amount == 0) return;
+    // Shared LIFO routing (regular gas first, then reservoir); the tail differs from
+    // refundStateGas — unwind the never-consumed charge from spent, not the refund credit.
+    interp.gas.creditStateGasLifo(amount);
+    interp.gas.state_gas_spent -|= amount;
+}
+
+pub fn resumeCall(interp: *Interpreter, result: host_module.CallResult, ret_off: usize, ret_size: usize, new_account_state_gas: u64) void {
     interp.gas.remaining +|= result.gas_remaining;
     interp.gas.refunded += result.gas_refunded;
     interp.gas.addStateGasFromChild(result.state_gas_used);
     // EIP-8037: restore the reservoir from the child (on success: child's remaining reservoir;
     // on failure: all child state gas + reservoir returned as state_gas_remaining).
     interp.gas.reservoir += result.state_gas_remaining;
+    // EIP-8037: a value-bearing CALL that creates a new account pre-charges NEW_ACCOUNT
+    // state gas. On failure the account is not created, so refund it (credit_state_gas_refund)
+    // in LIFO order — to regular gas first if that charge had spilled, else the reservoir.
+    // Routing to regular gas matters: if this frame later halts, that gas is burned (whereas
+    // reservoir gas is returned), matching the reference.
+    if (!result.success) refundNewAccountLifo(interp, new_account_state_gas);
 
     const actual = @min(result.return_data.len, ret_size);
     if (actual > 0) {
@@ -380,6 +398,10 @@ pub fn resumeCreate(interp: *Interpreter, result: host_module.CreateResult) void
     interp.gas.remaining +|= result.gas_remaining;
     interp.gas.refunded += result.gas_refunded;
     interp.gas.addStateGasFromChild(result.state_gas_used);
+    // EIP-8037: code-deposit state gas that spilled from the child's regular gas must be
+    // tracked so a later halt/revert refill returns it to regular gas (burned on halt),
+    // not the reservoir. Without this the spilled deposit inflates the parent reservoir.
+    interp.gas.state_gas_spilled += result.state_gas_spilled;
     // EIP-8037: restore the reservoir from the child (on success: child's remaining reservoir;
     // on failure: all child state gas + reservoir returned as state_gas_remaining).
     interp.gas.reservoir += result.state_gas_remaining;
@@ -440,16 +462,18 @@ pub fn opCreate(ctx: *InstructionContext) void {
 
     const spec = ctx.interpreter.runtime_flags.spec_id;
 
-    // Pre-Amsterdam: no state gas, so static check is free and happens before any charges.
-    // Amsterdam+ defers this check until after state gas is charged (see below).
-    if (!primitives.isEnabledIn(spec, .amsterdam) and ctx.interpreter.runtime_flags.is_static) {
+    // Static-context check first, before any gas is charged — the reference create/create2
+    // opcodes raise WriteInStaticContext before init-code cost and the NEW_ACCOUNT state-gas
+    // charge, so a create in a static context is charged nothing (not even state gas).
+    if (ctx.interpreter.runtime_flags.is_static) {
         ctx.interpreter.halt(.invalid_static);
         return;
     }
 
-    // Base cost: EIP-8037 (Amsterdam+) reduces regular CREATE cost from 32000 to 9000;
-    // state gas for new account + code deposit is charged separately in finalizeCreate.
-    const create_base_cost: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) 9000 else gas_costs.G_CREATE;
+    // Base cost: EIP-8037 (Amsterdam+) replaces the 32000 regular CREATE cost with
+    // CREATE_ACCESS = ACCOUNT_WRITE(8000) + COLD_STORAGE_ACCESS(3000) = 11000; the
+    // NEW_ACCOUNT + code-deposit state gas is charged separately.
+    const create_base_cost: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) 11000 else gas_costs.G_CREATE;
     if (!ctx.interpreter.gas.spend(create_base_cost)) {
         ctx.interpreter.halt(.out_of_gas);
         return;
@@ -507,13 +531,6 @@ pub fn opCreate(ctx: *InstructionContext) void {
         }
     }
 
-    // EIP-8037 (Amsterdam+): static check after state gas is charged so the state gas
-    // spill is tracked and returned to the parent's reservoir on frame failure.
-    if (ctx.interpreter.runtime_flags.is_static) {
-        ctx.interpreter.halt(.invalid_static);
-        return;
-    }
-
     // EIP-150 (Tangerine Whistle): forward at most 63/64 of remaining gas.
     // Pre-EIP-150 (Frontier/Homestead): forward all remaining gas.
     const remaining = ctx.interpreter.gas.remaining;
@@ -544,13 +561,12 @@ pub fn opCreate(ctx: *InstructionContext) void {
     const setup = h.setupCreate(caller, value, init_code, forwarded, false, 0, false, ctx.interpreter.input.depth, true);
     switch (setup) {
         .failed => |r| {
-            // EIP-8037: restore reservoir on pre-exec failure (including new_account_state_gas).
-            // Also unwind new_account_state_gas from state_gas_used / state_gas_spent since the
-            // account was never created.
+            // EIP-8037: pre-exec failure (e.g. address collision) — restore the parent reservoir
+            // and refund new_account_state_gas via credit_state_gas_refund (LIFO): to regular gas
+            // first if the charge spilled, else the reservoir. Unwind it from state-gas totals.
             var result = r;
-            result.state_gas_remaining = create_reservoir + new_account_state_gas;
-            ctx.interpreter.gas.state_gas_used -|= new_account_state_gas;
-            ctx.interpreter.gas.state_gas_spent -|= new_account_state_gas;
+            result.state_gas_remaining = create_reservoir;
+            refundNewAccountLifo(ctx.interpreter, new_account_state_gas);
             resumeCreate(ctx.interpreter, result);
         },
         .ready => |s| {
@@ -567,6 +583,7 @@ pub fn opCreate(ctx: *InstructionContext) void {
                 .new_addr = s.new_addr,
                 .checkpoint = s.checkpoint,
                 .new_account_state_gas = new_account_state_gas,
+                .target_alive = s.target_alive,
             } };
         },
     }
@@ -593,15 +610,15 @@ pub fn opCreate2(ctx: *InstructionContext) void {
 
     const spec = ctx.interpreter.runtime_flags.spec_id;
 
-    // Pre-Amsterdam: no state gas, so static check is free and happens before any charges.
-    // Amsterdam+ defers this check until after state gas is charged (see below).
-    if (!primitives.isEnabledIn(spec, .amsterdam) and ctx.interpreter.runtime_flags.is_static) {
+    // Static-context check first, before any gas is charged (reference raises
+    // WriteInStaticContext before init-code cost and the NEW_ACCOUNT state-gas charge).
+    if (ctx.interpreter.runtime_flags.is_static) {
         ctx.interpreter.halt(.invalid_static);
         return;
     }
 
-    // EIP-8037 (Amsterdam+): same reduced regular cost as CREATE.
-    const create2_base_cost: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) 9000 else gas_costs.G_CREATE;
+    // EIP-8037 (Amsterdam+): CREATE_ACCESS = ACCOUNT_WRITE(8000) + COLD_STORAGE_ACCESS(3000).
+    const create2_base_cost: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) 11000 else gas_costs.G_CREATE;
     if (!ctx.interpreter.gas.spend(create2_base_cost)) {
         ctx.interpreter.halt(.out_of_gas);
         return;
@@ -666,13 +683,6 @@ pub fn opCreate2(ctx: *InstructionContext) void {
         }
     }
 
-    // EIP-8037 (Amsterdam+): static check after state gas is charged so the state gas
-    // spill is tracked and returned to the parent's reservoir on frame failure.
-    if (ctx.interpreter.runtime_flags.is_static) {
-        ctx.interpreter.halt(.invalid_static);
-        return;
-    }
-
     // EIP-150 (Tangerine Whistle): forward at most 63/64 of remaining gas.
     // Pre-EIP-150: forward all remaining gas (CREATE2 didn't exist then, but symmetric).
     const remaining = ctx.interpreter.gas.remaining;
@@ -704,13 +714,12 @@ pub fn opCreate2(ctx: *InstructionContext) void {
     const setup = h.setupCreate(caller, value, init_code, forwarded, true, salt, false, ctx.interpreter.input.depth, true);
     switch (setup) {
         .failed => |r| {
-            // EIP-8037: restore reservoir on pre-exec failure (including new_account_state_gas).
-            // Also unwind new_account_state_gas from state_gas_used / state_gas_spent since the
-            // account was never created.
+            // EIP-8037: pre-exec failure (e.g. address collision) — restore the parent reservoir
+            // and refund new_account_state_gas via credit_state_gas_refund (LIFO), unwinding it
+            // from state-gas totals.
             var result = r;
-            result.state_gas_remaining = create_reservoir + new_account_state_gas;
-            ctx.interpreter.gas.state_gas_used -|= new_account_state_gas;
-            ctx.interpreter.gas.state_gas_spent -|= new_account_state_gas;
+            result.state_gas_remaining = create_reservoir;
+            refundNewAccountLifo(ctx.interpreter, new_account_state_gas);
             resumeCreate(ctx.interpreter, result);
         },
         .ready => |s| {
@@ -727,6 +736,7 @@ pub fn opCreate2(ctx: *InstructionContext) void {
                 .new_addr = s.new_addr,
                 .checkpoint = s.checkpoint,
                 .new_account_state_gas = new_account_state_gas,
+                .target_alive = s.target_alive,
             } };
         },
     }
