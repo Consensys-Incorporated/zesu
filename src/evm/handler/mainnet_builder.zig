@@ -170,30 +170,51 @@ pub const MainnetHandler = struct {
         // For each recovered authorization, validate and apply code delegation.
         if (primitives.isEnabledIn(spec, .prague)) {
             if (tx.authorization_list) |auth_list| {
-                const amsterdam_cpsb: u64 = if (primitives.isEnabledIn(spec, .amsterdam))
+                const is_amsterdam = primitives.isEnabledIn(spec, .amsterdam);
+                const amsterdam_cpsb: u64 = if (is_amsterdam)
                     interpreter_mod.gas_costs.costPerStateByte(ctx.block.gas_limit)
                 else
                     0;
-                // EIP-8037/7702: an invalid authorization applies no delegation, so the intrinsic
-                // per-auth pre-payment (NEW_ACCOUNT + AUTH_BASE state, ACCOUNT_WRITE regular) is
-                // fully refunded (reference set_delegation, validate_authorization → None). Adds a
-                // cap-bypassing refund at every skip path below. Amsterdam+ only.
-                const invalid_auth_state_refund: u64 = (interpreter_mod.gas_costs.STATE_BYTES_PER_NEW_ACCOUNT + interpreter_mod.gas_costs.STATE_BYTES_PER_AUTH_BASE) * amsterdam_cpsb;
-                const refundInvalidAuth = struct {
-                    fn f(ig: *validation.InitialAndFloorGas, is_am: bool, state_ref: u64) void {
-                        if (!is_am) return;
-                        ig.auth_state_refund += state_ref;
-                        ig.auth_regular_refund += interpreter_mod.gas_costs.ACCOUNT_WRITE_COST;
-                    }
-                }.f;
-                const is_amsterdam = primitives.isEnabledIn(spec, .amsterdam);
-                // EIP-8037 AUTH_BASE refund needs each authority's PRE-TX delegation status.
+                // EIP-2780 devnet-7 (Amsterdam+): checkpoint before applying delegations so
+                // the top-frame set_delegation charge can roll them back on OOG (the authority
+                // reads survive in the BAL; only the nonce bump / setCode are reverted).
+                if (is_amsterdam) initial_gas.auth_checkpoint = js.getCheckpoint();
+                // EIP-8037 AUTH_BASE needs each authority's PRE-TX delegation status.
                 // Recorded on first encounter (the delegation state then reflects no prior
                 // same-tx auth), so later auths on the same signer can distinguish delegated_now
                 // (current code) from delegated_before_tx (pre-transaction code).
                 var authority_pre_delegated = std.AutoHashMap(primitives.Address, bool).init(alloc_mod.get());
                 defer authority_pre_delegated.deinit();
+                // EIP-2780 devnet-7 (Amsterdam+) set_delegation top-frame charge accounting:
+                //   written = accounts whose leaf is already written before an auth touches it.
+                //   The sender's leaf was written at inclusion (priced into TX_BASE); the
+                //   recipient's leaf is written when the tx transfers value. An authority in
+                //   `written` pays no ACCOUNT_WRITE; each new authority pays it once.
+                //   delegation_set_for tracks authorities a delegation was set for earlier in
+                //   this tx, so AUTH_BASE is charged at most once per authority.
+                var written = std.AutoHashMap(primitives.Address, void).init(alloc_mod.get());
+                defer written.deinit();
+                var delegation_set_for = std.AutoHashMap(primitives.Address, void).init(alloc_mod.get());
+                defer delegation_set_for.deinit();
+                // Authorities for which NEW_ACCOUNT was already charged this tx. `account_exists`
+                // (reference) becomes true after the first auth creates the account, so a later
+                // auth on the same authority must not re-charge NEW_ACCOUNT (loaded_as_not_existing
+                // is the cached first-load flag and stays true).
+                var created = std.AutoHashMap(primitives.Address, void).init(alloc_mod.get());
+                defer created.deinit();
+                if (is_amsterdam) {
+                    written.put(tx.caller, {}) catch {};
+                    if (tx.value > 0) {
+                        if (tx.kind == .Call) written.put(tx.kind.Call, {}) catch {};
+                    }
+                }
+                // EIP-2780 devnet-7: set_delegation charges from the top-frame gas as it processes
+                // each authorization in order. When the cumulative charge exceeds the available
+                // execution gas the reference raises OOG and stops — later authorizations are never
+                // read. Track exec_gas and the running charge to reproduce the exact read set.
+                const auth_exec_gas: u64 = if (is_amsterdam) tx.gas_limit -| initial_gas.initial_gas else 0;
                 for (auth_list.items) |auth_entry| {
+                    if (initial_gas.auth_oog) break;
                     switch (auth_entry) {
                         .Right => |recovered| {
                             switch (recovered.authority) {
@@ -203,26 +224,17 @@ pub const MainnetHandler = struct {
                                     // chain_id 0 means valid for any chain
                                     const chain_id_valid = auth.chain_id == 0 or
                                         auth.chain_id == @as(primitives.U256, ctx.cfg.chain_id);
-                                    if (!chain_id_valid) {
-                                        refundInvalidAuth(initial_gas, is_amsterdam, invalid_auth_state_refund);
-                                        continue;
-                                    }
+                                    if (!chain_id_valid) continue;
 
                                     // Per EIP-7702 (EELS reference): skip without warming the authority
                                     // if auth.nonce == maxInt(u64). Applying the auth would overflow the
                                     // nonce. EELS checks this BEFORE adding the account to accessed_addresses,
                                     // so the account remains cold when execution later accesses it.
-                                    if (auth.nonce == std.math.maxInt(u64)) {
-                                        refundInvalidAuth(initial_gas, is_amsterdam, invalid_auth_state_refund);
-                                        continue;
-                                    }
+                                    if (auth.nonce == std.math.maxInt(u64)) continue;
 
                                     // Load authority account (marks it warm; EIP-7702 spec: always access
                                     // the signer's account even if the authorization is ultimately invalid)
-                                    const load_result = js.loadAccountMutOptionalCode(authority_addr, true, false) catch {
-                                        refundInvalidAuth(initial_gas, is_amsterdam, invalid_auth_state_refund);
-                                        continue;
-                                    };
+                                    const load_result = js.loadAccountMutOptionalCode(authority_addr, true, false) catch continue;
                                     const journaled = load_result.data;
 
                                     // Per EIP-7702: skip if authority has non-empty, non-EIP-7702 code.
@@ -239,64 +251,73 @@ pub const MainnetHandler = struct {
                                                 break :blk orig.len >= 3 and orig[0] == 0xEF and orig[1] == 0x01 and orig[2] == 0x00;
                                             },
                                         };
-                                        if (!is_delegation and !existing_code.isEmpty()) {
-                                            refundInvalidAuth(initial_gas, is_amsterdam, invalid_auth_state_refund);
-                                            continue;
-                                        }
+                                        if (!is_delegation and !existing_code.isEmpty()) continue;
                                         authority_had_delegation = is_delegation;
                                     }
 
                                     // Nonce must match exactly — skip if stale
-                                    if (journaled.account.info.nonce != auth.nonce) {
-                                        refundInvalidAuth(initial_gas, is_amsterdam, invalid_auth_state_refund);
-                                        continue;
-                                    }
+                                    if (journaled.account.info.nonce != auth.nonce) continue;
 
-                                    // EIP-7702 refund: the intrinsic cost charges PER_EMPTY_ACCOUNT_COST
-                                    // (25,000) for each authorization to cover possible new-account creation.
-                                    // If the authority already exists (non-empty), no new account is created,
-                                    // so refund PER_EMPTY_ACCOUNT_COST / 2 = 12,500 (Prague).
-                                    // EIP-8037 (Amsterdam+): refund 112*cpsb state gas per existing auth
-                                    // (bypasses 1/5 cap — it's a pre-payment correction, not an SSTORE reward).
-                                    // An account is non-empty if: nonce > 0, balance > 0, or code != empty.
-                                    const is_existing = journaled.account.info.nonce > 0 or
-                                        journaled.account.info.balance > 0 or
-                                        !std.mem.eql(u8, &journaled.account.info.code_hash, &primitives.KECCAK_EMPTY);
-                                    if (is_existing) {
-                                        if (is_amsterdam) {
-                                            initial_gas.auth_state_refund += interpreter_mod.gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * amsterdam_cpsb;
-                                            // Regular-lane counterpart: the intrinsic charges ACCOUNT_WRITE (8000)
-                                            // per auth assuming a new account; an existing authority creates none,
-                                            // so refund it (bypasses the 1/5 cap, like auth_state_refund).
-                                            initial_gas.auth_regular_refund += interpreter_mod.gas_costs.ACCOUNT_WRITE_COST;
-                                        } else {
-                                            initial_gas.auth_refund += 12500;
-                                        }
-                                    }
-                                    // EIP-7702/8037 (Amsterdam+): AUTH_BASE state-gas refund, matching
-                                    // reference set_delegation. delegated_now = current code holds a
-                                    // delegation (reflects prior same-tx auths); delegated_before_tx =
-                                    // pre-transaction code held one (recorded on first encounter).
-                                    //   clearing (addr == 0): refund AUTH_BASE, +AUTH_BASE more if it was
-                                    //     delegated by a prior same-tx auth but not pre-tx.
-                                    //   setting (addr != 0): refund AUTH_BASE if delegated now OR pre-tx
-                                    //     (no new delegation slot is allocated).
+                                    const auth_address_is_zero = std.mem.eql(u8, &auth.address, &[_]u8{0} ** 20);
+
                                     if (is_amsterdam) {
-                                        const delegated_now = authority_had_delegation;
+                                        // EIP-2780 devnet-7 set_delegation charges (top frame), computed
+                                        // for THIS authorization first so the cumulative total can be
+                                        // checked against the top-frame gas before it (and the delegation)
+                                        // are committed — an OOG stops processing here (reference raises
+                                        // OutOfGasError mid-loop; later auths are never read).
+                                        var this_regular: u64 = 0;
+                                        var this_state: u64 = 0;
+                                        // NEW_ACCOUNT is charged only when the authority leaf does not
+                                        // exist. loaded_as_not_existing captures trie non-existence at
+                                        // first load, but goes stale once an earlier auth (this tx or a
+                                        // prior one) creates the account — so also require the current
+                                        // account to be empty (no nonce/balance/code). Matches the
+                                        // reference account_exists check evaluated per authorization.
+                                        const currently_alive = journaled.account.info.nonce > 0 or
+                                            journaled.account.info.balance > 0 or
+                                            !std.mem.eql(u8, &journaled.account.info.code_hash, &primitives.KECCAK_EMPTY);
+                                        const charge_new_account = journaled.account.status.loaded_as_not_existing and
+                                            !currently_alive and !created.contains(authority_addr);
+                                        if (charge_new_account)
+                                            this_state += interpreter_mod.gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * amsterdam_cpsb;
+                                        const charge_account_write = !written.contains(authority_addr);
+                                        if (charge_account_write)
+                                            this_regular += interpreter_mod.gas_costs.ACCOUNT_WRITE_COST;
+                                        // delegated_before_tx = the authority's PRE-TRANSACTION delegation
+                                        // status. Recorded on the FIRST encounter (before any same-tx auth
+                                        // modifies its code) regardless of whether that auth clears or sets,
+                                        // so a clear-then-set sequence still sees the pre-tx delegation.
                                         const gop_pd = authority_pre_delegated.getOrPut(authority_addr) catch null;
                                         const delegated_before_tx = if (gop_pd) |g| blk: {
-                                            if (!g.found_existing) g.value_ptr.* = delegated_now;
+                                            if (!g.found_existing) g.value_ptr.* = authority_had_delegation;
                                             break :blk g.value_ptr.*;
-                                        } else delegated_now;
-                                        const auth_base = interpreter_mod.gas_costs.STATE_BYTES_PER_AUTH_BASE * amsterdam_cpsb;
-                                        const auth_address_is_zero = std.mem.eql(u8, &auth.address, &[_]u8{0} ** 20);
-                                        if (auth_address_is_zero) {
-                                            initial_gas.auth_state_refund += auth_base;
-                                            if (delegated_now and !delegated_before_tx)
-                                                initial_gas.auth_state_refund += auth_base;
-                                        } else if (delegated_now or delegated_before_tx) {
-                                            initial_gas.auth_state_refund += auth_base;
+                                        } else authority_had_delegation;
+                                        var charge_auth_base = false;
+                                        if (!auth_address_is_zero) {
+                                            charge_auth_base = !delegated_before_tx and !delegation_set_for.contains(authority_addr);
+                                            if (charge_auth_base)
+                                                this_state += interpreter_mod.gas_costs.STATE_BYTES_PER_AUTH_BASE * amsterdam_cpsb;
                                         }
+                                        // OOG check: cumulative set_delegation charge vs top-frame gas.
+                                        if (initial_gas.auth_regular_charge + initial_gas.auth_state_charge + this_regular + this_state > auth_exec_gas) {
+                                            initial_gas.auth_oog = true;
+                                            break;
+                                        }
+                                        // Commit this auth's charge and bookkeeping.
+                                        initial_gas.auth_regular_charge += this_regular;
+                                        initial_gas.auth_state_charge += this_state;
+                                        if (charge_new_account) created.put(authority_addr, {}) catch {};
+                                        if (charge_account_write) written.put(authority_addr, {}) catch {};
+                                        if (!auth_address_is_zero) delegation_set_for.put(authority_addr, {}) catch {};
+                                    } else {
+                                        // Pre-Amsterdam (Prague EIP-7702): the intrinsic charges
+                                        // PER_EMPTY_ACCOUNT_COST (25,000) per auth; refund half (12,500)
+                                        // when the authority already exists (non-empty).
+                                        const is_existing = journaled.account.info.nonce > 0 or
+                                            journaled.account.info.balance > 0 or
+                                            !std.mem.eql(u8, &journaled.account.info.code_hash, &primitives.KECCAK_EMPTY);
+                                        if (is_existing) initial_gas.auth_refund += 12500;
                                     }
 
                                     // Bump authority nonce (journaled, revertable).
@@ -307,10 +328,10 @@ pub const MainnetHandler = struct {
                                     const bc = bytecode.Bytecode{ .eip7702 = bytecode.Eip7702Bytecode.new(auth.address) };
                                     js.inner.setCode(authority_addr, bc);
                                 },
-                                .Invalid => refundInvalidAuth(initial_gas, is_amsterdam, invalid_auth_state_refund), // unrecoverable authority
+                                .Invalid => {}, // unrecoverable authority — no delegation, no charge
                             }
                         },
-                        .Left => refundInvalidAuth(initial_gas, is_amsterdam, invalid_auth_state_refund), // unrecovered signed authorization
+                        .Left => {}, // unrecovered signed authorization — no delegation, no charge
                     }
                 }
             }
@@ -391,6 +412,22 @@ pub const MainnetHandler = struct {
                         );
                         // EIP-8037: initialize root frame reservoir.
                         root_interp.gas.reservoir = tx_reservoir;
+                        // EIP-2780 devnet-7 (Amsterdam+): charge NEW_ACCOUNT state gas for the
+                        // created contract at the top frame (reference prepare_dispatch), when the
+                        // target leaf is not already alive. Refillable — drawn from the reservoir
+                        // (spilling into regular gas). On OOG the create halts and all gas is burned.
+                        if (primitives.isEnabledIn(spec, .amsterdam) and !s.target_alive) {
+                            const new_acct_gas = interpreter_mod.gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * interpreter_mod.gas_costs.costPerStateByte(ctx.block.gas_limit);
+                            if (!root_interp.gas.spendStateGas(new_acct_gas)) {
+                                var cr_oog = host.finalizeCreate(s.checkpoint, s.new_addr, interpreter_mod.InstructionResult.out_of_gas, 0, 0, &.{}, spec, false, 0);
+                                _ = &cr_oog;
+                                var exec_result = main.ExecutionResult.new(.Halt, exec_gas);
+                                exec_result.return_data = @constCast(&[_]u8{});
+                                var fr = main.FrameResult.new(exec_result, 0, 0);
+                                fr.reservoir_remaining = tx_reservoir;
+                                return fr;
+                            }
+                        }
                         const ir = try executeIterative(root_interp, &host, &return_data_buf);
                         var cr = host.finalizeCreate(s.checkpoint, s.new_addr, ir.raw_result, ir.gas_remaining, ir.gas_refunded, ir.return_data, spec, false, ir.reservoir_remaining);
                         if (cr.success) {
@@ -427,16 +464,79 @@ pub const MainnetHandler = struct {
                 }
             },
             .Call => |target| {
+                // EIP-2780 devnet-7 (Amsterdam+): charge the EIP-7702 set_delegation costs at
+                // the top frame BEFORE dispatching to the recipient (reference process_message_call
+                // order: set_delegation → prepare_dispatch). This matters at the OOG boundary — if
+                // the charge exhausts the gas, the reference never touches the recipient, so we must
+                // not load it either. On OOG: roll back the applied delegations and burn all gas.
+                var call_regular = tx_regular_exec_gas;
+                var call_reservoir = tx_reservoir;
+                if (primitives.isEnabledIn(spec, .amsterdam)) {
+                    // applyAuthList already decided whether set_delegation OOGs (auth_oog) and,
+                    // if not, accumulated charges that fit within the top-frame gas.
+                    if (initial.auth_oog) {
+                        if (initial.auth_checkpoint) |cp| ctx.journaled_state.checkpointRevert(cp);
+                        return main.FrameResult.new(main.ExecutionResult.new(.Halt, exec_gas), 0, 0);
+                    }
+                    if (initial.auth_regular_charge > 0 or initial.auth_state_charge > 0) {
+                        call_regular -= initial.auth_regular_charge;
+                        if (initial.auth_state_charge <= call_reservoir) {
+                            call_reservoir -= initial.auth_state_charge;
+                        } else {
+                            const spill = initial.auth_state_charge - call_reservoir;
+                            call_reservoir = 0;
+                            call_regular -= spill;
+                        }
+                    }
+                }
+
                 // Load target account and its code before executing.
                 const callee_load = try ctx.journaled_state.loadAccountWithCode(target);
                 var callee_code = if (callee_load.data.info.code) |c| c else bytecode.Bytecode.new();
 
-                // EIP-7702: follow delegation one hop.
-                // EIP-2780 (Amsterdam+): a delegated top-level recipient incurs an extra
-                // COLD_ACCOUNT_ACCESS regular charge for the delegation target (charged on
-                // the root frame below, mirroring EELS interpreter.py process_message).
+                // EIP-2780/8037 (Amsterdam+): top-frame NEW_ACCOUNT state gas. A value transfer
+                // that creates the recipient (empty pre-transfer) charges NEW_ACCOUNT state gas.
+                // Read aliveness from the pre-transfer account (callee_load).
+                const top_new_account_state_gas: u64 = if (primitives.isEnabledIn(spec, .amsterdam) and
+                    tx.value > 0 and callee_load.data.stateClearAwareIsEmpty(spec))
+                    interpreter_mod.gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * interpreter_mod.gas_costs.costPerStateByte(ctx.block.gas_limit)
+                else
+                    0;
+
+                // EIP-7702: follow delegation one hop, charging the extra account-access cost for
+                // the delegation target (reference get_delegated_code_address): WARM_ACCESS if the
+                // target is already accessed, else COLD_ACCOUNT_ACCESS (coldness captured before
+                // any load). EIP-2780 (Amsterdam+): the reference charges the prepare_dispatch
+                // costs (NEW_ACCOUNT then delegation access) BEFORE fetching the target's code, so
+                // an OOG there must NOT access/record the target in the BAL. Simulate those charges
+                // against the top-frame gas first; on OOG roll back the applied delegations and
+                // refill the reservoir without touching the target.
                 const top_delegation = callee_code.isEip7702();
+                const top_delegation_cold = if (top_delegation) ctx.journaled_state.inner.isAddressCold(callee_code.eip7702.address) else true;
+                const top_delegation_gas: u64 = if (top_delegation and primitives.isEnabledIn(spec, .amsterdam))
+                    (if (top_delegation_cold) interpreter_mod.gas_costs.coldAccountAccess(spec) else interpreter_mod.gas_costs.WARM_ACCOUNT_ACCESS)
+                else
+                    0;
                 if (top_delegation) {
+                    if (primitives.isEnabledIn(spec, .amsterdam)) {
+                        var sim_r = call_regular;
+                        var sim_res = call_reservoir;
+                        var dispatch_oog = false;
+                        if (top_new_account_state_gas <= sim_res) {
+                            sim_res -= top_new_account_state_gas;
+                        } else {
+                            const spill = top_new_account_state_gas - sim_res;
+                            sim_res = 0;
+                            if (sim_r < spill) dispatch_oog = true else sim_r -= spill;
+                        }
+                        if (!dispatch_oog and sim_r < top_delegation_gas) dispatch_oog = true;
+                        if (dispatch_oog) {
+                            if (initial.auth_checkpoint) |cp| ctx.journaled_state.checkpointRevert(cp);
+                            var fr = main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
+                            fr.reservoir_remaining = call_reservoir;
+                            return fr;
+                        }
+                    }
                     const del_addr = callee_code.eip7702.address;
                     if (ctx.journaled_state.loadAccountWithCode(del_addr)) |del_load| {
                         callee_code = if (del_load.data.info.code) |del_code| del_code else bytecode.Bytecode.new();
@@ -444,21 +544,6 @@ pub const MainnetHandler = struct {
                         callee_code = bytecode.Bytecode.new();
                     }
                 }
-                const top_delegation_gas: u64 = if (top_delegation and primitives.isEnabledIn(spec, .amsterdam))
-                    interpreter_mod.gas_costs.coldAccountAccess(spec)
-                else
-                    0;
-
-                // EIP-2780/8037 (Amsterdam+): top-frame NEW_ACCOUNT state gas. A value
-                // transfer that creates the recipient (recipient is empty pre-transfer)
-                // charges NEW_ACCOUNT state gas, charged on the root frame below. Read
-                // aliveness from the pre-transfer account (callee_load). Self-transfers
-                // and transfers to existing accounts are exempt (recipient already alive).
-                const top_new_account_state_gas: u64 = if (primitives.isEnabledIn(spec, .amsterdam) and
-                    tx.value > 0 and callee_load.data.stateClearAwareIsEmpty(spec))
-                    interpreter_mod.gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * interpreter_mod.gas_costs.costPerStateByte(ctx.block.gas_limit)
-                else
-                    0;
 
                 // Take checkpoint for top-level CALL: state is reverted through this on failure.
                 const call_checkpoint = ctx.journaled_state.getCheckpoint();
@@ -487,28 +572,26 @@ pub const MainnetHandler = struct {
                     // EIP-7928 (Amsterdam+): record the precompile callee in the BAL.
                     // Mirrors the per-frame setupCallCore handling — see host.zig.
                     _ = try ctx.journaled_state.loadAccount(target);
-                    const pc_result = precompile_fn.execute(calldata, tx_regular_exec_gas);
+                    const pc_result = precompile_fn.execute(calldata, call_regular);
                     switch (pc_result) {
                         .success => |out| {
                             if (out.reverted) {
                                 ctx.journaled_state.checkpointRevert(call_checkpoint);
-                                return main.FrameResult.new(
-                                    main.ExecutionResult.new(.Revert, exec_gas),
-                                    0,
-                                    0,
-                                );
+                                // EIP-8037 (Amsterdam+): on failure the recipient was not created,
+                                // so the state-gas reservoir is refilled (returned), not burned.
+                                var fr = main.FrameResult.new(main.ExecutionResult.new(.Revert, exec_gas), 0, 0);
+                                fr.reservoir_remaining = call_reservoir;
+                                return fr;
                             }
                             // EIP-2780/8037 (Amsterdam+): a value transfer that creates the
                             // precompile account charges NEW_ACCOUNT state gas. The main
                             // interpreter path spends it via spendStateGas (reservoir first,
                             // spilling into regular gas); the precompile fast-path returns
-                            // early and must replicate that arithmetic here.
-                            // EIP-7702 (Amsterdam+): seed the reservoir with auth_state_refund,
-                            // matching the interpreter path — a type-4 tx targeting a precompile
-                            // must still return the state-lane new-account refund for auths to
-                            // existing accounts (else the sender is overcharged 120*cpsb per auth).
-                            var pc_reservoir = tx_reservoir + (if (primitives.isEnabledIn(spec, .amsterdam)) initial.auth_state_refund else 0);
-                            var pc_gas_remaining = tx_regular_exec_gas - out.gas_used;
+                            // early and must replicate that arithmetic here. The EIP-7702
+                            // set_delegation charges were already applied to call_regular/
+                            // call_reservoir above (before dispatch).
+                            var pc_reservoir = call_reservoir;
+                            var pc_gas_remaining = call_regular - out.gas_used;
                             if (top_new_account_state_gas > 0) {
                                 if (top_new_account_state_gas <= pc_reservoir) {
                                     pc_reservoir -= top_new_account_state_gas;
@@ -533,11 +616,11 @@ pub const MainnetHandler = struct {
                         },
                         .err => {
                             ctx.journaled_state.checkpointRevert(call_checkpoint);
-                            return main.FrameResult.new(
-                                main.ExecutionResult.new(.Fail, exec_gas),
-                                0,
-                                0,
-                            );
+                            // EIP-8037 (Amsterdam+): the recipient was not created, so refill the
+                            // state-gas reservoir (returned to the sender) rather than burning it.
+                            var fr = main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
+                            fr.reservoir_remaining = call_reservoir;
+                            return fr;
                         },
                     }
                 }
@@ -550,34 +633,40 @@ pub const MainnetHandler = struct {
                         target,
                         tx.value,
                         @constCast(calldata),
-                        tx_regular_exec_gas,
+                        call_regular,
                         .call,
                         false,
                         0,
                     ),
                     false,
                     spec,
-                    tx_regular_exec_gas,
+                    call_regular,
                 );
-                // EIP-8037: initialize root frame reservoir.
-                // EIP-7702 (Amsterdam+): add auth_state_refund back to reservoir — for existing
-                // authorities, set_delegation returns the new-account state gas to the reservoir
-                // so it can be consumed by execution (e.g. SSTORE) or returned as gas_left.
-                root_interp.gas.reservoir = tx_reservoir + (if (primitives.isEnabledIn(spec, .amsterdam)) initial.auth_state_refund else 0);
+                // EIP-8037: initialize root frame reservoir. The EIP-7702 set_delegation charges
+                // were already deducted from call_regular/call_reservoir before dispatch, so the
+                // reservoir baseline here already excludes them (a later execution failure will
+                // not credit them back — the delegations and their cost are permanent).
+                root_interp.gas.reservoir = call_reservoir;
                 // EIP-2780/8037 (Amsterdam+): charge the top-frame NEW_ACCOUNT state gas
                 // before execution. spendStateGas draws from the reservoir, spilling into
                 // gas; the standard non-success refund path (below) returns it if the frame
                 // fails and the recipient was never created.
+                // EIP-2780 devnet-7 (Amsterdam+): a prepare_dispatch OOG (recipient NEW_ACCOUNT or
+                // delegation access charge) rolls back the WHOLE preparation, including the applied
+                // EIP-7702 delegations (reference interpreter.py). Revert to the pre-set_delegation
+                // checkpoint when there were authorizations, else the top-level call checkpoint
+                // (undoing the value transfer). All gas is burned.
+                const dispatch_oog_checkpoint = initial.auth_checkpoint orelse call_checkpoint;
                 if (top_new_account_state_gas > 0) {
                     if (!root_interp.gas.spendStateGas(top_new_account_state_gas)) {
-                        ctx.journaled_state.checkpointRevert(call_checkpoint);
+                        ctx.journaled_state.checkpointRevert(dispatch_oog_checkpoint);
                         return main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
                     }
                 }
                 // EIP-2780 (Amsterdam+): top-frame delegation cold-access regular charge.
                 if (top_delegation_gas > 0) {
                     if (!root_interp.gas.spend(top_delegation_gas)) {
-                        ctx.journaled_state.checkpointRevert(call_checkpoint);
+                        ctx.journaled_state.checkpointRevert(dispatch_oog_checkpoint);
                         return main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
                     }
                 }
@@ -674,8 +763,12 @@ pub const MainnetHandler = struct {
 
         if (primitives.isEnabledIn(spec, .prague) and !ctx.cfg.disable_eip7623 and initial_gas.floor_gas > 0) {
             // floor_total = floor_base + floor_exec_gas (validated: gas_limit >= floor_total).
-            // EIP-2780 (Amsterdam+): floor base drops from 21000 to TX_BASE (12000).
-            const floor_base: u64 = if (is_amsterdam) 12000 else 21000;
+            // EIP-2780 devnet-7 (Amsterdam+): the floor anchors on base_regular_gas
+            // (TX_BASE + recipient_regular_gas), not the flat 21000.
+            const floor_base: u64 = if (is_amsterdam)
+                12000 + validation.Validation.recipientRegularGasAmsterdam(tx)
+            else
+                21000;
             const floor_total = floor_base + initial_gas.floor_gas;
             if (final_cost < floor_total) {
                 final_cost = floor_total;
