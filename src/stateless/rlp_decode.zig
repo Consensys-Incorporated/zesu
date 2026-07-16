@@ -329,7 +329,7 @@ fn decodeTxFields(allocator: std.mem.Allocator, tx_type: u8, payload: []const u8
     switch (tx_type) {
         0 => {
             // Legacy: [nonce, gasPrice, gasLimit, to, value, data, v, r, s]
-            tx.nonce = try txU64(&rest);
+            tx.nonce = try txNonce(&rest);
             tx.gas_price = try txU128(&rest);
             tx.gas_limit = try txU64(&rest);
             tx.to = try txAddr(&rest);
@@ -351,7 +351,7 @@ fn decodeTxFields(allocator: std.mem.Allocator, tx_type: u8, payload: []const u8
         1 => {
             // EIP-2930: [chainId, nonce, gasPrice, gasLimit, to, value, data, accessList, v, r, s]
             tx.chain_id = try txU64(&rest);
-            tx.nonce = try txU64(&rest);
+            tx.nonce = try txNonce(&rest);
             tx.gas_price = try txU128(&rest);
             tx.gas_limit = try txU64(&rest);
             tx.to = try txAddr(&rest);
@@ -365,7 +365,7 @@ fn decodeTxFields(allocator: std.mem.Allocator, tx_type: u8, payload: []const u8
         2 => {
             // EIP-1559: [chainId, nonce, maxPriorityFee, maxFee, gasLimit, to, value, data, accessList, v, r, s]
             tx.chain_id = try txU64(&rest);
-            tx.nonce = try txU64(&rest);
+            tx.nonce = try txNonce(&rest);
             tx.gas_priority_fee = try txU128(&rest);
             tx.gas_price = try txU128(&rest);
             tx.gas_limit = try txU64(&rest);
@@ -380,7 +380,7 @@ fn decodeTxFields(allocator: std.mem.Allocator, tx_type: u8, payload: []const u8
         3 => {
             // EIP-4844: [..., accessList, maxFeePerBlobGas, blobVersionedHashes, v, r, s]
             tx.chain_id = try txU64(&rest);
-            tx.nonce = try txU64(&rest);
+            tx.nonce = try txNonce(&rest);
             tx.gas_priority_fee = try txU128(&rest);
             tx.gas_price = try txU128(&rest);
             tx.gas_limit = try txU64(&rest);
@@ -397,7 +397,7 @@ fn decodeTxFields(allocator: std.mem.Allocator, tx_type: u8, payload: []const u8
         4 => {
             // EIP-7702: [..., accessList, authorizationList, v, r, s]
             tx.chain_id = try txU64(&rest);
-            tx.nonce = try txU64(&rest);
+            tx.nonce = try txNonce(&rest);
             tx.gas_priority_fee = try txU128(&rest);
             tx.gas_price = try txU128(&rest);
             tx.gas_limit = try txU64(&rest);
@@ -435,6 +435,18 @@ fn txBytesCopy(alloc: std.mem.Allocator, rest: *[]const u8) ![]const u8 {
 fn txU64(rest: *[]const u8) error{InvalidBlock}!u64 {
     const b = try txBytesView(rest);
     if (b.len > 8) return error.InvalidBlock;
+    var v: u64 = 0;
+    for (b) |byte| v = (v << 8) | byte;
+    return v;
+}
+
+/// Decode a transaction nonce, which may legitimately overflow u64 in adversarial
+/// fixtures (EIP-2681 NONCE_IS_MAX). Clamp an oversized (>8 byte) nonce to maxInt(u64)
+/// so the transaction still decodes and the payload root can be computed; validation
+/// then rejects the block (nonce >= maxInt) rather than failing to decode the input.
+fn txNonce(rest: *[]const u8) error{InvalidBlock}!u64 {
+    const b = try txBytesView(rest);
+    if (b.len > 8) return std.math.maxInt(u64);
     var v: u64 = 0;
     for (b) |byte| v = (v << 8) | byte;
     return v;
