@@ -194,7 +194,7 @@ fn runBlock(
     // ChainConfig chain_id=0 / fork=Frontier) — reference stateless_guest
     // run_stateless_guest / _default_failed_stateless_output. Assert the fixture's expected
     // output equals the exact bytes the guest commits (ssz_output.DEFAULT_FAILED_OUTPUT),
-    // byte-for-byte including its 73-byte length — so a regression in the guest's
+    // byte-for-byte including its 61-byte length — so a regression in the guest's
     // failed-output encoding or length is caught here instead of silently passing.
     const si = ssz_decode.decode(alloc, input_bytes) catch {
         const failed_hex = std.fmt.bytesToHex(ssz_output.DEFAULT_FAILED_OUTPUT, .lower);
@@ -203,10 +203,10 @@ fn runBlock(
         return false;
     };
 
-    // bal-devnet-7 / zkevm@v0.4.1: SszStatelessValidationResult grew from 41 to 105 bytes
-    // (SszChainConfig now embeds the full active_fork + blob_schedule).
-    if (out_stripped.len != 210) return error.BadOutputLength;
-    var expected: [105]u8 = undefined;
+    // zkevm@v0.6.2 (PR#3138): SszForkConfig dropped fork and blob_schedule, so a successful
+    // SszStatelessValidationResult shrank from 105 to 69 bytes (138 hex chars).
+    if (out_stripped.len != 138) return error.BadOutputLength;
+    var expected: [69]u8 = undefined;
     _ = try std.fmt.hexToBytes(&expected, out_stripped);
 
     const ep = &si.new_payload_request.execution_payload;

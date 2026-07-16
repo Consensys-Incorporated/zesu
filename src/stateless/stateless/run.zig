@@ -13,15 +13,14 @@ const ssz_output = @import("ssz_output");
 const zkvm_io = @import("zkvm_io");
 
 pub const Result = struct {
-    /// glamsterdam-devnet-6 / zkevm@v0.5.0: a successful SszStatelessValidationResult
-    /// is 105 bytes (32-byte new_payload_request_root + 1-byte success + 72-byte
-    /// SszChainConfig trailer). A decode-failure output is only 73 bytes (empty default
-    /// SszChainConfig, see ssz_output.DEFAULT_FAILED_OUTPUT), so the buffer is sized for
-    /// the larger success case and `len` records how many bytes to actually commit.
-    out: [105]u8,
-    /// Number of valid bytes in `out`: 105 on success, 73 on decode failure. The guest
-    /// commits exactly `out[0..len]` — a rejected input must emit 73 bytes, not a
-    /// zero-padded 105, to match the reference `_default_failed_stateless_output`.
+    /// zkevm@v0.6.2: a successful SszStatelessValidationResult is 69 bytes
+    /// (32-byte root + 1-byte success + 36-byte SszChainConfig trailer).
+    /// A decode-failure output is 61 bytes (empty default SszChainConfig,
+    /// see ssz_output.DEFAULT_FAILED_OUTPUT). Buffer sized for the larger success case.
+    out: [69]u8,
+    /// Number of valid bytes in `out`: 69 on success, 61 on decode failure. The guest
+    /// commits exactly `out[0..len]` — a rejected input must emit 61 bytes, not a
+    /// zero-padded 69, to match the reference `_default_failed_stateless_output`.
     len: usize,
     success: bool,
 };
@@ -38,7 +37,7 @@ pub fn runStateless(allocator: std.mem.Allocator) !Result {
 
     const si = ssz_decode.decode(allocator, buf_ptr[0..buf_size]) catch |err| {
         std.log.err("{s}", .{@errorName(err)});
-        var out: [105]u8 = .{0} ** 105;
+        var out: [69]u8 = .{0} ** 69;
         @memcpy(out[0..ssz_output.DEFAULT_FAILED_OUTPUT.len], &ssz_output.DEFAULT_FAILED_OUTPUT);
         return .{ .out = out, .len = ssz_output.DEFAULT_FAILED_OUTPUT.len, .success = false };
     };
