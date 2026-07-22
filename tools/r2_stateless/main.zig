@@ -275,6 +275,26 @@ fn runBlock(gpa: std.mem.Allocator, alloc: std.mem.Allocator, block: std.json.Ob
 
     const out_hex = out_val.string;
     const out_stripped = if (std.mem.startsWith(u8, out_hex, "0x")) out_hex[2..] else out_hex;
+
+    // EIP-8025 (optional proofs): when the stateless input cannot be decoded, the guest
+    // emits the "default failed" result (root=0, successful_validation=false, default
+    // ChainConfig) — reference stateless_guest run_stateless_guest /
+    // _default_failed_stateless_output. The fixture's expected output for such blocks is
+    // exactly ssz_output.DEFAULT_FAILED_OUTPUT (61 bytes), not the normal 69-byte
+    // SszStatelessValidationResult, so the decode attempt must come before any length check
+    // on statelessOutputBytes.
+    const si = ssz_decode.decode(alloc, input_bytes) catch {
+        const failed_hex = std.fmt.bytesToHex(ssz_output.DEFAULT_FAILED_OUTPUT, .lower);
+        const ok = std.ascii.eqlIgnoreCase(out_stripped, &failed_hex);
+        try appendResult(gpa, results, number, ok, if (ok) "" else "input failed to decode; fixture does not expect default-failed output");
+        if (ok) {
+            std.debug.print("PASS block {d}  output=0x{s}\n", .{ number, &failed_hex });
+        } else {
+            std.debug.print("FAIL block {d}  input failed to decode; fixture expects 0x{s}\n", .{ number, out_stripped });
+        }
+        return;
+    };
+
     if (out_stripped.len != 138) {
         try appendResult(gpa, results, number, false, "unexpected statelessOutputBytes length");
         return;
@@ -282,11 +302,6 @@ fn runBlock(gpa: std.mem.Allocator, alloc: std.mem.Allocator, block: std.json.Ob
     var expected: [69]u8 = undefined;
     _ = std.fmt.hexToBytes(&expected, out_stripped) catch {
         try appendResult(gpa, results, number, false, "invalid statelessOutputBytes hex");
-        return;
-    };
-
-    const si = ssz_decode.decode(alloc, input_bytes) catch |err| {
-        try appendResult(gpa, results, number, false, @errorName(err));
         return;
     };
 
