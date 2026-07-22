@@ -29,74 +29,11 @@ pub fn DBErrorMarker(comptime T: type) type {
     };
 }
 
-/// EVM database interface.
-pub fn Database(comptime Self: type) type {
-    return struct {
-        const DatabaseTrait = @This();
-
-        /// Gets basic account information.
-        pub fn basic(self: *Self, address: primitives.Address) !?state.AccountInfo {
-            return self.basic(address);
-        }
-
-        /// Gets account code by its hash.
-        pub fn codeByHash(self: *Self, code_hash: primitives.Hash) !bytecode.Bytecode {
-            return self.codeByHash(code_hash);
-        }
-
-        /// Gets storage value of address at index.
-        pub fn storage(self: *Self, address: primitives.Address, index: primitives.StorageKey) !primitives.StorageValue {
-            return self.storage_map(address, index);
-        }
-
-        /// Gets block hash by block number.
-        pub fn blockHash(self: *Self, number: u64) !primitives.Hash {
-            return self.blockHash(number);
-        }
-    };
-}
-
-/// EVM database commit interface.
-pub fn DatabaseCommit(comptime Self: type) type {
-    return struct {
-        const DatabaseCommitTrait = @This();
-
-        /// Commit changes to the database.
-        pub fn commit(self: *Self, changes: std.HashMap(primitives.Address, state.Account, std.hash_map.default_hash_fn(primitives.Address), std.hash_map.default_eql_fn(primitives.Address))) void {
-            return self.commit(changes);
-        }
-    };
-}
-
-/// EVM database interface with immutable reference.
-/// Contains the same methods as Database, but with immutable receivers instead of mutable ones.
-pub fn DatabaseRef(comptime Self: type) type {
-    return struct {
-        const DatabaseRefTrait = @This();
-
-        /// Gets basic account information.
-        pub fn basicRef(self: Self, address: primitives.Address) !?state.AccountInfo {
-            return self.basicRef(address);
-        }
-
-        /// Gets account code by its hash.
-        pub fn codeByHashRef(self: Self, code_hash: primitives.Hash) !bytecode.Bytecode {
-            return self.codeByHashRef(code_hash);
-        }
-
-        /// Gets storage value of address at index.
-        pub fn storageRef(self: Self, address: primitives.Address, index: primitives.StorageKey) !primitives.StorageValue {
-            return self.storage_mapRef(address, index);
-        }
-
-        /// Gets block hash by block number.
-        pub fn blockHashRef(self: Self, number: u64) !primitives.Hash {
-            return self.blockHashRef(number);
-        }
-    };
-}
-
-/// Wraps a DatabaseRef to provide a Database implementation.
+/// Wraps a type satisfying the DatabaseRef interface (basicRef, codeByHashRef,
+/// storageRef, blockHashRef) to provide a Database implementation (basic,
+/// codeByHash, storage, blockHash). Any DB type satisfying the 4-method
+/// interface can be used directly with `Context(DB)` without wrapping;
+/// this wrapper is only needed to adapt an immutable-receiver DB.
 pub fn WrapDatabaseRef(comptime T: type) type {
     return struct {
         inner: T,
