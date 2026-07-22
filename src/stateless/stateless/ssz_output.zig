@@ -506,6 +506,7 @@ fn htConsolidationRequestList(alloc: std.mem.Allocator, data: []const u8) ![32]u
 
 fn htBuilderDepositList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
     const SIZE = 184;
+    // MAX_BUILDER_DEPOSIT_REQUESTS_PER_PAYLOAD = 2**6 (consensus-specs, gloas/beacon-chain.md)
     const list_depth = 6;
     if (data.len == 0) return mixInLength(zeroHash(list_depth), 0);
     if (data.len % SIZE != 0) return error.InvalidSsz;
@@ -518,6 +519,7 @@ fn htBuilderDepositList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
 
 fn htBuilderExitList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
     const SIZE = 68;
+    // MAX_BUILDER_EXIT_REQUESTS_PER_PAYLOAD = 2**4 (consensus-specs, gloas/beacon-chain.md)
     const list_depth = 4;
     if (data.len == 0) return mixInLength(zeroHash(list_depth), 0);
     if (data.len % SIZE != 0) return error.InvalidSsz;
