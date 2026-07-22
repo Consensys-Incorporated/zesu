@@ -58,16 +58,17 @@ const EIP7251_ADDRESS: input.Address = .{
 };
 
 // EIP-8282 (Amsterdam+): builder execution requests system contracts.
-// Builder deposit requests (request type 0x03).
+// glamsterdam-devnet-7 updated these predeploy addresses.
+// Builder deposit requests (request type 0x03): 0x0000BFF46984E3725691FA540A8C7589300D8282
 const EIP8282_DEPOSIT_ADDRESS: input.Address = .{
-    0x00, 0x00, 0x88, 0x4d, 0x2a, 0xa3, 0x2e, 0xaa, 0x15, 0x5f,
-    0x59, 0xa2, 0xf2, 0x4e, 0xfa, 0x73, 0xd9, 0x00, 0x82, 0x82,
+    0x00, 0x00, 0xbf, 0xf4, 0x69, 0x84, 0xe3, 0x72, 0x56, 0x91,
+    0xfa, 0x54, 0x0a, 0x8c, 0x75, 0x89, 0x30, 0x0d, 0x82, 0x82,
 };
 
-// Builder exit requests (request type 0x04).
+// Builder exit requests (request type 0x04): 0x000064D678505AD48F8CCB093BC65613800E8282
 const EIP8282_EXIT_ADDRESS: input.Address = .{
-    0x00, 0x00, 0x14, 0x57, 0x4a, 0x74, 0xc8, 0x05, 0x59, 0x0a,
-    0xff, 0x94, 0x99, 0xfc, 0x7a, 0x69, 0x0f, 0x00, 0x82, 0x82,
+    0x00, 0x00, 0x64, 0xd6, 0x78, 0x50, 0x5a, 0xd4, 0x8f, 0x8c,
+    0xcb, 0x09, 0x3b, 0xc6, 0x56, 0x13, 0x80, 0x0e, 0x82, 0x82,
 };
 
 // ─── Shared execution helper ──────────────────────────────────────────────────
@@ -87,16 +88,18 @@ fn runSystemCall(
 ) void {
     const SYSTEM_CALL_GAS: u64 = systemCallGasLimit(ctx.cfg.spec);
 
-    // Skip if the contract has no code (also covers non-existing accounts).
-    // Call discardTx so that the loadAccount call does not leave the target
-    // address warm in the journal — otherwise user transactions in the same
-    // block would see it as warm (cheap) instead of cold (EIP-2929).
     const account_load = ctx.journaled_state.loadAccount(target) catch {
         ctx.journaled_state.discardTx();
         return;
     };
+    // Skip the call if the contract has no code (also covers non-existing accounts).
+    // EIP-7928 (Amsterdam+): the reference process_unchecked_system_transaction still
+    // reads the target account (get_account → account_reads), so it belongs in the block
+    // access list even when absent. commitTx (rather than discardTx) flushes that read into
+    // the permanent BAL while still leaving the account cold for user transactions — commitTx
+    // bumps the journal transaction_id, so its EIP-2929 warmth does not carry over.
     if (std.mem.eql(u8, &account_load.data.info.code_hash, &primitives.KECCAK_EMPTY)) {
-        ctx.journaled_state.discardTx();
+        ctx.journaled_state.commitTx();
         return;
     }
 

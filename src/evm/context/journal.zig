@@ -31,8 +31,8 @@ pub const JournalEntryFactory = struct {
         return JournalEntry{ .NonceChanged = address };
     }
 
-    pub fn codeChanged(address: primitives.Address) JournalEntry {
-        return JournalEntry{ .CodeChanged = address };
+    pub fn codeChanged(address: primitives.Address, old_code: ?bytecode.Bytecode, old_code_hash: primitives.Hash) JournalEntry {
+        return JournalEntry{ .CodeChanged = .{ .address = address, .old_code = old_code, .old_code_hash = old_code_hash } };
     }
 
     pub fn storageChanged(address: primitives.Address, key: primitives.StorageKey, old_value: primitives.StorageValue, old_was_written: bool) JournalEntry {
@@ -96,7 +96,7 @@ pub const JournalEntry = union(enum) {
     BalanceChanged: struct { address: primitives.Address, old_balance: primitives.U256 },
     BalanceTransfer: struct { from: primitives.Address, to: primitives.Address, balance: primitives.U256 },
     NonceChanged: primitives.Address,
-    CodeChanged: primitives.Address,
+    CodeChanged: struct { address: primitives.Address, old_code: ?bytecode.Bytecode, old_code_hash: primitives.Hash },
     StorageChanged: struct { address: primitives.Address, key: primitives.StorageKey, old_value: primitives.StorageValue, old_was_written: bool },
     StorageWarmed: struct { address: primitives.Address, key: primitives.StorageKey },
     AccountWarmed: primitives.Address,
@@ -162,10 +162,14 @@ pub const JournalEntry = union(enum) {
                     account.info.nonce -= 1;
                 }
             },
-            .CodeChanged => |address| {
-                if (evm_state.getPtr(address)) |account| {
-                    account.info.code = null;
-                    account.info.code_hash = primitives.KECCAK_EMPTY;
+            .CodeChanged => |data| {
+                if (evm_state.getPtr(data.address)) |account| {
+                    // Restore the pre-change code so reverting an EIP-7702 delegation
+                    // clear/re-set (or any code overwrite) puts back the original code,
+                    // not an empty account. For a freshly created contract the old code
+                    // was empty (null / KECCAK_EMPTY), so this still clears it.
+                    account.info.code = data.old_code;
+                    account.info.code_hash = data.old_code_hash;
                 }
             },
             .StorageChanged => |data| {
@@ -753,7 +757,9 @@ pub const JournalInner = struct {
         const account = self.evm_state.getPtr(address).?;
         JournalInner.touchAccount(&self.journal, address, account);
 
-        self.journal.append(alloc_mod.get(), JournalEntryFactory.codeChanged(address)) catch {};
+        // Capture the pre-change code so a revert restores it (EIP-7702 clear/re-delegation
+        // reverts must put back the original delegation, not empty the account).
+        self.journal.append(alloc_mod.get(), JournalEntryFactory.codeChanged(address, account.info.code, account.info.code_hash)) catch {};
 
         account.info.code_hash = hash;
         account.info.code = code;

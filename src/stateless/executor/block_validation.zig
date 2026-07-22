@@ -3,6 +3,8 @@ const primitives = @import("primitives");
 const bal = @import("./bal.zig");
 const accel = @import("accelerators");
 
+const BAL_DEBUG = false;
+
 // EIP-1559 / gas limit constants
 const MIN_GAS_LIMIT: u64 = 5_000;
 const MAX_GAS_LIMIT: u64 = 0x7fff_ffff_ffff_ffff;
@@ -187,21 +189,38 @@ pub fn validatePostExecution(
                 }
             }
 
-            if (declared.len != accessed.len) return error.InvalidBlockAccessList;
+            if (declared.len != accessed.len) {
+                if (BAL_DEBUG) {
+                    std.debug.print("BALDIFF len decl={d} comp={d}\n", .{ declared.len, accessed.len });
+                    for (declared) |d| std.debug.print("  DECL {x}\n", .{d.address});
+                    for (accessed) |c| std.debug.print("  COMP {x}\n", .{c.address});
+                }
+                return error.InvalidBlockAccessList;
+            }
 
             for (declared, accessed) |decl, comp| {
-                if (!std.mem.eql(u8, &decl.address, &comp.address)) return error.InvalidBlockAccessList;
+                if (!std.mem.eql(u8, &decl.address, &comp.address)) {
+                    if (BAL_DEBUG) std.debug.print("BALDIFF addr-mismatch decl={x} comp={x}\n", .{ decl.address, comp.address });
+                    return error.InvalidBlockAccessList;
+                }
 
                 if (comp.pre_nonce != comp.post_nonce) {
                     if (decl.nonce_changes.len == 0) return error.InvalidBlockAccessList;
                     if (decl.nonce_changes[decl.nonce_changes.len - 1] != comp.post_nonce) return error.InvalidBlockAccessList;
                 } else {
-                    if (decl.nonce_changes.len != 0) return error.InvalidBlockAccessList;
+                    if (decl.nonce_changes.len != 0) {
+                        if (BAL_DEBUG) std.debug.print("BALDIFF nonce addr={x} decl has {d} nonce changes, comp unchanged (nonce={d})\n", .{ decl.address, decl.nonce_changes.len, comp.post_nonce });
+                        return error.InvalidBlockAccessList;
+                    }
                 }
 
                 if (decl.balance_changes.len != 0) {
-                    if (decl.balance_changes[decl.balance_changes.len - 1] != comp.post_balance) return error.InvalidBlockAccessList;
+                    if (decl.balance_changes[decl.balance_changes.len - 1] != comp.post_balance) {
+                        if (BAL_DEBUG) std.debug.print("BALDIFF balance addr={x} decl={d} comp={d}\n", .{ decl.address, decl.balance_changes[decl.balance_changes.len - 1], comp.post_balance });
+                        return error.InvalidBlockAccessList;
+                    }
                 } else if (comp.pre_balance != comp.post_balance) {
+                    if (BAL_DEBUG) std.debug.print("BALDIFF balance addr={x} decl=none comp pre={d} post={d}\n", .{ decl.address, comp.pre_balance, comp.post_balance });
                     return error.InvalidBlockAccessList;
                 }
 
@@ -211,18 +230,30 @@ pub fn validatePostExecution(
                     if (last_code.len > 0) {
                         accel.keccak256(last_code, &last_code_hash);
                     }
-                    if (!std.mem.eql(u8, &last_code_hash, &comp.post_code_hash)) return error.InvalidBlockAccessList;
+                    if (!std.mem.eql(u8, &last_code_hash, &comp.post_code_hash)) {
+                        if (BAL_DEBUG) std.debug.print("BALDIFF code addr={x} decl_changes={d}\n", .{ decl.address, decl.code_changes.len });
+                        return error.InvalidBlockAccessList;
+                    }
                 } else {
-                    if (!std.mem.eql(u8, &comp.pre_code_hash, &comp.post_code_hash)) return error.InvalidBlockAccessList;
+                    if (!std.mem.eql(u8, &comp.pre_code_hash, &comp.post_code_hash)) {
+                        if (BAL_DEBUG) std.debug.print("BALDIFF code addr={x} decl=none pre!=post\n", .{decl.address});
+                        return error.InvalidBlockAccessList;
+                    }
                 }
 
-                if (decl.storage_changes.len != comp.storage_changes.len) return error.InvalidBlockAccessList;
+                if (decl.storage_changes.len != comp.storage_changes.len) {
+                    if (BAL_DEBUG) std.debug.print("BALDIFF storage_changes addr={x} decl={d} comp={d}\n", .{ decl.address, decl.storage_changes.len, comp.storage_changes.len });
+                    return error.InvalidBlockAccessList;
+                }
                 for (decl.storage_changes, comp.storage_changes) |ds, cs| {
                     if (!std.mem.eql(u8, &ds.slot, &cs.slot)) return error.InvalidBlockAccessList;
                     if (ds.post_value != cs.post_value) return error.InvalidBlockAccessList;
                 }
 
-                if (decl.storage_reads.len != comp.storage_reads.len) return error.InvalidBlockAccessList;
+                if (decl.storage_reads.len != comp.storage_reads.len) {
+                    if (BAL_DEBUG) std.debug.print("BALDIFF storage_reads addr={x} decl={d} comp={d}\n", .{ decl.address, decl.storage_reads.len, comp.storage_reads.len });
+                    return error.InvalidBlockAccessList;
+                }
                 for (decl.storage_reads, comp.storage_reads) |dr, cr| {
                     if (!std.mem.eql(u8, &dr, &cr)) return error.InvalidBlockAccessList;
                 }

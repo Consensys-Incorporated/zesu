@@ -140,6 +140,9 @@ pub const ExecutionRequests = struct {
     deposits: []const u8 = &.{}, // packed SszDepositRequest items (192 bytes each)
     withdrawals: []const u8 = &.{}, // packed SszWithdrawalRequest items (76 bytes each)
     consolidations: []const u8 = &.{}, // packed SszConsolidationRequest items (116 bytes each)
+    // EIP-8282 (Amsterdam+): builder execution requests.
+    builder_deposits: []const u8 = &.{}, // packed SszBuilderDepositRequest items (184 bytes each)
+    builder_exits: []const u8 = &.{}, // packed SszBuilderExitRequest items (68 bytes each)
 };
 
 pub const NewPayloadRequest = struct {

@@ -26,35 +26,34 @@ inline fn readU64(data: []const u8, off: usize) u64 {
 
 // ── Fork enum (glamsterdam-devnet-6 / zkevm@v0.5.0) ──────────────────────────────────
 
-/// ProtocolFork enum values from execution-specs amsterdam stateless.py.
-/// Indices are assigned by PROTOCOL_FORKS = tuple(ProtocolFork) and used by
-/// SszForkConfig.fork in the SSZ-encoded SszChainConfig. The string returned
-/// here matches what zesu's spec resolver (fork.specForBlock) expects.
-fn forkNameFromIndex(idx: u64) []const u8 {
-    return switch (idx) {
-        0 => "Frontier",
-        1 => "Homestead",
-        2 => "DAOFork",
-        3 => "TangerineWhistle",
-        4 => "SpuriousDragon",
-        5 => "Byzantium",
-        // glamsterdam-devnet-6 / zkevm@v0.5.0: PR#2926 removed ConstantinopleFix (merged into
-        // StPetersburg at index 6) and BPO3-5; all indices from 7 onwards shift by -1 vs v0.4.1.
-        6 => "StPetersburg",
-        7 => "Istanbul",
-        8 => "MuirGlacier",
-        9 => "Berlin",
-        10 => "London",
-        11 => "ArrowGlacier",
-        12 => "GrayGlacier",
-        13 => "Paris",
-        14 => "Shanghai",
-        15 => "Cancun",
-        16 => "Prague",
-        17 => "Osaka",
-        18 => "BPO1",
-        19 => "BPO2",
-        20 => "Amsterdam",
+/// ProtocolFork IntEnum values from execution-specs glamsterdam-devnet-7 / zkevm@v0.6.2.
+/// PR#3138 replaced the zero-indexed PROTOCOL_FORKS tuple with a stable IntEnum where
+/// Frontier=0x01, ..., Amsterdam=0x15. The first byte of the 2-byte schema_id prefix
+/// carries this value; the fork is no longer encoded inside SszForkConfig.
+/// The string returned here matches what zesu's spec resolver (fork.specForBlock) expects.
+fn forkNameFromSchemaByte(b: u8) []const u8 {
+    return switch (b) {
+        0x01 => "Frontier",
+        0x02 => "Homestead",
+        0x03 => "DAOFork",
+        0x04 => "TangerineWhistle",
+        0x05 => "SpuriousDragon",
+        0x06 => "Byzantium",
+        0x07 => "StPetersburg",
+        0x08 => "Istanbul",
+        0x09 => "MuirGlacier",
+        0x0a => "Berlin",
+        0x0b => "London",
+        0x0c => "ArrowGlacier",
+        0x0d => "GrayGlacier",
+        0x0e => "Paris",
+        0x0f => "Shanghai",
+        0x10 => "Cancun",
+        0x11 => "Prague",
+        0x12 => "Osaka",
+        0x13 => "BPO1",
+        0x14 => "BPO2",
+        0x15 => "Amsterdam",
         else => "",
     };
 }
@@ -156,8 +155,11 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     else
         data;
 
-    // Require v0.4.1 schema_id prefix (0x00 0x01 big-endian).
-    if (payload.len < 2 or payload[0] != 0x00 or payload[1] != 0x01) return error.InvalidSsz;
+    // zkevm@v0.6.2 (PR#3138): schema_id = fork_byte || revision_byte, where fork_byte is the
+    // ProtocolFork IntEnum value and revision_byte is 0x01 for the first schema revision.
+    if (payload.len < 2 or payload[1] != 0x01) return error.InvalidSsz;
+    const fork_name_bytes = forkNameFromSchemaByte(payload[0]);
+    if (fork_name_bytes.len == 0) return error.InvalidSsz;
 
     // ── v0.4.1: schema_id prefix + 16-byte all-variable container ────────────
     const body = payload[2..];
@@ -172,26 +174,24 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
 
     const chain_config_data = body[off_chain_config..off_pubkeys];
 
-    // SszChainConfig: chain_id (uint64 LE) + offset → active_fork + SszForkConfig
-    //   active_fork[0..8] = fork enum index (ProtocolFork, see forkNameFromIndex)
+    // SszChainConfig: chain_id (uint64 LE) + offset → active_fork + SszForkConfig.
+    // zkevm@v0.6.2 (PR#3138): SszForkConfig no longer contains fork or blob_schedule;
+    // it only carries activation_offset (4 bytes). Fork identity comes from the schema prefix.
     if (chain_config_data.len < 12) return error.InvalidSsz;
     const chain_id = readU64(chain_config_data, 0);
     const off_active_fork: usize = readU32(chain_config_data, 8);
-    if (off_active_fork + 8 > chain_config_data.len) return error.InvalidSsz;
-    const fork_idx: u64 = readU64(chain_config_data, off_active_fork);
+    if (off_active_fork + 4 > chain_config_data.len) return error.InvalidSsz;
 
-    // SszForkConfig: fork uint64 [0..8], activation offset [8..12], blob_schedule offset [12..16].
+    // SszForkConfig: activation_offset [0..4] (only field).
     // SszForkActivation: block_number list offset [0..4], timestamp list offset [4..8]; each
-    // SszOptional list is 0 bytes (None) or 8 bytes (a single uint64). Decode the activation so
-    // EIP-8025 chain-config validation can reject a fork not yet active for the target payload.
+    // list is 0 bytes (empty) or 8 bytes (a single uint64).
     var activation_block: ?u64 = null;
     var activation_timestamp: ?u64 = null;
-    if (off_active_fork + 16 <= chain_config_data.len) {
+    {
         const af = chain_config_data[off_active_fork..];
-        const off_activation: usize = readU32(af, 8);
-        const off_blob_sched: usize = readU32(af, 12);
-        if (off_activation + 8 <= off_blob_sched and off_blob_sched <= af.len) {
-            const act = af[off_activation..off_blob_sched];
+        const off_activation: usize = readU32(af, 0);
+        if (off_activation + 8 <= af.len) {
+            const act = af[off_activation..];
             const off_bn: usize = readU32(act, 0);
             const off_ts: usize = readU32(act, 4);
             if (off_bn <= off_ts and off_ts <= act.len) {
@@ -200,8 +200,6 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
             }
         }
     }
-
-    const fork_name_bytes = forkNameFromIndex(fork_idx);
     const npr_data = body[off_npr..off_witness];
     const witness_data = body[off_witness..off_chain_config];
     const pubkeys_data = body[off_pubkeys..];
@@ -231,18 +229,34 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     const versioned_hashes = try alloc.alloc([32]u8, vh_count);
     for (0..vh_count) |i| @memcpy(&versioned_hashes[i], vh_bytes[i * 32 ..][0..32]);
 
-    // execution_requests: SszExecutionRequests container (3 variable fields, 12-byte fixed region)
+    // execution_requests: SszExecutionRequests — N variable-length request-type lists.
+    // The first offset gives the fixed-region size (N*4), indicating how many types exist.
+    // zkevm@v0.5.0 had 3 types (deposits, withdrawals, consolidations; fixed=12).
+    // zkevm@v0.6.2 (EIP-8282) added builder_deposits + builder_exits → 5 types (fixed=20).
     const er_data = npr_data[off_er..];
     if (er_data.len < 12) return error.InvalidSsz;
     const off_deposits: usize = readU32(er_data, 0);
-    const off_withdrawals_req: usize = readU32(er_data, 4);
-    const off_consolidations: usize = readU32(er_data, 8);
-    if (off_deposits != 12) return error.InvalidSsz;
-    if (off_deposits > off_withdrawals_req or off_withdrawals_req > off_consolidations or off_consolidations > er_data.len) return error.InvalidSsz;
+    // off_deposits == fixed-region size; a multiple of 4 covering at least 3 types.
+    if (off_deposits < 12 or off_deposits % 4 != 0 or off_deposits > er_data.len) return error.InvalidSsz;
+    const n_types = off_deposits / 4;
+    // Read each type's offset, then its end (next offset, or er_data.len for the last type).
+    var er_offsets: [8]usize = undefined;
+    for (0..@min(n_types, 8)) |i| er_offsets[i] = readU32(er_data, i * 4);
+    const getSlice = struct {
+        fn f(er_bytes: []const u8, offs: []const usize, n: usize, idx: usize) ![]const u8 {
+            if (idx >= n) return &.{};
+            const start = offs[idx];
+            const end = if (idx + 1 < n) offs[idx + 1] else er_bytes.len;
+            if (start > end or end > er_bytes.len) return error.InvalidSsz;
+            return er_bytes[start..end];
+        }
+    }.f;
     const execution_requests: input_mod.ExecutionRequests = .{
-        .deposits = er_data[off_deposits..off_withdrawals_req],
-        .withdrawals = er_data[off_withdrawals_req..off_consolidations],
-        .consolidations = er_data[off_consolidations..],
+        .deposits = try getSlice(er_data, &er_offsets, n_types, 0),
+        .withdrawals = try getSlice(er_data, &er_offsets, n_types, 1),
+        .consolidations = try getSlice(er_data, &er_offsets, n_types, 2),
+        .builder_deposits = try getSlice(er_data, &er_offsets, n_types, 3),
+        .builder_exits = try getSlice(er_data, &er_offsets, n_types, 4),
     };
 
     // ── SszExecutionPayload fixed region ─────────────────────────────────────────
@@ -390,7 +404,7 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
         .chain_config = .{
             .chain_id = if (chain_id != 0) chain_id else 1,
             .fork_name = if (fork_name_bytes.len > 0) fork_name_bytes else null,
-            .active_fork_idx = fork_idx,
+            .active_fork_idx = payload[0],
             .activation_block = activation_block,
             .activation_timestamp = activation_timestamp,
         },

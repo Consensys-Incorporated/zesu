@@ -519,10 +519,25 @@ pub fn opCreate(ctx: *InstructionContext) void {
         }
     }
 
-    // EIP-8037 (Amsterdam+): charge state gas for new account creation.
-    // Charged BEFORE forwarded gas is computed so `remaining` reflects the state gas cost.
-    var new_account_state_gas: u64 = 0;
+    // EIP-7928 (Amsterdam+): record the create target in the BAL BEFORE the NEW_ACCOUNT
+    // charge (reference generic_create accesses the address before charge_state_gas), so an
+    // OOG on the charge still leaves the created address in the block access list. The return
+    // flags whether the target leaf is already alive, gating the NEW_ACCOUNT charge below.
+    // recordCreateTarget returns null when a reference pre-check (depth/balance/nonce) fails —
+    // the create returns 0 before accessing the address or charging NEW_ACCOUNT — else the
+    // target's aliveness. Charge NEW_ACCOUNT only when it returned a non-null, not-alive result.
+    var charge_new_account = false;
     if (primitives.isEnabledIn(spec, .amsterdam)) {
+        if (h.recordCreateTarget(ctx.interpreter.input.target, value, &[_]u8{}, false, 0, ctx.interpreter.input.depth)) |alive| {
+            charge_new_account = !alive;
+        }
+    }
+
+    // EIP-8037 (Amsterdam+): charge NEW_ACCOUNT state gas only when the target leaf does not
+    // yet exist (reference generic_create: `if not is_account_alive`). Charged BEFORE forwarded
+    // gas is computed so `remaining` reflects the state gas cost.
+    var new_account_state_gas: u64 = 0;
+    if (charge_new_account) {
         const cpsb = gas_costs.costPerStateByte(h.block.gas_limit);
         new_account_state_gas = gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * cpsb;
         if (!ctx.interpreter.gas.spendStateGas(new_account_state_gas)) {
@@ -671,10 +686,24 @@ pub fn opCreate2(ctx: *InstructionContext) void {
         }
     }
 
-    // EIP-8037 (Amsterdam+): charge state gas for new account creation.
-    // Charged BEFORE forwarded gas is computed so `remaining` reflects the state gas cost.
-    var new_account_state_gas: u64 = 0;
+    // EIP-7928 (Amsterdam+): record the create2 target in the BAL BEFORE the NEW_ACCOUNT
+    // charge, so an OOG on the charge still leaves the created address in the block access list.
+    // The return flags whether the target leaf is already alive, gating the charge below.
+    // recordCreateTarget returns null when a reference pre-check (depth/balance/nonce) fails,
+    // else the target's aliveness. Charge NEW_ACCOUNT only for a non-null, not-alive result.
+    var charge_new_account = false;
     if (primitives.isEnabledIn(spec, .amsterdam)) {
+        const ic: []const u8 = if (size_u > 0) ctx.interpreter.memory.buffer.items[off_u .. off_u + size_u] else &[_]u8{};
+        if (h.recordCreateTarget(ctx.interpreter.input.target, value, ic, true, salt, ctx.interpreter.input.depth)) |alive| {
+            charge_new_account = !alive;
+        }
+    }
+
+    // EIP-8037 (Amsterdam+): charge NEW_ACCOUNT state gas only when the target leaf does not
+    // yet exist (reference generic_create: `if not is_account_alive`). Charged BEFORE forwarded
+    // gas is computed so `remaining` reflects the state gas cost.
+    var new_account_state_gas: u64 = 0;
+    if (charge_new_account) {
         const cpsb = gas_costs.costPerStateByte(h.block.gas_limit);
         new_account_state_gas = gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * cpsb;
         if (!ctx.interpreter.gas.spendStateGas(new_account_state_gas)) {
