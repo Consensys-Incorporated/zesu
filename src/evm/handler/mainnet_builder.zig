@@ -211,8 +211,20 @@ pub const MainnetHandler = struct {
                 // EIP-2780 devnet-7: set_delegation charges from the top-frame gas as it processes
                 // each authorization in order. When the cumulative charge exceeds the available
                 // execution gas the reference raises OOG and stops — later authorizations are never
-                // read. Track exec_gas and the running charge to reproduce the exact read set.
-                const auth_exec_gas: u64 = if (is_amsterdam) tx.gas_limit -| initial_gas.initial_gas else 0;
+                // read. The two exec-gas pools are NOT fungible (EIP-8037): ACCOUNT_WRITE goes
+                // through charge_gas and draws regular gas only, while NEW_ACCOUNT/AUTH_BASE go
+                // through charge_state_gas and draw the state reservoir first, spilling into
+                // regular gas once it is empty. Split exec gas exactly as executeFrame does and
+                // check each pool separately — a combined check would let regular charges ride on
+                // an unspent reservoir. Pools only shrink during the loop, so the ordered
+                // per-charge sequence fits iff the running totals fit.
+                const auth_regular_pool: u64, const auth_reservoir: u64 = if (is_amsterdam) blk: {
+                    const exec_gas = tx.gas_limit -| initial_gas.initial_gas;
+                    const initial_regular = initial_gas.initial_gas - initial_gas.initial_state_gas;
+                    const regular_budget = interpreter_mod.gas_costs.TX_MAX_GAS_LIMIT -| initial_regular;
+                    const regular = @min(regular_budget, exec_gas);
+                    break :blk .{ regular, exec_gas - regular };
+                } else .{ 0, 0 };
                 for (auth_list.items) |auth_entry| {
                     if (initial_gas.auth_oog) break;
                     switch (auth_entry) {
@@ -299,8 +311,13 @@ pub const MainnetHandler = struct {
                                             if (charge_auth_base)
                                                 this_state += interpreter_mod.gas_costs.STATE_BYTES_PER_AUTH_BASE * amsterdam_cpsb;
                                         }
-                                        // OOG check: cumulative set_delegation charge vs top-frame gas.
-                                        if (initial_gas.auth_regular_charge + initial_gas.auth_state_charge + this_regular + this_state > auth_exec_gas) {
+                                        // OOG check: cumulative regular charges (plus any state-gas
+                                        // spill past the reservoir) vs the REGULAR top-frame gas —
+                                        // regular charges can never draw on the reservoir.
+                                        const cum_regular = initial_gas.auth_regular_charge + this_regular;
+                                        const cum_state = initial_gas.auth_state_charge + this_state;
+                                        const state_spill = cum_state -| auth_reservoir;
+                                        if (cum_regular + state_spill > auth_regular_pool) {
                                             initial_gas.auth_oog = true;
                                             break;
                                         }
@@ -476,7 +493,13 @@ pub const MainnetHandler = struct {
                     // if not, accumulated charges that fit within the top-frame gas.
                     if (initial.auth_oog) {
                         if (initial.auth_checkpoint) |cp| ctx.journaled_state.checkpointRevert(cp);
-                        return main.FrameResult.new(main.ExecutionResult.new(.Halt, exec_gas), 0, 0);
+                        var fr = main.FrameResult.new(main.ExecutionResult.new(.Halt, exec_gas), 0, 0);
+                        // Prep-phase OOG burns the full regular grant, but the rolled-back
+                        // delegations' state charges refill the reservoir and settlement
+                        // returns it whole (reference: gas_used == TX_MAX_GAS_LIMIT exactly,
+                        // however much extra gas was sent above the cap).
+                        fr.reservoir_remaining = tx_reservoir + initial.initial_state_gas;
+                        return fr;
                     }
                     if (initial.auth_regular_charge > 0 or initial.auth_state_charge > 0) {
                         call_regular -= initial.auth_regular_charge;
