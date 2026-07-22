@@ -94,7 +94,8 @@ fn modexpBigInt(
     if (modulus.eqlZero()) return;
 
     try BigInt.divFloor(&quot, &base_pow, &base, &modulus);
-    try result.set(1);
+    try tmp.set(1);
+    try BigInt.divFloor(&quot, &result, &tmp, &modulus);
 
     while (!exp_val.eqlZero()) {
         if (exp_val.isOdd()) {
