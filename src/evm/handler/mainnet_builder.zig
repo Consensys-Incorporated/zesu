@@ -214,8 +214,7 @@ pub const MainnetHandler = struct {
                 // per-charge sequence fits iff the running totals fit.
                 const auth_regular_pool: u64, const auth_reservoir: u64 = if (is_amsterdam) blk: {
                     const exec_gas = tx.gas_limit -| initial_gas.initial_gas;
-                    const initial_regular = initial_gas.initial_gas - initial_gas.initial_state_gas;
-                    const regular_budget = interpreter_mod.gas_costs.TX_MAX_GAS_LIMIT -| initial_regular;
+                    const regular_budget = interpreter_mod.gas_costs.TX_MAX_GAS_LIMIT -| initial_gas.initial_gas;
                     const regular = @min(regular_budget, exec_gas);
                     break :blk .{ regular, exec_gas - regular };
                 } else .{ 0, 0 };
@@ -362,11 +361,10 @@ pub const MainnetHandler = struct {
         const exec_gas = tx.gas_limit - initial_gas;
 
         // EIP-8037 (Amsterdam+): split exec_gas into regular and state reservoir.
-        // regular_gas_budget = TX_MAX_GAS_LIMIT - intrinsic_regular (regular portion only).
-        // Any excess exec_gas above regular_gas_budget goes to the state gas reservoir.
+        // regular_gas_budget = TX_MAX_GAS_LIMIT - intrinsic (the intrinsic is entirely regular
+        // gas post-EIP-2780). Any excess exec_gas above regular_gas_budget goes to the reservoir.
         const tx_regular_exec_gas: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) blk: {
-            const initial_regular = initial_gas - initial.initial_state_gas;
-            const regular_budget = interpreter_mod.gas_costs.TX_MAX_GAS_LIMIT -| initial_regular;
+            const regular_budget = interpreter_mod.gas_costs.TX_MAX_GAS_LIMIT -| initial_gas;
             break :blk @min(regular_budget, exec_gas);
         } else exec_gas;
         const tx_reservoir: u64 = if (primitives.isEnabledIn(spec, .amsterdam))
@@ -391,15 +389,13 @@ pub const MainnetHandler = struct {
                         var exec_result = main.ExecutionResult.new(status, exec_gas - r.gas_remaining);
                         exec_result.return_data = alloc_mod.get().dupe(u8, r.return_data) catch @constCast(&[_]u8{});
                         // EIP-8037 (Amsterdam): a setupCreate failure (collision/balance/nonce)
-                        // burns the regular create gas but never touches the state-gas reservoir,
-                        // and the intrinsic NEW_ACCOUNT*CPSB is refilled (reference generic_create
-                        // collision path: state_gas_left += reservoir; credit_state_gas_refund).
-                        // Return the full untouched reservoir plus the intrinsic new-account gas —
-                        // for a tx whose gas_limit exceeds TX_MAX_GAS_LIMIT, tx_reservoir holds the
-                        // large excess that must not be charged to the sender.
+                        // burns the regular create gas but never touches the state-gas reservoir.
+                        // Return the full untouched reservoir — for a tx whose gas_limit exceeds
+                        // TX_MAX_GAS_LIMIT, tx_reservoir holds the large excess that must not be
+                        // charged to the sender.
                         var fr = main.FrameResult.new(exec_result, r.gas_remaining, r.gas_refunded);
                         if (primitives.isEnabledIn(spec, .amsterdam)) {
-                            fr.reservoir_remaining = tx_reservoir + initial.initial_state_gas;
+                            fr.reservoir_remaining = tx_reservoir;
                         }
                         return fr;
                     },
@@ -451,23 +447,13 @@ pub const MainnetHandler = struct {
                         exec_result.return_data = alloc_mod.get().dupe(u8, cr.return_data) catch @constCast(&[_]u8{});
                         var fr = main.FrameResult.new(exec_result, cr.gas_remaining, cr.gas_refunded);
                         fr.reservoir_remaining = cr.state_gas_remaining;
-                        // EIP-8037 (Amsterdam): a top-level CREATE-tx whose target address was
-                        // already alive before creation (pre-funded / pre-existing) does not add
-                        // a NEW account, so the reference refunds the intrinsic NEW_ACCOUNT state
-                        // gas (fork.py: `tx.to == Bytes0 and created_target_alive`). The intrinsic
-                        // was charged via initial_gas rather than the reservoir, so refund it here
-                        // on success. (The create-failure/halt path below refunds it separately,
-                        // matching the `error is not None` arm of the same condition.)
-                        if (primitives.isEnabledIn(spec, .amsterdam) and cr.success and s.target_alive) {
-                            fr.reservoir_remaining += initial.initial_state_gas;
-                        }
                         // EIP-8037 (Amsterdam): on top-level CREATE-tx halt/revert the account
-                        // was never created, so return the non-spilled initcode state gas plus
-                        // the intrinsic NEW_ACCOUNT*CPSB to the reservoir. The spilled portion was
-                        // drawn from regular gas — on revert it returns to regular gas, on halt it
-                        // stays burned (reference refill_frame_state_gas, gas_left burned on halt).
+                        // was never created, so return the non-spilled initcode state gas to the
+                        // reservoir. The spilled portion was drawn from regular gas — on revert it
+                        // returns to regular gas, on halt it stays burned (reference
+                        // refill_frame_state_gas, gas_left burned on halt).
                         if (primitives.isEnabledIn(spec, .amsterdam) and !cr.success) {
-                            fr.reservoir_remaining += (ir.state_gas_used -| ir.state_gas_spilled) + initial.initial_state_gas;
+                            fr.reservoir_remaining += ir.state_gas_used -| ir.state_gas_spilled;
                             if (cr_status == .Revert) fr.gas_remaining += ir.state_gas_spilled;
                             fr.result.state_gas_used = 0;
                         }
@@ -493,7 +479,7 @@ pub const MainnetHandler = struct {
                         // delegations' state charges refill the reservoir and settlement
                         // returns it whole (reference: gas_used == TX_MAX_GAS_LIMIT exactly,
                         // however much extra gas was sent above the cap).
-                        fr.reservoir_remaining = tx_reservoir + initial.initial_state_gas;
+                        fr.reservoir_remaining = tx_reservoir;
                         return fr;
                     }
                     if (initial.auth_regular_charge > 0 or initial.auth_state_charge > 0) {
@@ -760,18 +746,7 @@ pub const MainnetHandler = struct {
         else
             0;
         const auth_refund = @as(u64, @intCast(@max(0, initial_gas.auth_refund)));
-        // EIP-8037 (Amsterdam+): auth_state_refund (112*cpsb per valid existing auth) bypasses
-        // the 1/5 cap — it is a pre-payment correction, not an SSTORE clearing reward.
-        const auth_state_refund: u64 = if (is_amsterdam)
-            initial_gas.auth_state_refund
-        else
-            0;
-        // EIP-7702/8037: the regular-lane ACCOUNT_WRITE refund for auths (to existing accounts
-        // or fully-refunded invalid auths) goes into the capped refund counter (reference
-        // interpreter.py: refund_counter += auth_regular_refund), subject to the 1/5 cap —
-        // applied regardless of execution outcome since auth processing is committed pre-exec.
-        const auth_regular_refund: u64 = if (is_amsterdam) initial_gas.auth_regular_refund else 0;
-        const raw_refund: u64 = exec_refund + auth_refund + auth_regular_refund;
+        const raw_refund: u64 = exec_refund + auth_refund;
         const quotient: u64 = if (is_london) 5 else 2;
         // EIP-3529 refund cap: min(refund, gas_used / max_refund_quotient) where gas_used is
         // the TOTAL gas consumed (intrinsic + execution), not just execution gas.
@@ -838,22 +813,13 @@ pub const MainnetHandler = struct {
         //   - receipt cumulativeGasUsed = final_cost (= regular_after_refunds + state)
         //   - block gasUsed = max(regular_before_refunds, state_gas) (no refunds deducted)
         if (is_amsterdam) {
-            // block_base = final_cost + capped_refund. SSTORE refunds are NOT deducted per EIP-7778;
-            // auth_state_refund is a pre-payment correction applied against initial_state_gas below.
+            // block_base = final_cost + capped_refund. SSTORE refunds are NOT deducted per EIP-7778.
             const block_base = final_cost + capped_refund;
             if (result.result.status == .Success) {
-                // glamsterdam-devnet-6: block_gas_used is the 2D max(regular, state). Intrinsic state
-                // gas is pre-paid via balance and excluded from the block accounting — only
-                // EXECUTION state gas (SSTORE etc., spends via spendStateGas) counts toward
-                // the block-level state lane.
-                // auth_state_refund corrects intrinsic overcharges (STATE_BYTES_PER_NEW_ACCOUNT /
-                // STATE_BYTES_PER_AUTH_BASE), so it reduces initial_state_gas, not the execution lane.
-                const initial_after_auth_refund = if (initial_gas.initial_state_gas > auth_state_refund)
-                    initial_gas.initial_state_gas - auth_state_refund
-                else
-                    0;
-                const total_state_pricing = initial_after_auth_refund + result.result.state_gas_used;
-                const regular_for_block = if (block_base > total_state_pricing) block_base - total_state_pricing else 0;
+                // glamsterdam-devnet-6: block_gas_used is the 2D max(regular, state). The intrinsic
+                // is entirely regular gas post-EIP-2780 (no state-gas component), so only EXECUTION
+                // state gas (SSTORE etc., spent via spendStateGas) counts toward the state lane.
+                const regular_for_block = if (block_base > result.result.state_gas_used) block_base - result.result.state_gas_used else 0;
                 result.result.block_gas_used = @max(regular_for_block, result.result.state_gas_used);
             } else {
                 // EIP-8037 (Amsterdam+): failed tx block gas capped at TX_MAX_GAS_LIMIT (1<<24).

@@ -170,7 +170,6 @@ pub const Validation = struct {
         return InitialAndFloorGas{
             .initial_gas = initial_gas,
             .floor_gas = floor_gas,
-            .initial_state_gas = 0,
         };
     }
 
@@ -602,17 +601,6 @@ pub const InitialAndFloorGas = struct {
     /// 25,000 (PER_EMPTY_ACCOUNT_COST) added for each valid authorization that sets code.
     /// Applied in postExecution with the standard 1/5 cap against total gas used.
     auth_refund: i64 = 0,
-    /// EIP-8037 (Amsterdam+): state gas portion of the intrinsic cost.
-    /// For CREATE: STATE_BYTES_PER_NEW_ACCOUNT * CPSB.
-    /// For EIP-7702 auth entries: (STATE_BYTES_PER_AUTH_BASE + STATE_BYTES_PER_NEW_ACCOUNT) * CPSB per auth.
-    initial_state_gas: u64 = 0,
-    /// EIP-8037 (Amsterdam+): state gas refunded for valid auths to existing accounts.
-    /// 112*cpsb per valid auth applied to an existing (non-empty) account. Bypasses 1/5 cap.
-    auth_state_refund: u64 = 0,
-    /// EIP-8037 (Amsterdam+): regular gas refunded for valid auths to existing accounts.
-    /// AM_ACCOUNT_WRITE (8000) per valid auth to an existing account — the regular-lane
-    /// counterpart of the new-account pre-payment. Bypasses the 1/5 cap.
-    auth_regular_refund: u64 = 0,
     /// EIP-2780 devnet-7 (Amsterdam+): regular gas charged at the top frame for EIP-7702
     /// authorizations (reference set_delegation). ACCOUNT_WRITE (8000) per authority whose
     /// leaf is first written by an authorization (sender/recipient already written are free).
