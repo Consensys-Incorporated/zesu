@@ -196,12 +196,6 @@ pub const MainnetHandler = struct {
                 defer written.deinit();
                 var delegation_set_for = std.AutoHashMap(primitives.Address, void).init(alloc_mod.get());
                 defer delegation_set_for.deinit();
-                // Authorities for which NEW_ACCOUNT was already charged this tx. `account_exists`
-                // (reference) becomes true after the first auth creates the account, so a later
-                // auth on the same authority must not re-charge NEW_ACCOUNT (loaded_as_not_existing
-                // is the cached first-load flag and stays true).
-                var created = std.AutoHashMap(primitives.Address, void).init(alloc_mod.get());
-                defer created.deinit();
                 if (is_amsterdam) {
                     written.put(tx.caller, {}) catch {};
                     if (tx.value > 0) {
@@ -285,12 +279,14 @@ pub const MainnetHandler = struct {
                                         // first load, but goes stale once an earlier auth (this tx or a
                                         // prior one) creates the account — so also require the current
                                         // account to be empty (no nonce/balance/code). Matches the
-                                        // reference account_exists check evaluated per authorization.
+                                        // reference account_exists check evaluated per authorization:
+                                        // an earlier auth on the same authority always bumps its nonce,
+                                        // so aliveness alone prevents re-charging NEW_ACCOUNT.
                                         const currently_alive = journaled.account.info.nonce > 0 or
                                             journaled.account.info.balance > 0 or
                                             !std.mem.eql(u8, &journaled.account.info.code_hash, &primitives.KECCAK_EMPTY);
                                         const charge_new_account = journaled.account.status.loaded_as_not_existing and
-                                            !currently_alive and !created.contains(authority_addr);
+                                            !currently_alive;
                                         if (charge_new_account)
                                             this_state += interpreter_mod.gas_costs.STATE_BYTES_PER_NEW_ACCOUNT * amsterdam_cpsb;
                                         const charge_account_write = !written.contains(authority_addr);
@@ -324,7 +320,6 @@ pub const MainnetHandler = struct {
                                         // Commit this auth's charge and bookkeeping.
                                         initial_gas.auth_regular_charge += this_regular;
                                         initial_gas.auth_state_charge += this_state;
-                                        if (charge_new_account) created.put(authority_addr, {}) catch {};
                                         if (charge_account_write) written.put(authority_addr, {}) catch {};
                                         if (!auth_address_is_zero) delegation_set_for.put(authority_addr, {}) catch {};
                                     } else {
