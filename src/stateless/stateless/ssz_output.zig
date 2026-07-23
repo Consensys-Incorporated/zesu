@@ -530,14 +530,26 @@ fn htBuilderExitList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
     return mixInLength(sparseRoot(roots, list_depth), n);
 }
 
-/// hash_tree_root for SszExecutionRequests container (5 fields → pad to 8).
-fn htExecutionRequests(alloc: std.mem.Allocator, er: input.ExecutionRequests) ![32]u8 {
+/// ProtocolFork index of Amsterdam, as carried by the canonical input's schema byte.
+const AMSTERDAM_FORK_IDX: u64 = 0x15;
+
+/// hash_tree_root for SszExecutionRequests container. EIP-8282 widens it from 3 fields
+/// to 5 at Amsterdam, which moves the padded width from 4 leaves to 8.
+fn htExecutionRequests(
+    alloc: std.mem.Allocator,
+    active_fork_idx: u64,
+    er: input.ExecutionRequests,
+) ![32]u8 {
     const h0 = try htDepositList(alloc, er.deposits);
     const h1 = try htWithdrawalRequestList(alloc, er.withdrawals);
     const h2 = try htConsolidationRequestList(alloc, er.consolidations);
+    const z = [_]u8{0} ** 32;
+    if (active_fork_idx < AMSTERDAM_FORK_IDX) {
+        // 4 leaves: [h0,h1,h2,0]
+        return sha2(sha2(h0, h1), sha2(h2, z));
+    }
     const h3 = try htBuilderDepositList(alloc, er.builder_deposits);
     const h4 = try htBuilderExitList(alloc, er.builder_exits);
-    const z = [_]u8{0} ** 32;
     // 8 leaves: [h0,h1,h2,h3,h4,0,0,0]
     const l0 = sha2(sha2(h0, h1), sha2(h2, h3));
     const l1 = sha2(sha2(h4, z), sha2(z, z));
@@ -552,11 +564,15 @@ fn htExecutionRequests(alloc: std.mem.Allocator, er: input.ExecutionRequests) ![
 ///   versioned_hashes:         List[Bytes32, 4096]
 ///   parent_beacon_block_root: Bytes32
 ///   execution_requests:       SszExecutionRequests
-pub fn newPayloadRequestRoot(alloc: std.mem.Allocator, req: input.NewPayloadRequest) ![32]u8 {
+pub fn newPayloadRequestRoot(
+    alloc: std.mem.Allocator,
+    active_fork_idx: u64,
+    req: input.NewPayloadRequest,
+) ![32]u8 {
     const h0 = try htExecutionPayload(alloc, req.execution_payload);
     const h1 = htVersionedHashes(req.versioned_hashes);
     const h2 = htBytes32(req.parent_beacon_block_root);
-    const h3 = try htExecutionRequests(alloc, req.execution_requests);
+    const h3 = try htExecutionRequests(alloc, active_fork_idx, req.execution_requests);
 
     // merkleize([h0, h1, h2, h3]): 4 chunks, power of 2
     return sha2(sha2(h0, h1), sha2(h2, h3));
@@ -622,20 +638,19 @@ pub const DEFAULT_FAILED_OUTPUT: [61]u8 = blk: {
 /// patched in after copying the constant.
 pub fn serialize(
     alloc: std.mem.Allocator,
+    chain_config: input.ChainConfig,
     req: input.NewPayloadRequest,
-    chain_id: u64,
     successful_validation: bool,
-    activation_timestamp: u64,
 ) ![69]u8 {
-    const root = try newPayloadRequestRoot(alloc, req);
+    const root = try newPayloadRequestRoot(alloc, chain_config.active_fork_idx, req);
     var out: [69]u8 = undefined;
     @memcpy(out[0..32], &root);
     out[32] = if (successful_validation) 0x01 else 0x00;
     @memcpy(out[33..69], &SSZ_CHAIN_CONFIG_AMSTERDAM_MAINNET);
     // chain_id (u64 LE) at out[37..45], immediately after the 4-byte chain_config offset.
-    std.mem.writeInt(u64, out[37..45], chain_id, .little);
+    std.mem.writeInt(u64, out[37..45], chain_config.chain_id, .little);
     // activation.timestamp (u64 LE) at out[61..69] — echo the input's activation timestamp
     // rather than the mainnet default so rejected future-activation blocks serialize correctly.
-    std.mem.writeInt(u64, out[61..69], activation_timestamp, .little);
+    std.mem.writeInt(u64, out[61..69], chain_config.activation_timestamp orelse 0, .little);
     return out;
 }

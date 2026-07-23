@@ -240,7 +240,7 @@ fn runBlock(
         break :blk true;
     };
 
-    const computed = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id, successful_validation, si.chain_config.activation_timestamp orelse 0);
+    const computed = try ssz_output.serialize(alloc, si.chain_config, si.new_payload_request, successful_validation);
     if (!std.mem.eql(u8, &computed, &expected)) {
         const got_valid = computed[32] == 0x01;
         const expected_valid = expected[32] == 0x01;
