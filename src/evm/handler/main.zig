@@ -8,7 +8,6 @@ const alloc_mod = @import("zesu_allocator");
 
 // Import handler modules
 const mainnet_builder = @import("mainnet_builder.zig");
-const execution = @import("execution.zig");
 const validation = @import("validation.zig");
 
 // Re-export main components
@@ -19,12 +18,6 @@ pub const MainContext = mainnet_builder.MainContext;
 pub const MainnetHandler = mainnet_builder.MainnetHandler;
 pub const ExecuteEvm = mainnet_builder.ExecuteEvm;
 pub const ExecuteCommitEvm = mainnet_builder.ExecuteCommitEvm;
-
-// Re-export execution components
-pub const Execution = execution.Execution;
-pub const ExecutionLoop = execution.ExecutionLoop;
-pub const GasCalculation = execution.GasCalculation;
-pub const StateManagement = execution.StateManagement;
 
 // Re-export validation components
 pub const Validation = validation.Validation;
@@ -450,9 +443,6 @@ pub const testing = struct {
         // Test mainnet builder
         try mainnet_builder.testing.testMainnetBuilder();
         try mainnet_builder.testing.testMainnetHandler();
-
-        // Test execution
-        try execution.testing.testExecution();
 
         std.log.info("Handler module test passed!", .{});
     }
