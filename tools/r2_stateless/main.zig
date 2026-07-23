@@ -317,7 +317,7 @@ fn runBlock(gpa: std.mem.Allocator, alloc: std.mem.Allocator, block: std.json.Ob
 
     // Serialize the SSZ output (the guest's public commitment): 32-byte
     // new_payload_request root + 1-byte success + 72-byte SszChainConfig.
-    const computed = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id, validated, si.chain_config.activation_timestamp orelse 0);
+    const computed = try ssz_output.serialize(alloc, si.chain_config, si.new_payload_request, validated);
     const computed_hex = std.fmt.bytesToHex(computed, .lower);
 
     const ok = std.mem.eql(u8, &computed, &expected);

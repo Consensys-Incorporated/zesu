@@ -242,6 +242,8 @@ fn buildModules(
     });
     ssz_output.addImport("input", input);
     ssz_output.addImport("accelerators", accelerators);
+    ssz_output.addImport("primitives", primitives);
+    ssz_output.addImport("hardfork", hardfork);
 
     // executor_types: shared type definitions — private (not a consumer entry point).
     const executor_types = b.createModule(.{
@@ -436,6 +438,8 @@ pub fn build(b: *std.Build) void {
     stateless_exe.root_module.addImport("zkvm_io", mods.zkvm_io);
     stateless_exe.root_module.addImport("ssz_decode", mods.ssz_decode);
     stateless_exe.root_module.addImport("accelerators", mods.accelerators);
+    stateless_exe.root_module.addImport("primitives", mods.primitives);
+    stateless_exe.root_module.addImport("hardfork", mods.hardfork);
     addCryptoLibraries(stateless_exe, target, crypto_include, libblst_path, libmcl_path, is_linux);
     b.installArtifact(stateless_exe);
     addRunStep(b, "run", "Run the zesu app", stateless_exe, &.{});

@@ -51,7 +51,7 @@ pub fn runStateless(allocator: std.mem.Allocator) !Result {
         break :blk false;
     };
 
-    const out = try ssz_output.serialize(allocator, si.new_payload_request, si.chain_config.chain_id, success, si.chain_config.activation_timestamp orelse 0);
+    const out = try ssz_output.serialize(allocator, si.chain_config, si.new_payload_request, success);
     std.log.info("root: 0x{x} success={d}", .{ out[0..32].*, @intFromBool(success) });
 
     return .{ .out = out, .len = out.len, .success = success };
