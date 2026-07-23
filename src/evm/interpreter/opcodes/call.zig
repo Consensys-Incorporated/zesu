@@ -135,17 +135,14 @@ fn callImpl(
     const pre_is_cold = h.isAddressCold(target_addr);
     // transfers_value only depends on the stack value — no account load needed.
     const transfers_value = has_value and value > 0;
-    // Worst-case pre-check (assume account non-existent) before any DB load.
-    // getCallGasCost(..., false) >= exact cost, so if this passes the account can never
-    // become a phantom BAL entry (the exact-cost check below can never OOG).
-    // Gated on Amsterdam: pre-Amsterdam has no BAL and G_NEWACCOUNT makes the worst-case
-    // overly conservative for existing accounts, causing false OOG.
-    if (primitives.isEnabledIn(spec, .amsterdam)) {
-        const worst_case = gas_costs.getCallGasCost(spec, pre_is_cold, transfers_value, false);
-        if (ctx.interpreter.gas.remaining < worst_case) {
-            ctx.interpreter.halt(.out_of_gas);
-            return;
-        }
+    // Lower-bound pre-check before any DB load, mirroring the execution-specs gas check that
+    // precedes the state access, so an unaffordable target is never read and needs no witness
+    // proof. Assuming the account exists keeps the bound under the exact cost, so this only
+    // fires when the call runs out of gas either way.
+    const min_cost = gas_costs.getCallGasCost(spec, pre_is_cold, transfers_value, true);
+    if (ctx.interpreter.gas.remaining < min_cost) {
+        ctx.interpreter.halt(.out_of_gas);
+        return;
     }
 
     // Load target account info (warm/cold, emptiness) and code (for EIP-7702) in one shot.
