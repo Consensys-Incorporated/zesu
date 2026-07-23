@@ -27,12 +27,6 @@ pub const ContextError = @import("context.zig").ContextError;
 pub const LocalContext = @import("local.zig").LocalContext;
 pub const Context = @import("context.zig").Context;
 pub const DefaultContext = @import("context.zig").DefaultContext;
-pub const Evm = @import("evm.zig").Evm;
-
-// Re-export all context types
-pub const BlockEnvBuilder = @import("block.zig").BlockEnvBuilder;
-pub const TxEnvBuilder = @import("tx.zig").TxEnvBuilder;
-pub const CfgEnvBuilder = @import("cfg.zig").CfgEnvBuilder;
 
 // Testing functions
 pub const testing = struct {
@@ -121,27 +115,5 @@ pub const testing = struct {
         std.debug.assert(ctx.ctx_error == ContextError.ok);
 
         std.debug.print("Context tests passed.\n", .{});
-    }
-
-    pub fn testEvm() !void {
-        std.debug.print("Testing Evm...\n", .{});
-
-        var gpa = std.heap.DebugAllocator(.{}){};
-        defer _ = gpa.deinit();
-        const allocator = gpa.allocator();
-
-        var db = database.InMemoryDB.init(allocator);
-        defer db.deinit();
-
-        const ctx = DefaultContext.new(db, primitives.SpecId.prague);
-        const evm = Evm.new(ctx, {}, {});
-
-        std.debug.assert(evm.ctx.block.number == @as(primitives.U256, 0));
-        std.debug.assert(evm.ctx.tx.tx_type == 0);
-        std.debug.assert(evm.ctx.cfg.spec == primitives.SpecId.prague);
-        std.debug.assert(evm.ctx.local.shared_memory_buffer == null);
-        std.debug.assert(evm.ctx.ctx_error == ContextError.ok);
-
-        std.debug.print("Evm tests passed.\n", .{});
     }
 };

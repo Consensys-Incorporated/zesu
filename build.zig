@@ -15,7 +15,6 @@ const ModuleSet = struct {
     precompile: *std.Build.Module,
     interpreter: *std.Build.Module,
     handler: *std.Build.Module,
-    inspector: *std.Build.Module,
     input: *std.Build.Module,
     output: *std.Build.Module,
     hardfork: *std.Build.Module,
@@ -175,16 +174,6 @@ fn buildModules(
     handler.addImport("precompile", precompile);
     handler.addImport("zesu_allocator", zesu_allocator);
 
-    const inspector = mkmod(b, expose, "inspector", .{
-        .root_source_file = b.path("src/evm/inspector/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    inspector.addImport("primitives", primitives);
-    inspector.addImport("context", context);
-    inspector.addImport("interpreter", interpreter);
-    inspector.addImport("database", database);
-
     // ── Stateless base ──────────────────────────────────────────────────────
     const input = mkmod(b, expose, "input", .{
         .root_source_file = b.path("src/stateless/input.zig"),
@@ -336,7 +325,6 @@ fn buildModules(
         .precompile = precompile,
         .interpreter = interpreter,
         .handler = handler,
-        .inspector = inspector,
         .input = input,
         .output = output,
         .hardfork = hardfork,
