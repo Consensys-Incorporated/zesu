@@ -15,6 +15,8 @@
 const std = @import("std");
 const input = @import("input");
 const accel = @import("accelerators");
+const primitives = @import("primitives");
+const hardfork = @import("hardfork");
 
 // ── SHA-256 ───────────────────────────────────────────────────────────────────
 
@@ -530,21 +532,18 @@ fn htBuilderExitList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
     return mixInLength(sparseRoot(roots, list_depth), n);
 }
 
-/// ProtocolFork index of Amsterdam, as carried by the canonical input's schema byte.
-const AMSTERDAM_FORK_IDX: u64 = 0x15;
-
 /// hash_tree_root for SszExecutionRequests container. EIP-8282 widens it from 3 fields
 /// to 5 at Amsterdam, which moves the padded width from 4 leaves to 8.
 fn htExecutionRequests(
     alloc: std.mem.Allocator,
-    active_fork_idx: u64,
+    spec: primitives.SpecId,
     er: input.ExecutionRequests,
 ) ![32]u8 {
     const h0 = try htDepositList(alloc, er.deposits);
     const h1 = try htWithdrawalRequestList(alloc, er.withdrawals);
     const h2 = try htConsolidationRequestList(alloc, er.consolidations);
     const z = [_]u8{0} ** 32;
-    if (active_fork_idx < AMSTERDAM_FORK_IDX) {
+    if (!primitives.isEnabledIn(spec, .amsterdam)) {
         // 4 leaves: [h0,h1,h2,0]
         return sha2(sha2(h0, h1), sha2(h2, z));
     }
@@ -566,13 +565,13 @@ fn htExecutionRequests(
 ///   execution_requests:       SszExecutionRequests
 pub fn newPayloadRequestRoot(
     alloc: std.mem.Allocator,
-    active_fork_idx: u64,
+    spec: primitives.SpecId,
     req: input.NewPayloadRequest,
 ) ![32]u8 {
     const h0 = try htExecutionPayload(alloc, req.execution_payload);
     const h1 = htVersionedHashes(req.versioned_hashes);
     const h2 = htBytes32(req.parent_beacon_block_root);
-    const h3 = try htExecutionRequests(alloc, active_fork_idx, req.execution_requests);
+    const h3 = try htExecutionRequests(alloc, spec, req.execution_requests);
 
     // merkleize([h0, h1, h2, h3]): 4 chunks, power of 2
     return sha2(sha2(h0, h1), sha2(h2, h3));
@@ -642,7 +641,8 @@ pub fn serialize(
     req: input.NewPayloadRequest,
     successful_validation: bool,
 ) ![69]u8 {
-    const root = try newPayloadRequestRoot(alloc, chain_config.active_fork_idx, req);
+    const spec = hardfork.specFromFork(chain_config.fork_name orelse "") orelse .frontier;
+    const root = try newPayloadRequestRoot(alloc, spec, req);
     var out: [69]u8 = undefined;
     @memcpy(out[0..32], &root);
     out[32] = if (successful_validation) 0x01 else 0x00;
