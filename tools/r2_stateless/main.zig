@@ -284,17 +284,31 @@ fn appendResult(gpa: std.mem.Allocator, results: *std.ArrayList(BlockResult), nu
 // ── HTTP / compression / hashing helpers ──────────────────────────────────────
 
 fn httpGet(gpa: std.mem.Allocator, client: *std.http.Client, url: []const u8) ![]u8 {
-    var aw = std.Io.Writer.Allocating.init(gpa);
-    defer aw.deinit();
-    const res = try client.fetch(.{
-        .location = .{ .url = url },
-        .response_writer = &aw.writer,
-    });
-    if (res.status != .ok) {
-        std.debug.print("error: HTTP {d} for {s}\n", .{ @intFromEnum(res.status), url });
-        return error.HttpStatus;
+    const max_attempts = 3;
+    var last_err: anyerror = error.HttpStatus;
+    for (0..max_attempts) |attempt| {
+        if (attempt > 0) {
+            std.debug.print("  retry {d}/{d} after transport error ({s})\n", .{ attempt, max_attempts - 1, @errorName(last_err) });
+            const ts = std.c.timespec{ .sec = 3, .nsec = 0 };
+            _ = std.c.nanosleep(&ts, null);
+        }
+        var aw = std.Io.Writer.Allocating.init(gpa);
+        defer aw.deinit();
+        const res = client.fetch(.{
+            .location = .{ .url = url },
+            .response_writer = &aw.writer,
+        }) catch |err| {
+            last_err = err;
+            continue;
+        };
+        if (res.status != .ok) {
+            std.debug.print("error: HTTP {d} for {s}\n", .{ @intFromEnum(res.status), url });
+            return error.HttpStatus;
+        }
+        return gpa.dupe(u8, aw.writer.buffered());
     }
-    return gpa.dupe(u8, aw.writer.buffered());
+    std.debug.print("error: {d} attempts failed for {s}: {s}\n", .{ max_attempts, url, @errorName(last_err) });
+    return last_err;
 }
 
 fn zstdDecompress(gpa: std.mem.Allocator, comp: []const u8) ![]u8 {
