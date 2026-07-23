@@ -648,7 +648,7 @@ pub fn build(b: *std.Build) void {
     // ── r2-stateless: execute latest R2 devnet batch natively ─────────────────
     // The catalog URL is defined here (single source of truth) and baked into
     // the tool as its default; the tool still accepts a runtime --catalog override.
-    const r2_catalog_url = "https://pub-5345007fbd06486bbb7cbbe9f3112c45.r2.dev/devnets/glamsterdam-devnet-5";
+    const r2_catalog_url = "https://pub-df22334654034ebab51bc096137a59d8.r2.dev/devnets/glamsterdam-devnet-7";
     const r2_options = b.addOptions();
     r2_options.addOption([]const u8, "catalog_url", r2_catalog_url);
 

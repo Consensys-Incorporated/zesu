@@ -10,11 +10,16 @@
 //! The R2 catalog layout (see <catalog>/index.html):
 //!   batches.jsonl                    one JSON object per batch, oldest → newest
 //!   exports/batches/<a>-<b>.tar.zst  zstd tarball of block artifacts + manifest
-//! Each block artifact is blocks/NNNNNN/<block>-<hash>.json.zst, a flat JSON
-//! object carrying `statelessInputBytes` (hex SSZ) and no expected output. A
-//! block "passes" iff execution succeeds AND the computed post-state/receipts
-//! roots match the roots claimed in the payload (executeStatelessInput errors
-//! otherwise).
+//! Each block artifact is blockchain_tests/NNNNNN/<block>-<hash>.json (plain
+//! JSON; only the tarball itself is zstd-compressed), in the canonical EEST
+//! blockchain-test fixture format:
+//!   { "<test-name>": { "network", "config", "blocks": [
+//!       { "statelessInputBytes": "0x..", "statelessOutputBytes": "0x..", "blockHeader" }
+//!   ], "_info" } }
+//! `statelessOutputBytes` is the authoritative expected SSZ output. A block
+//! "passes" iff execution succeeds AND the computed SSZ output matches it
+//! byte-for-byte (executeStatelessInput itself validates the post-state/
+//! receipts roots against the payload as part of producing that output).
 //!
 //! Usage:
 //!   r2-stateless [--catalog URL] [--batches N] [--strict]
@@ -28,6 +33,7 @@ const std = @import("std");
 const ssz_decode = @import("ssz_decode");
 const ssz_output = @import("ssz_output");
 const executor = @import("executor");
+const executor_exceptions = @import("executor").executor_exceptions;
 const build_options = @import("build_options");
 const zstd = std.compress.zstd;
 
@@ -193,8 +199,8 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-/// Iterate a tar archive (in memory), decompress each `*.json.zst` block
-/// artifact, and execute it. Appends one BlockResult per artifact.
+/// Iterate a tar archive (in memory) and execute each `*.json` block
+/// artifact. Appends one BlockResult per block.
 fn runTar(gpa: std.mem.Allocator, tar_bytes: []const u8, results: *std.ArrayList(BlockResult)) !void {
     var tar_reader = std.Io.Reader.fixed(tar_bytes);
     var name_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -206,20 +212,20 @@ fn runTar(gpa: std.mem.Allocator, tar_bytes: []const u8, results: *std.ArrayList
 
     while (try it.next()) |file| {
         if (file.kind != .file) continue;
-        if (!std.mem.endsWith(u8, file.name, ".json.zst")) continue;
+        if (!std.mem.endsWith(u8, file.name, ".json")) continue;
 
-        // Read the (zstd-compressed) artifact out of the tar stream.
         var aw = std.Io.Writer.Allocating.init(gpa);
         defer aw.deinit();
         try it.streamRemaining(file, &aw.writer);
-        const artifact_json = try zstdDecompress(gpa, aw.writer.buffered());
-        defer gpa.free(artifact_json);
 
-        try runArtifact(gpa, artifact_json, results);
+        try runArtifact(gpa, aw.writer.buffered(), results);
     }
 }
 
-/// Decode + execute one block artifact (a per-block arena bounds peak memory).
+/// Decode + execute every block in one canonical EEST blockchain-test
+/// fixture (a per-artifact arena bounds peak memory):
+///   { "<test-name>": { "blocks": [ { statelessInputBytes,
+///     statelessOutputBytes, blockHeader: { number, .. } } ] } }
 fn runArtifact(gpa: std.mem.Allocator, artifact_json: []const u8, results: *std.ArrayList(BlockResult)) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -228,47 +234,109 @@ fn runArtifact(gpa: std.mem.Allocator, artifact_json: []const u8, results: *std.
     const parsed = std.json.parseFromSlice(std.json.Value, alloc, artifact_json, .{}) catch {
         return; // not a block artifact
     };
-    const obj = parsed.value.object;
+    if (parsed.value != .object) return;
 
-    const in_val = obj.get("statelessInputBytes") orelse return;
+    var test_it = parsed.value.object.iterator();
+    while (test_it.next()) |test_kv| {
+        const test_case = test_kv.value_ptr.*;
+        if (test_case != .object) continue;
+
+        const blocks_val = test_case.object.get("blocks") orelse continue;
+        if (blocks_val != .array) continue;
+
+        for (blocks_val.array.items) |block_val| {
+            if (block_val != .object) continue;
+            try runBlock(gpa, alloc, block_val.object, results);
+        }
+    }
+}
+
+/// Decode + execute one block, and check the computed SSZ output against
+/// the fixture's authoritative `statelessOutputBytes` byte-for-byte.
+fn runBlock(gpa: std.mem.Allocator, alloc: std.mem.Allocator, block: std.json.ObjectMap, results: *std.ArrayList(BlockResult)) !void {
+    const number: u64 = blk: {
+        const bh = block.get("blockHeader") orelse break :blk 0;
+        if (bh != .object) break :blk 0;
+        break :blk jsonU64(bh.object.get("number"));
+    };
+
+    const in_val = block.get("statelessInputBytes") orelse return;
     if (in_val != .string) return;
-    const number = jsonU64(obj.get("blockNumber"));
+    const out_val = block.get("statelessOutputBytes") orelse return;
+    if (out_val != .string) return;
 
     const in_hex = in_val.string;
-    const stripped = if (std.mem.startsWith(u8, in_hex, "0x")) in_hex[2..] else in_hex;
-    const input_bytes = try alloc.alloc(u8, stripped.len / 2);
-    _ = std.fmt.hexToBytes(input_bytes, stripped) catch {
+    const in_stripped = if (std.mem.startsWith(u8, in_hex, "0x")) in_hex[2..] else in_hex;
+    const input_bytes = try alloc.alloc(u8, in_stripped.len / 2);
+    _ = std.fmt.hexToBytes(input_bytes, in_stripped) catch {
         try appendResult(gpa, results, number, false, "invalid statelessInputBytes hex");
         return;
     };
 
-    const si = ssz_decode.decode(alloc, input_bytes) catch |err| {
-        try appendResult(gpa, results, number, false, @errorName(err));
+    const out_hex = out_val.string;
+    const out_stripped = if (std.mem.startsWith(u8, out_hex, "0x")) out_hex[2..] else out_hex;
+
+    // EIP-8025 (optional proofs): when the stateless input cannot be decoded, the guest
+    // emits the "default failed" result (root=0, successful_validation=false, default
+    // ChainConfig) — reference stateless_guest run_stateless_guest /
+    // _default_failed_stateless_output. The fixture's expected output for such blocks is
+    // exactly ssz_output.DEFAULT_FAILED_OUTPUT (61 bytes), not the normal 69-byte
+    // SszStatelessValidationResult, so the decode attempt must come before any length check
+    // on statelessOutputBytes.
+    const si = ssz_decode.decode(alloc, input_bytes) catch {
+        const failed_hex = std.fmt.bytesToHex(ssz_output.DEFAULT_FAILED_OUTPUT, .lower);
+        const ok = std.ascii.eqlIgnoreCase(out_stripped, &failed_hex);
+        try appendResult(gpa, results, number, ok, if (ok) "" else "input failed to decode; fixture does not expect default-failed output");
+        if (ok) {
+            std.debug.print("PASS block {d}  output=0x{s}\n", .{ number, &failed_hex });
+        } else {
+            std.debug.print("FAIL block {d}  input failed to decode; fixture expects 0x{s}\n", .{ number, out_stripped });
+        }
+        return;
+    };
+
+    if (out_stripped.len != 138) {
+        try appendResult(gpa, results, number, false, "unexpected statelessOutputBytes length");
+        return;
+    }
+    var expected: [69]u8 = undefined;
+    _ = std.fmt.hexToBytes(&expected, out_stripped) catch {
+        try appendResult(gpa, results, number, false, "invalid statelessOutputBytes hex");
         return;
     };
 
     // Execute via the same entry point the zkVM guest wraps (run.zig →
     // executeStatelessInput). The executor validates the block — including the
     // post-state/receipts roots against the payload (StateRootMismatch /
-    // ReceiptsRootMismatch) alongside its gas/blob/BAL checks — so a successful
-    // return means the block validated; any error is the failure reason.
-    var ok = false;
-    var reason: []const u8 = "";
-    if (executor.executeStatelessInput(alloc, si, si.chain_config.fork_name)) |_| {
-        ok = true;
-    } else |err| {
-        reason = @errorName(err);
-    }
+    // ReceiptsRootMismatch) alongside its gas/blob/BAL checks.
+    var exec_err: anyerror = error.Success;
+    const validated = if (executor.executeStatelessInput(alloc, si, si.chain_config.fork_name)) |_| true else |err| blk: {
+        exec_err = err;
+        break :blk false;
+    };
 
     // Serialize the SSZ output (the guest's public commitment): 32-byte
     // new_payload_request root + 1-byte success + 72-byte SszChainConfig.
-    const out = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id, ok, si.chain_config.activation_timestamp orelse 0);
-    const out_hex = std.fmt.bytesToHex(out, .lower);
+    const computed = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id, validated, si.chain_config.activation_timestamp orelse 0);
+    const computed_hex = std.fmt.bytesToHex(computed, .lower);
+
+    const ok = std.mem.eql(u8, &computed, &expected);
+    var reason: []const u8 = "";
+    if (!ok) {
+        const got_valid = computed[32] == 0x01;
+        const expected_valid = expected[32] == 0x01;
+        reason = if (expected_valid and !got_valid)
+            executor_exceptions.mapBlockError(exec_err) orelse executor_exceptions.mapTransactionError(exec_err)
+        else if (!expected_valid and got_valid)
+            "expected invalid, got valid"
+        else
+            "output mismatch";
+    }
 
     if (ok) {
-        std.debug.print("PASS block {d}  output=0x{s}\n", .{ number, &out_hex });
+        std.debug.print("PASS block {d}  output=0x{s}\n", .{ number, &computed_hex });
     } else {
-        std.debug.print("FAIL block {d}  {s}  output=0x{s}\n", .{ number, reason, &out_hex });
+        std.debug.print("FAIL block {d}  {s}  output=0x{s}\n", .{ number, reason, &computed_hex });
     }
     try appendResult(gpa, results, number, ok, reason);
 }
@@ -329,7 +397,10 @@ fn jsonU64(v: ?std.json.Value) u64 {
     const val = v orelse return 0;
     return switch (val) {
         .integer => |n| if (n < 0) 0 else @intCast(n),
-        .string => |s| std.fmt.parseInt(u64, s, 10) catch 0,
+        .string => |s| if (std.mem.startsWith(u8, s, "0x"))
+            std.fmt.parseInt(u64, s[2..], 16) catch 0
+        else
+            std.fmt.parseInt(u64, s, 10) catch 0,
         else => 0,
     };
 }
@@ -365,7 +436,7 @@ fn writeSummaries(
             for (results) |r| if (!r.ok) try w.print("block {d}  {s}\n", .{ r.number, r.reason });
             try w.print("```\n", .{});
         } else {
-            try w.print("All blocks executed successfully (computed roots matched the payload).\n", .{});
+            try w.print("All blocks executed successfully (computed SSZ output matched the fixture's statelessOutputBytes).\n", .{});
         }
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = w.buffered() });
     }
