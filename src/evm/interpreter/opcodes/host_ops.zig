@@ -360,7 +360,20 @@ pub fn opSstore(ctx: *InstructionContext) void {
 
     // EIP-2200 (Istanbul+): SSTORE must not execute when gas_remaining <= CALL_STIPEND.
     // This prevents a callee that received only the 2300-gas stipend from mutating storage.
-    if (primitives.isEnabledIn(spec, .istanbul)) {
+    // EIP-8037 devnet-7 (Amsterdam+): the access cost (cold 3000) can exceed the stipend, and
+    // it must be checked BEFORE the slot is read — otherwise an OOG on the access charge would
+    // still record a spurious storage read in the block access list. Use the pre-read coldness
+    // (isStorageCold, which does not access/record the slot) to compute the access cost and gate
+    // on max(access_cost, CALL_STIPEND+1) before touching the slot (reference sstore check_gas).
+    if (primitives.isEnabledIn(spec, .amsterdam)) {
+        const is_cold_pre = h.isStorageCold(self_addr, key);
+        const access_cost: u64 = if (is_cold_pre) gas_costs.coldStorageAccess(spec) else gas_costs.WARM_SLOAD;
+        const sentry = @max(access_cost, gas_costs.CALL_STIPEND + 1);
+        if (ctx.interpreter.gas.remaining < sentry) {
+            ctx.interpreter.halt(.out_of_gas);
+            return;
+        }
+    } else if (primitives.isEnabledIn(spec, .istanbul)) {
         if (ctx.interpreter.gas.remaining <= gas_costs.CALL_STIPEND) {
             ctx.interpreter.halt(.out_of_gas);
             return;
@@ -666,5 +679,9 @@ pub fn opSelfdestruct(ctx: *InstructionContext) void {
         ctx.interpreter.gas.refunded += gas_costs.R_SELFDESTRUCT;
     }
 
+    // Per EVM spec, SELFDESTRUCT produces empty output — clear return_data so the caller's
+    // RETURNDATASIZE/RETURNDATACOPY see nothing (and stale data from a prior sub-call in this
+    // frame is not propagated as the frame's output). Mirrors STOP.
+    ctx.interpreter.return_data.data = &[_]u8{};
     ctx.interpreter.halt(.selfdestruct);
 }

@@ -143,6 +143,7 @@ pub const JournalVTable = struct {
     finalizeCall: *const fn (*Host, JournalCheckpoint, InstructionResult, u64, u64, i64, []const u8) CallResult,
     setupCreate: *const fn (*Host, primitives.Address, primitives.U256, []const u8, u64, bool, primitives.U256, bool, usize, bool) Host.CreateSetupResult,
     finalizeCreate: *const fn (*Host, JournalCheckpoint, primitives.Address, InstructionResult, u64, i64, []const u8, primitives.SpecId, bool, u64) CreateResult,
+    recordCreateTarget: *const fn (*Host, primitives.Address, primitives.U256, []const u8, bool, primitives.U256, usize) ?bool,
 
     /// Return a comptime-constant vtable for the given DB type.
     pub fn forDb(comptime DB: type) *const JournalVTable {
@@ -164,6 +165,7 @@ pub const JournalVTable = struct {
                 .finalizeCall = finalizeCallFn,
                 .setupCreate = setupCreateFn,
                 .finalizeCreate = finalizeCreateFn,
+                .recordCreateTarget = recordCreateTargetFn,
             };
 
             fn j(ptr: *anyopaque) *context_mod.Journal(DB) {
@@ -217,6 +219,9 @@ pub const JournalVTable = struct {
             }
             fn finalizeCreateFn(host: *Host, checkpoint: JournalCheckpoint, new_addr: primitives.Address, result: InstructionResult, gas_remaining: u64, gas_refunded: i64, return_data: []const u8, spec_id: primitives.SpecId, is_opcode_create: bool, gas_reservoir: u64) CreateResult {
                 return finalizeCreateCore(j(host.js), host, checkpoint, new_addr, result, gas_remaining, gas_refunded, return_data, spec_id, is_opcode_create, gas_reservoir);
+            }
+            fn recordCreateTargetFn(host: *Host, caller: primitives.Address, value: primitives.U256, init_code: []const u8, is_create2: bool, salt: primitives.U256, frame_depth: usize) ?bool {
+                return recordCreateTargetCore(j(host.js), host, caller, value, init_code, is_create2, salt, frame_depth);
             }
         };
         return &Impl.vtable;
@@ -520,6 +525,27 @@ pub const Host = struct {
         return self.js_vtable.setupCreate(self, caller, value, init_code, gas_limit, is_create2, salt, skip_nonce_bump, frame_depth, is_opcode_create);
     }
 
+    /// EIP-7928 (Amsterdam+): record the create target address in the block access list
+    /// BEFORE the NEW_ACCOUNT state-gas charge (reference generic_create:
+    /// accessed_addresses.add(contract_address) precedes charge_state_gas). Read-only —
+    /// no nonce bump, collision check, or checkpoint — so a subsequent NEW_ACCOUNT OOG
+    /// still leaves the address in the BAL. Gated by the same pre-checks that make
+    /// setupCreate return without accessing the address (depth, initcode size, balance,
+    /// nonce overflow), so no phantom entries are created.
+    /// Returns whether the create target account is already alive (has balance, nonce, or
+    /// code), so the caller can skip the NEW_ACCOUNT charge (reference is_account_alive gate).
+    pub fn recordCreateTarget(
+        self: *Host,
+        caller: primitives.Address,
+        value: primitives.U256,
+        init_code: []const u8,
+        is_create2: bool,
+        salt: primitives.U256,
+        frame_depth: usize,
+    ) ?bool {
+        return self.js_vtable.recordCreateTarget(self, caller, value, init_code, is_create2, salt, frame_depth);
+    }
+
     /// Validates deployed code, applies deposit gas, stores bytecode, and commits/reverts.
     pub fn finalizeCreate(
         self: *Host,
@@ -790,6 +816,45 @@ fn finalizeCallCore(js: anytype, checkpoint: JournalCheckpoint, result: Instruct
 }
 
 /// Core logic for setupCreate.
+/// EIP-7928 (Amsterdam+): record the create target address (read-only) before the
+/// NEW_ACCOUNT charge. Mirrors setupCreateCore's pre-checks so it only records when
+/// setupCreate would actually reach the address access — no nonce bump / checkpoint.
+fn recordCreateTargetCore(
+    js: anytype,
+    host: *Host,
+    caller: primitives.Address,
+    value: primitives.U256,
+    init_code: []const u8,
+    is_create2: bool,
+    salt: primitives.U256,
+    frame_depth: usize,
+) ?bool {
+    const spec_id = host.cfg.spec;
+    if (!primitives.isEnabledIn(spec_id, .amsterdam)) return null; // BAL is Amsterdam+ only
+    // Reference generic_create returns 0 BEFORE accessing the address or charging NEW_ACCOUNT
+    // when a pre-check fails (depth, nonce overflow, insufficient balance). Return null so the
+    // caller records nothing and charges no NEW_ACCOUNT.
+    const MAX_CALL_DEPTH = 1024;
+    if (frame_depth >= MAX_CALL_DEPTH) return null;
+    const max_initcode: usize = primitives.AMSTERDAM_MAX_INITCODE_SIZE;
+    if (init_code.len > max_initcode) return null;
+    const caller_acc = js.inner.evm_state.getPtr(caller) orelse return null;
+    if (value > 0 and caller_acc.info.balance < value) return null;
+    const nonce = caller_acc.info.nonce;
+    if (nonce == std.math.maxInt(u64)) return null;
+    const new_addr: primitives.Address = if (is_create2) blk: {
+        var init_hash: [32]u8 = undefined;
+        accel.keccak256(init_code, &init_hash);
+        break :blk create2Address(caller, salt, init_hash);
+    } else createAddress(caller, nonce);
+    const load = js.loadAccount(new_addr) catch return null;
+    // is_account_alive: reference generic_create charges NEW_ACCOUNT only when the target
+    // leaf does not already exist (balance/nonce/code present).
+    const info = load.data.info;
+    return info.balance > 0 or info.nonce > 0 or
+        !std.mem.eql(u8, &info.code_hash, &primitives.KECCAK_EMPTY);
+}
+
 fn setupCreateCore(
     js: anytype,
     host: *Host,

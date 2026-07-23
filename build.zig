@@ -15,7 +15,6 @@ const ModuleSet = struct {
     precompile: *std.Build.Module,
     interpreter: *std.Build.Module,
     handler: *std.Build.Module,
-    inspector: *std.Build.Module,
     input: *std.Build.Module,
     output: *std.Build.Module,
     hardfork: *std.Build.Module,
@@ -175,16 +174,6 @@ fn buildModules(
     handler.addImport("precompile", precompile);
     handler.addImport("zesu_allocator", zesu_allocator);
 
-    const inspector = mkmod(b, expose, "inspector", .{
-        .root_source_file = b.path("src/evm/inspector/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    inspector.addImport("primitives", primitives);
-    inspector.addImport("context", context);
-    inspector.addImport("interpreter", interpreter);
-    inspector.addImport("database", database);
-
     // ── Stateless base ──────────────────────────────────────────────────────
     const input = mkmod(b, expose, "input", .{
         .root_source_file = b.path("src/stateless/input.zig"),
@@ -242,6 +231,8 @@ fn buildModules(
     });
     ssz_output.addImport("input", input);
     ssz_output.addImport("accelerators", accelerators);
+    ssz_output.addImport("primitives", primitives);
+    ssz_output.addImport("hardfork", hardfork);
 
     // executor_types: shared type definitions — private (not a consumer entry point).
     const executor_types = b.createModule(.{
@@ -334,7 +325,6 @@ fn buildModules(
         .precompile = precompile,
         .interpreter = interpreter,
         .handler = handler,
-        .inspector = inspector,
         .input = input,
         .output = output,
         .hardfork = hardfork,
@@ -436,6 +426,8 @@ pub fn build(b: *std.Build) void {
     stateless_exe.root_module.addImport("zkvm_io", mods.zkvm_io);
     stateless_exe.root_module.addImport("ssz_decode", mods.ssz_decode);
     stateless_exe.root_module.addImport("accelerators", mods.accelerators);
+    stateless_exe.root_module.addImport("primitives", mods.primitives);
+    stateless_exe.root_module.addImport("hardfork", mods.hardfork);
     addCryptoLibraries(stateless_exe, target, crypto_include, libblst_path, libmcl_path, is_linux);
     b.installArtifact(stateless_exe);
     addRunStep(b, "run", "Run the zesu app", stateless_exe, &.{});
@@ -617,7 +609,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
-    const spec_test_version = "tests-glamsterdam-devnet@v6.1.0";
+    const spec_test_version = "tests-glamsterdam-devnet@v7.2.0";
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-specs " ++ spec_test_version ++ " fixtures");
     fetch_fixtures_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
@@ -632,7 +624,7 @@ pub fn build(b: *std.Build) void {
             "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
     }).step);
 
-    const zkevm_version = "tests-zkevm@v0.5.0";
+    const zkevm_version = "tests-zkevm@v0.6.2";
     const fetch_zkevm_step = b.step("fetch-zkevm-fixtures", "Download " ++ zkevm_version ++ " execution-specs fixtures");
     fetch_zkevm_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
@@ -648,7 +640,7 @@ pub fn build(b: *std.Build) void {
     // ── r2-stateless: execute latest R2 devnet batch natively ─────────────────
     // The catalog URL is defined here (single source of truth) and baked into
     // the tool as its default; the tool still accepts a runtime --catalog override.
-    const r2_catalog_url = "https://pub-5345007fbd06486bbb7cbbe9f3112c45.r2.dev/devnets/glamsterdam-devnet-5";
+    const r2_catalog_url = "https://pub-df22334654034ebab51bc096137a59d8.r2.dev/devnets/glamsterdam-devnet-7";
     const r2_options = b.addOptions();
     r2_options.addOption([]const u8, "catalog_url", r2_catalog_url);
 

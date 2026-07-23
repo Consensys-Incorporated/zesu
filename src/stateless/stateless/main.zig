@@ -181,7 +181,7 @@ pub fn main(init: std.process.Init) !void {
     // Emit output: SSZ 41-byte commitment for SSZ inputs; JSON summary for the dev --json path.
     switch (source) {
         .ssz_stream, .ssz_file => {
-            const ssz_bytes = try ssz_output.serialize(allocator, si.new_payload_request, si.chain_config.chain_id, true, si.chain_config.activation_timestamp orelse 0);
+            const ssz_bytes = try ssz_output.serialize(allocator, si.chain_config, si.new_payload_request, true);
             std.debug.print("  new_payload_request_root = 0x{x}\n", .{ssz_bytes[0..32].*});
             zkvm_io.write_output(&ssz_bytes);
         },

@@ -9,7 +9,6 @@ pub const context = @import("context");
 pub const interpreter = @import("interpreter");
 pub const precompile = @import("precompile");
 pub const handler = @import("handler");
-pub const inspector = @import("inspector");
 
 // Version information
 pub const version = @import("version.zig");

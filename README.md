@@ -112,6 +112,29 @@ zesu --json <block.json> <witness.json> [--fork <name>]
 
 `--fork` overrides the fork name embedded in the input (useful when the SSZ chain config is absent or you want to pin a specific EIP set, e.g. `Prague`, `Amsterdam`).
 
+## Running against devnet blocks
+
+`r2-stateless` fetches the latest stateless-input batches from a public R2 devnet catalog and executes each block natively through the same path the zkVM guest uses. No external tools required — all HTTP, zstd decompression, and JSON parsing are handled by the Zig standard library.
+
+```sh
+# Build
+zig build
+
+# Run the latest batch from the default catalog (glamsterdam-devnet-7)
+./zig-out/bin/r2-stateless
+
+# Run the latest N batches
+./zig-out/bin/r2-stateless --batches 5
+
+# Override catalog, require all blocks to pass
+./zig-out/bin/r2-stateless --catalog <URL> --batches 1 --strict
+
+# Write a Markdown / JSON summary (useful in CI)
+./zig-out/bin/r2-stateless --summary-md result.md --summary-json result.json
+```
+
+Each block is considered a pass iff execution succeeds **and** the computed SSZ output matches the fixture's `statelessOutputBytes` byte-for-byte. With `--strict` the process exits non-zero if any block fails or no blocks were executed.
+
 ## Running tests
 
 ```sh

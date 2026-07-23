@@ -1,18 +1,22 @@
-//! SSZ serialization for SszStatelessValidationResult (Amsterdam / zkevm v0.4.1 output).
+//! SSZ serialization for SszStatelessValidationResult (glamsterdam-devnet-7 / zkevm@v0.6.2).
 //!
-//! Output layout (105 bytes):
-//!   [0..32]   new_payload_request_root  Bytes32        SSZ hash_tree_root of SszNewPayloadRequest
-//!   [32]      successful_validation     boolean        0x01 = valid
-//!   [33..105] chain_config              SszChainConfig variable-length SSZ container
+//! Output layout (69 bytes):
+//!   [0..32]  new_payload_request_root  Bytes32        SSZ hash_tree_root of SszNewPayloadRequest
+//!   [32]     successful_validation     boolean        0x01 = valid
+//!   [33..69] chain_config              SszChainConfig variable-length SSZ container
 //!
-//! SszStatelessValidationResult schema (stateless_ssz.py):
+//! SszStatelessValidationResult schema (stateless_ssz.py, PR#3138):
 //!   new_payload_request_root: Bytes32
 //!   successful_validation:    boolean
 //!   chain_config:             SszChainConfig { chain_id: uint64, active_fork: SszForkConfig }
+//!
+//! SszForkConfig (v0.6.2): fork and blob_schedule removed; only activation remains.
 
 const std = @import("std");
 const input = @import("input");
 const accel = @import("accelerators");
+const primitives = @import("primitives");
+const hardfork = @import("hardfork");
 
 // ── SHA-256 ───────────────────────────────────────────────────────────────────
 
@@ -383,15 +387,19 @@ fn htVersionedHashes(hashes: []const [32]u8) [32]u8 {
 
 // ── SszExecutionRequests hash_tree_root ──────────────────────────────────────
 //
-// SszExecutionRequests is a 3-field container (pad to 4 for merkleization):
-//   deposits:      List[SszDepositRequest,      2^13]   depth=13
-//   withdrawals:   List[SszWithdrawalRequest,   2^4]    depth=4
-//   consolidations:List[SszConsolidationRequest,2^1]    depth=1
+// SszExecutionRequests is a 5-field container (pad to 8 for merkleization):
+//   deposits:        List[SszDepositRequest,        2^13]  depth=13
+//   withdrawals:     List[SszWithdrawalRequest,     2^4]   depth=4
+//   consolidations:  List[SszConsolidationRequest,  2^1]   depth=1
+//   builder_deposits:List[SszBuilderDepositRequest, 2^6]   depth=6   (EIP-8282, Amsterdam+)
+//   builder_exits:   List[SszBuilderExitRequest,    2^4]   depth=4   (EIP-8282, Amsterdam+)
 //
 // Fixed item sizes:
 //   SszDepositRequest:       pubkey(48)+withdrawal_creds(32)+amount(8)+signature(96)+index(8) = 192
 //   SszWithdrawalRequest:    source_address(20)+validator_pubkey(48)+amount(8) = 76
 //   SszConsolidationRequest: source_address(20)+source_pubkey(48)+target_pubkey(48) = 116
+//   SszBuilderDepositRequest:pubkey(48)+withdrawal_creds(32)+amount(8)+signature(96) = 184
+//   SszBuilderExitRequest:   source_address(20)+pubkey(48) = 68
 
 /// ByteVector[48]: 2 chunks — sha2(bytes[0..32], bytes[32..48] || 0*16).
 fn htBytes48(b: *const [48]u8) [32]u8 {
@@ -442,6 +450,26 @@ fn htConsolidationRequest(bytes: *const [116]u8) [32]u8 {
     return merkleizeExact(&chunks);
 }
 
+fn htBuilderDepositRequest(bytes: *const [184]u8) [32]u8 {
+    // 4 fields → 4 chunks (pubkey, withdrawal_credentials, amount, signature)
+    const chunks: [4][32]u8 = .{
+        htBytes48(bytes[0..48]),
+        bytes[48..80].*,
+        htU64(std.mem.readInt(u64, bytes[80..88], .little)),
+        htBytes96(bytes[88..184]),
+    };
+    return merkleizeExact(&chunks);
+}
+
+fn htBuilderExitRequest(bytes: *const [68]u8) [32]u8 {
+    // 2 fields → 2 chunks (source_address, pubkey)
+    const chunks: [2][32]u8 = .{
+        htBytes20(bytes[0..20].*),
+        htBytes48(bytes[20..68]),
+    };
+    return merkleizeExact(&chunks);
+}
+
 fn htDepositList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
     const SIZE = 192;
     const list_depth = 13;
@@ -478,12 +506,53 @@ fn htConsolidationRequestList(alloc: std.mem.Allocator, data: []const u8) ![32]u
     return mixInLength(sparseRoot(roots, list_depth), n);
 }
 
-/// hash_tree_root for SszExecutionRequests container (3 fields → pad to 4).
-fn htExecutionRequests(alloc: std.mem.Allocator, er: input.ExecutionRequests) ![32]u8 {
+fn htBuilderDepositList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
+    const SIZE = 184;
+    // MAX_BUILDER_DEPOSIT_REQUESTS_PER_PAYLOAD = 2**6 (consensus-specs, gloas/beacon-chain.md)
+    const list_depth = 6;
+    if (data.len == 0) return mixInLength(zeroHash(list_depth), 0);
+    if (data.len % SIZE != 0) return error.InvalidSsz;
+    const n = data.len / SIZE;
+    const roots = try alloc.alloc([32]u8, n);
+    defer alloc.free(roots);
+    for (0..n) |i| roots[i] = htBuilderDepositRequest(data[i * SIZE ..][0..SIZE]);
+    return mixInLength(sparseRoot(roots, list_depth), n);
+}
+
+fn htBuilderExitList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
+    const SIZE = 68;
+    // MAX_BUILDER_EXIT_REQUESTS_PER_PAYLOAD = 2**4 (consensus-specs, gloas/beacon-chain.md)
+    const list_depth = 4;
+    if (data.len == 0) return mixInLength(zeroHash(list_depth), 0);
+    if (data.len % SIZE != 0) return error.InvalidSsz;
+    const n = data.len / SIZE;
+    const roots = try alloc.alloc([32]u8, n);
+    defer alloc.free(roots);
+    for (0..n) |i| roots[i] = htBuilderExitRequest(data[i * SIZE ..][0..SIZE]);
+    return mixInLength(sparseRoot(roots, list_depth), n);
+}
+
+/// hash_tree_root for SszExecutionRequests container. EIP-8282 widens it from 3 fields
+/// to 5 at Amsterdam, which moves the padded width from 4 leaves to 8.
+fn htExecutionRequests(
+    alloc: std.mem.Allocator,
+    spec: primitives.SpecId,
+    er: input.ExecutionRequests,
+) ![32]u8 {
     const h0 = try htDepositList(alloc, er.deposits);
     const h1 = try htWithdrawalRequestList(alloc, er.withdrawals);
     const h2 = try htConsolidationRequestList(alloc, er.consolidations);
-    return sha2(sha2(h0, h1), sha2(h2, [_]u8{0} ** 32));
+    const z = [_]u8{0} ** 32;
+    if (!primitives.isEnabledIn(spec, .amsterdam)) {
+        // 4 leaves: [h0,h1,h2,0]
+        return sha2(sha2(h0, h1), sha2(h2, z));
+    }
+    const h3 = try htBuilderDepositList(alloc, er.builder_deposits);
+    const h4 = try htBuilderExitList(alloc, er.builder_exits);
+    // 8 leaves: [h0,h1,h2,h3,h4,0,0,0]
+    const l0 = sha2(sha2(h0, h1), sha2(h2, h3));
+    const l1 = sha2(sha2(h4, z), sha2(z, z));
+    return sha2(l0, l1);
 }
 
 /// Compute the SSZ hash_tree_root of SszNewPayloadRequest.
@@ -494,11 +563,15 @@ fn htExecutionRequests(alloc: std.mem.Allocator, er: input.ExecutionRequests) ![
 ///   versioned_hashes:         List[Bytes32, 4096]
 ///   parent_beacon_block_root: Bytes32
 ///   execution_requests:       SszExecutionRequests
-pub fn newPayloadRequestRoot(alloc: std.mem.Allocator, req: input.NewPayloadRequest) ![32]u8 {
+pub fn newPayloadRequestRoot(
+    alloc: std.mem.Allocator,
+    spec: primitives.SpecId,
+    req: input.NewPayloadRequest,
+) ![32]u8 {
     const h0 = try htExecutionPayload(alloc, req.execution_payload);
     const h1 = htVersionedHashes(req.versioned_hashes);
     const h2 = htBytes32(req.parent_beacon_block_root);
-    const h3 = try htExecutionRequests(alloc, req.execution_requests);
+    const h3 = try htExecutionRequests(alloc, spec, req.execution_requests);
 
     // merkleize([h0, h1, h2, h3]): 4 chunks, power of 2
     return sha2(sha2(h0, h1), sha2(h2, h3));
@@ -506,99 +579,78 @@ pub fn newPayloadRequestRoot(alloc: std.mem.Allocator, req: input.NewPayloadRequ
 
 // ── Serialize output ──────────────────────────────────────────────────────────
 
-/// glamsterdam-devnet-6 / zkevm@v0.5.0: SszChainConfig grew from a single uint64 chain_id
-/// to a container { chain_id: uint64, active_fork: SszForkConfig } where
-/// SszForkConfig = { fork, activation, blob_schedule } encodes the mainnet
-/// Amsterdam activation + EIP-7691 blob schedule. All v0.4.1 fixtures target
-/// mainnet at Amsterdam, so the SSZ-encoded SszChainConfig body is constant —
-/// hardcoded below as a 72-byte literal that follows the
+/// zkevm@v0.6.2 (PR#3138): SszForkConfig no longer contains fork or blob_schedule.
+/// SszChainConfig = { chain_id: uint64, active_fork: SszForkConfig }
+/// SszForkConfig  = { activation: SszForkActivation }  (only field)
+/// SszForkActivation = { block_number: List[uint64], timestamp: List[uint64] }
+///
+/// Amsterdam mainnet: block_number list empty, timestamp list = [0].
+/// Hardcoded as a 36-byte literal (offset + chain_config body) that follows the
 /// successful_validation boolean in the SszStatelessValidationResult output.
-const SSZ_CHAIN_CONFIG_AMSTERDAM_MAINNET: [72]u8 = .{
-    // offset to chain_config from container start (= 32 + 1 + 4 = 37)
+const SSZ_CHAIN_CONFIG_AMSTERDAM_MAINNET: [36]u8 = .{
+    // offset to chain_config from SszStatelessValidationResult start (= 32 + 1 + 4 = 37)
     0x25, 0x00, 0x00, 0x00,
     // chain_config.chain_id = 1 (uint64 LE)
     0x01, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00,
-    // chain_config: offset to active_fork (= 12)
+    // chain_config: offset to active_fork (= 12, relative to chain_config start)
     0x0c, 0x00, 0x00, 0x00,
-    // active_fork.fork = 20 (uint64 LE) — ProtocolFork enum index for Amsterdam.
-    // zkevm@v0.5.0 pruned non-scheduled ProtocolFork variants, shifting Amsterdam
-    // from index 24 (v0.4.1) down to 20.
-    0x14, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00,
-    // active_fork: offset to activation (= 16)
-    0x10, 0x00, 0x00, 0x00,
-    // active_fork: offset to blob_schedule (= 32)
-    0x20, 0x00, 0x00, 0x00,
-    // activation.block_number — offset 8 (empty optional list: 0 bytes of data)
+    // active_fork: offset to activation (= 4, only field in SszForkConfig)
+    0x04, 0x00, 0x00, 0x00,
+    // activation.block_number offset = 8 (empty list)
     0x08, 0x00, 0x00, 0x00,
-    // activation.timestamp — offset 8 (1-element optional list: uint64 value follows)
+    // activation.timestamp offset = 8 (1-element list follows)
     0x08, 0x00, 0x00, 0x00,
     // activation.timestamp[0] = 0 (uint64 LE, Amsterdam activates at genesis on mainnet)
     0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00,
-    // blob_schedule[0].target = 14 (EIP-7691 Amsterdam)
-    0x0e, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00,
-    // blob_schedule[0].max = 21 (EIP-7691 Amsterdam)
-    0x15, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00,
-    // blob_schedule[0].base_fee_update_fraction = 0xB24B3F (EIP-7691)
-    0x3f, 0x4b, 0xb2, 0x00,
     0x00, 0x00, 0x00, 0x00,
 };
 
 /// EIP-8025: canonical "default failed" stateless output, emitted when the SSZ
 /// input cannot be decoded (reference stateless_guest `_default_failed_stateless_output`):
 /// root=0, successful_validation=0, and a DEFAULT SszChainConfig (chain_id=0,
-/// fork=Frontier, empty activation + blob-schedule lists). Unlike a successful
-/// result — whose chain_config carries the full Amsterdam body (105 bytes total) —
-/// the default config is empty, so this output is exactly 73 bytes. The guest must
-/// commit these 73 bytes (not a zero-padded 105) for a rejected input to match.
-pub const DEFAULT_FAILED_OUTPUT: [73]u8 = blk: {
-    var b: [73]u8 = .{0} ** 73;
-    // [33..37] offset to chain_config = 37 (0x25)
+/// empty activation lists). zkevm@v0.6.2: SszForkConfig no longer has fork or
+/// blob_schedule, so the default output shrinks to 61 bytes. The guest must commit
+/// exactly these 61 bytes for a rejected input to match the reference output.
+pub const DEFAULT_FAILED_OUTPUT: [61]u8 = blk: {
+    var b: [61]u8 = .{0} ** 61;
+    // [33] offset to chain_config = 37 (0x25)
     b[33] = 0x25;
-    // [45..49] chain_config.offset_active_fork = 12 (0x0c)
+    // [45] chain_config.offset_active_fork = 12 (0x0c)
     b[45] = 0x0c;
-    // [57..61] active_fork.offset_activation = 16 (0x10)
-    b[57] = 0x10;
-    // [61..65] active_fork.offset_blob_schedule = 24 (0x18)
-    b[61] = 0x18;
-    // [65..69] activation.bn_offset = 8 (empty block_number list)
-    b[65] = 0x08;
-    // [69..73] activation.ts_offset = 8 (empty timestamp list)
-    b[69] = 0x08;
+    // [49] active_fork.offset_activation = 4 (only field in SszForkConfig)
+    b[49] = 0x04;
+    // [53] activation.bn_offset = 8 (empty block_number list)
+    b[53] = 0x08;
+    // [57] activation.ts_offset = 8 (empty timestamp list)
+    b[57] = 0x08;
     break :blk b;
 };
 
-/// Serialize SszStatelessValidationResult (glamsterdam-devnet-6 / zkevm@v0.5.0):
-///   [0..32]   new_payload_request_root  Bytes32
-///   [32]      successful_validation     boolean (0x01 = valid, 0x00 = invalid)
-///   [33..105] chain_config (variable, encoded as SszChainConfig with offset)
+/// Serialize SszStatelessValidationResult (glamsterdam-devnet-7 / zkevm@v0.6.2):
+///   [0..32]  new_payload_request_root  Bytes32
+///   [32]     successful_validation     boolean (0x01 = valid, 0x00 = invalid)
+///   [33..69] chain_config (variable, encoded as SszChainConfig with offset)
 ///
-/// The trailing 72-byte chain_config is hardcoded for mainnet Amsterdam (the only
-/// target of the current zkevm fixtures). The `chain_id` parameter is accepted
-/// for compatibility but the constant encodes chain_id=1.
+/// The trailing 36-byte chain_config is hardcoded for mainnet Amsterdam (the only
+/// target of the current zkevm fixtures). chain_id and activation_timestamp are
+/// patched in after copying the constant.
 pub fn serialize(
     alloc: std.mem.Allocator,
+    chain_config: input.ChainConfig,
     req: input.NewPayloadRequest,
-    chain_id: u64,
     successful_validation: bool,
-    activation_timestamp: u64,
-) ![105]u8 {
-    const root = try newPayloadRequestRoot(alloc, req);
-    var out: [105]u8 = undefined;
+) ![69]u8 {
+    const spec = hardfork.specFromFork(chain_config.fork_name orelse "") orelse .frontier;
+    const root = try newPayloadRequestRoot(alloc, spec, req);
+    var out: [69]u8 = undefined;
     @memcpy(out[0..32], &root);
     out[32] = if (successful_validation) 0x01 else 0x00;
-    @memcpy(out[33..105], &SSZ_CHAIN_CONFIG_AMSTERDAM_MAINNET);
-    // The SszChainConfig embeds chain_id (u64 LE) immediately after the 4-byte active_fork
-    // offset — at out[37..45]. Use the actual chain id rather than the mainnet default so
-    // non-mainnet chains (and rejected wrong-chain-id blocks) serialize correctly.
-    std.mem.writeInt(u64, out[37..45], chain_id, .little);
-    // active_fork.activation.timestamp (u64 LE) at out[73..81] — the zkevm fixtures activate
-    // Amsterdam by timestamp (block_number list empty), so echo the input's activation
-    // timestamp rather than the mainnet default (used by rejected future-activation blocks).
-    std.mem.writeInt(u64, out[73..81], activation_timestamp, .little);
+    @memcpy(out[33..69], &SSZ_CHAIN_CONFIG_AMSTERDAM_MAINNET);
+    // chain_id (u64 LE) at out[37..45], immediately after the 4-byte chain_config offset.
+    std.mem.writeInt(u64, out[37..45], chain_config.chain_id, .little);
+    // activation.timestamp (u64 LE) at out[61..69] — echo the input's activation timestamp
+    // rather than the mainnet default so rejected future-activation blocks serialize correctly.
+    std.mem.writeInt(u64, out[61..69], chain_config.activation_timestamp orelse 0, .little);
     return out;
 }

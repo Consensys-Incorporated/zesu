@@ -271,6 +271,28 @@ test "ModExp precompile - small values" {
     try testing.expect(output.bytes[0] == 3);
 }
 
+test "ModExp precompile - bigint path with exp=0, modulus=1 reduces to zero" {
+    var input: [128]u8 = undefined;
+    @memset(&input, 0);
+
+    // Header: base_len=9 (>8 bytes forces the big-integer path), exp_len=0, mod_len=1
+    input[31] = 9; // base_len = 9
+    input[63] = 0; // exp_len = 0
+    input[95] = 1; // mod_len = 1
+
+    // Data: base = 9 bytes of 0xff, exp = (empty), mod = 1
+    @memset(input[96..105], 0xff); // base
+    input[105] = 1; // mod
+
+    // Expected: base^0 mod 1 = 0, not 1
+    const result = modexp.byzantiumRun(&input, 10000);
+
+    try testing.expect(result == .success);
+    const output = result.success;
+    try testing.expect(output.bytes.len == 1);
+    try testing.expect(output.bytes[0] == 0);
+}
+
 test "ModExp precompile - Berlin gas calculation" {
     var input: [128]u8 = undefined;
     @memset(&input, 0);
