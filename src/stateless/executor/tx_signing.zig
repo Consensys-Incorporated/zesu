@@ -63,12 +63,41 @@ fn rlpTo(alloc: std.mem.Allocator, to: ?input.Address) ![]u8 {
     return rlp.encodeBytes(alloc, &.{});
 }
 
-fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64) ![32]u8 {
+/// The v/r/s signature values to append when encoding a signed transaction.
+/// (comptime-void when encoding a signing pre-image instead — see encodeTxPayload.)
+const Signature = struct { v: u256, r: u256, s: u256 };
+
+/// Encode a transaction to RLP, either as the pre-image hashed to produce the
+/// signing hash (comptime include_signature = false — legacy type-0 pre-EIP-155
+/// txs omit the trailing 3 fields entirely, matching `signingHash`'s original
+/// per-type-0 branch), or as the fully-signed wire form used for the tx hash
+/// (include_signature = true, appends sig.v/r/s to every type).
+fn encodeTxPayload(
+    alloc: std.mem.Allocator,
+    tx: *const input.TxInput,
+    chain_id: u64,
+    comptime include_signature: bool,
+    sig: if (include_signature) Signature else void,
+) ![]u8 {
     const to_enc = try rlpTo(alloc, tx.to);
     const al_enc = try rlpAccessList(alloc, tx.access_list);
 
-    const payload = switch (tx.type) {
+    return switch (tx.type) {
         0 => blk: {
+            if (include_signature) {
+                const items = [_][]const u8{
+                    try rlp.encodeU64(alloc, tx.nonce orelse 0),
+                    try rlp.encodeU128(alloc, tx.gas_price orelse 0),
+                    try rlp.encodeU64(alloc, tx.gas),
+                    to_enc,
+                    try rlp.encodeU256(alloc, tx.value),
+                    try rlp.encodeBytes(alloc, tx.data),
+                    try rlp.encodeU256(alloc, sig.v),
+                    try rlp.encodeU256(alloc, sig.r),
+                    try rlp.encodeU256(alloc, sig.s),
+                };
+                break :blk try rlp.encodeList(alloc, &items);
+            }
             const tx_chain_id = tx.chain_id orelse chain_id;
             if (tx.protected and tx_chain_id > 0) {
                 const items = [_][]const u8{
@@ -83,20 +112,19 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
                     try rlp.encodeBytes(alloc, &.{}),
                 };
                 break :blk try rlp.encodeList(alloc, &items);
-            } else {
-                const items = [_][]const u8{
-                    try rlp.encodeU64(alloc, tx.nonce orelse 0),
-                    try rlp.encodeU128(alloc, tx.gas_price orelse 0),
-                    try rlp.encodeU64(alloc, tx.gas),
-                    to_enc,
-                    try rlp.encodeU256(alloc, tx.value),
-                    try rlp.encodeBytes(alloc, tx.data),
-                };
-                break :blk try rlp.encodeList(alloc, &items);
             }
+            const items = [_][]const u8{
+                try rlp.encodeU64(alloc, tx.nonce orelse 0),
+                try rlp.encodeU128(alloc, tx.gas_price orelse 0),
+                try rlp.encodeU64(alloc, tx.gas),
+                to_enc,
+                try rlp.encodeU256(alloc, tx.value),
+                try rlp.encodeBytes(alloc, tx.data),
+            };
+            break :blk try rlp.encodeList(alloc, &items);
         },
         1 => blk: {
-            const items = [_][]const u8{
+            const base = [_][]const u8{
                 try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
                 try rlp.encodeU64(alloc, tx.nonce orelse 0),
                 try rlp.encodeU128(alloc, tx.gas_price orelse 0),
@@ -106,10 +134,15 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
                 try rlp.encodeBytes(alloc, tx.data),
                 al_enc,
             };
+            const items = if (include_signature) base ++ [_][]const u8{
+                try rlp.encodeU256(alloc, sig.v),
+                try rlp.encodeU256(alloc, sig.r),
+                try rlp.encodeU256(alloc, sig.s),
+            } else base;
             break :blk try rlp.concat(alloc, &.{ &.{0x01}, try rlp.encodeList(alloc, &items) });
         },
         2 => blk: {
-            const items = [_][]const u8{
+            const base = [_][]const u8{
                 try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
                 try rlp.encodeU64(alloc, tx.nonce orelse 0),
                 try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
@@ -120,11 +153,16 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
                 try rlp.encodeBytes(alloc, tx.data),
                 al_enc,
             };
+            const items = if (include_signature) base ++ [_][]const u8{
+                try rlp.encodeU256(alloc, sig.v),
+                try rlp.encodeU256(alloc, sig.r),
+                try rlp.encodeU256(alloc, sig.s),
+            } else base;
             break :blk try rlp.concat(alloc, &.{ &.{0x02}, try rlp.encodeList(alloc, &items) });
         },
         3 => blk: {
             const bvh_enc = try rlpBlobVersionedHashes(alloc, tx.blob_versioned_hashes);
-            const items = [_][]const u8{
+            const base = [_][]const u8{
                 try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
                 try rlp.encodeU64(alloc, tx.nonce orelse 0),
                 try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
@@ -137,11 +175,16 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
                 try rlp.encodeU128(alloc, tx.max_fee_per_blob_gas orelse 0),
                 bvh_enc,
             };
+            const items = if (include_signature) base ++ [_][]const u8{
+                try rlp.encodeU256(alloc, sig.v),
+                try rlp.encodeU256(alloc, sig.r),
+                try rlp.encodeU256(alloc, sig.s),
+            } else base;
             break :blk try rlp.concat(alloc, &.{ &.{0x03}, try rlp.encodeList(alloc, &items) });
         },
         4 => blk: {
             const auth_enc = try rlpAuthorizationList(alloc, tx.authorization_list);
-            const items = [_][]const u8{
+            const base = [_][]const u8{
                 try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
                 try rlp.encodeU64(alloc, tx.nonce orelse 0),
                 try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
@@ -153,11 +196,19 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
                 al_enc,
                 auth_enc,
             };
+            const items = if (include_signature) base ++ [_][]const u8{
+                try rlp.encodeU256(alloc, sig.v),
+                try rlp.encodeU256(alloc, sig.r),
+                try rlp.encodeU256(alloc, sig.s),
+            } else base;
             break :blk try rlp.concat(alloc, &.{ &.{0x04}, try rlp.encodeList(alloc, &items) });
         },
         else => return error.UnsupportedTxType,
     };
+}
 
+fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64) ![32]u8 {
+    const payload = try encodeTxPayload(alloc, tx, chain_id, false, {});
     return rlp.keccak256(payload);
 }
 
@@ -177,103 +228,12 @@ pub fn authorizationSigningHash(alloc: std.mem.Allocator, item: *const input.Aut
 
 /// Compute the hash of a signed transaction (used as receipt txHash).
 pub fn txHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64) ![32]u8 {
-    const r = tx.r orelse 0;
-    const s = tx.s orelse 0;
-    const v = tx.v orelse 0;
-
-    const to_enc = try rlpTo(alloc, tx.to);
-    const al_enc = try rlpAccessList(alloc, tx.access_list);
-
-    const payload = switch (tx.type) {
-        0 => blk: {
-            const items = [_][]const u8{
-                try rlp.encodeU64(alloc, tx.nonce orelse 0),
-                try rlp.encodeU128(alloc, tx.gas_price orelse 0),
-                try rlp.encodeU64(alloc, tx.gas),
-                to_enc,
-                try rlp.encodeU256(alloc, tx.value),
-                try rlp.encodeBytes(alloc, tx.data),
-                try rlp.encodeU256(alloc, v),
-                try rlp.encodeU256(alloc, r),
-                try rlp.encodeU256(alloc, s),
-            };
-            break :blk try rlp.encodeList(alloc, &items);
-        },
-        1 => blk: {
-            const items = [_][]const u8{
-                try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
-                try rlp.encodeU64(alloc, tx.nonce orelse 0),
-                try rlp.encodeU128(alloc, tx.gas_price orelse 0),
-                try rlp.encodeU64(alloc, tx.gas),
-                to_enc,
-                try rlp.encodeU256(alloc, tx.value),
-                try rlp.encodeBytes(alloc, tx.data),
-                al_enc,
-                try rlp.encodeU256(alloc, v),
-                try rlp.encodeU256(alloc, r),
-                try rlp.encodeU256(alloc, s),
-            };
-            break :blk try rlp.concat(alloc, &.{ &.{0x01}, try rlp.encodeList(alloc, &items) });
-        },
-        2 => blk: {
-            const items = [_][]const u8{
-                try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
-                try rlp.encodeU64(alloc, tx.nonce orelse 0),
-                try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
-                try rlp.encodeU128(alloc, tx.max_fee_per_gas orelse 0),
-                try rlp.encodeU64(alloc, tx.gas),
-                to_enc,
-                try rlp.encodeU256(alloc, tx.value),
-                try rlp.encodeBytes(alloc, tx.data),
-                al_enc,
-                try rlp.encodeU256(alloc, v),
-                try rlp.encodeU256(alloc, r),
-                try rlp.encodeU256(alloc, s),
-            };
-            break :blk try rlp.concat(alloc, &.{ &.{0x02}, try rlp.encodeList(alloc, &items) });
-        },
-        3 => blk: {
-            const bvh_enc = try rlpBlobVersionedHashes(alloc, tx.blob_versioned_hashes);
-            const items = [_][]const u8{
-                try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
-                try rlp.encodeU64(alloc, tx.nonce orelse 0),
-                try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
-                try rlp.encodeU128(alloc, tx.max_fee_per_gas orelse 0),
-                try rlp.encodeU64(alloc, tx.gas),
-                to_enc,
-                try rlp.encodeU256(alloc, tx.value),
-                try rlp.encodeBytes(alloc, tx.data),
-                al_enc,
-                try rlp.encodeU128(alloc, tx.max_fee_per_blob_gas orelse 0),
-                bvh_enc,
-                try rlp.encodeU256(alloc, v),
-                try rlp.encodeU256(alloc, r),
-                try rlp.encodeU256(alloc, s),
-            };
-            break :blk try rlp.concat(alloc, &.{ &.{0x03}, try rlp.encodeList(alloc, &items) });
-        },
-        4 => blk: {
-            const auth_enc = try rlpAuthorizationList(alloc, tx.authorization_list);
-            const items = [_][]const u8{
-                try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
-                try rlp.encodeU64(alloc, tx.nonce orelse 0),
-                try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
-                try rlp.encodeU128(alloc, tx.max_fee_per_gas orelse 0),
-                try rlp.encodeU64(alloc, tx.gas),
-                to_enc,
-                try rlp.encodeU256(alloc, tx.value),
-                try rlp.encodeBytes(alloc, tx.data),
-                al_enc,
-                auth_enc,
-                try rlp.encodeU256(alloc, v),
-                try rlp.encodeU256(alloc, r),
-                try rlp.encodeU256(alloc, s),
-            };
-            break :blk try rlp.concat(alloc, &.{ &.{0x04}, try rlp.encodeList(alloc, &items) });
-        },
-        else => return error.UnsupportedTxType,
+    const sig = Signature{
+        .v = tx.v orelse 0,
+        .r = tx.r orelse 0,
+        .s = tx.s orelse 0,
     };
-
+    const payload = try encodeTxPayload(alloc, tx, chain_id, true, sig);
     return rlp.keccak256(payload);
 }
 
