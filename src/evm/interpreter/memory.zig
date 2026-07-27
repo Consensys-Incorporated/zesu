@@ -294,16 +294,23 @@ pub const Memory = struct {
     }
 
     /// Grow memory to at least `new_size` bytes, charging the expansion cost against
-    /// `gas`. Returns false (leaving memory and gas untouched) if `gas` can't cover it
-    /// or the resize fails. New bytes are zero-initialized per EVM memory semantics.
+    /// `gas`. Returns false if `gas` can't cover the cost, if rounding `new_size` up to
+    /// a 32-byte boundary would overflow, or if the resize fails. Note gas charged via
+    /// `spend` is not refunded on a later failure — this is consistent with EVM
+    /// out-of-gas semantics (a frame that fails to expand memory halts and forfeits its
+    /// remaining gas regardless).
+    /// New bytes are zero-initialized per EVM memory semantics.
     pub fn expandWithGas(self: *Memory, gas: *Gas, new_size: usize) bool {
         if (new_size == 0 or new_size <= self.buffer.items.len) return true;
 
         const cost = self.expansionCost(new_size);
         if (!gas.spend(cost)) return false;
 
-        const new_words = gas_costs.toWordSize(new_size);
-        const aligned_size = new_words * 32;
+        // Checked: toWordSize used in expansionCost saturates rather than overflow-panics
+        // on huge new_size, so the round-trip back to an aligned byte size must be
+        // checked separately — words*32 can still exceed usize
+        const new_words = std.math.divCeil(usize, new_size, 32) catch return false;
+        const aligned_size = std.math.mul(usize, new_words, 32) catch return false;
         const old_size = self.buffer.items.len;
         self.buffer.resize(alloc_mod.get(), aligned_size) catch return false;
         @memset(self.buffer.items[old_size..aligned_size], 0);
