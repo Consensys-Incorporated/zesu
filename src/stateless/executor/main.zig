@@ -129,6 +129,8 @@ fn u256ToHashLocal(value: u256) types.Hash {
 /// EIP system caller — accessed during system contract calls but excluded from the BAL.
 const SYSTEM_ADDRESS = primitives.SYSTEM_ADDRESS;
 
+// ─── Public API ───────────────────────────────────────────────────────────────
+
 /// Build a sorted slice of AccessedEntry from the WitnessDatabase access log
 /// and the post-execution alloc delta.  The result is sorted ascending by address.
 pub fn buildAccessedEntries(
@@ -306,8 +308,6 @@ pub fn buildAccessedEntries(
     entries.deinit(alloc);
     return sorted;
 }
-
-// ─── Public API ───────────────────────────────────────────────────────────────
 
 pub const ExecuteBlockResult = struct {
     post_state_root: [32]u8,
