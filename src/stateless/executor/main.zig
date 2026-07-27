@@ -30,6 +30,8 @@ const block_validation = @import("./block_validation.zig");
 pub const BlockHashEntry = types.BlockHashEntry;
 pub const AllocAccount = types.AllocAccount;
 pub const computeRawTxRoot = output_mod.computeRawTxRoot;
+pub const executor_block_validation = block_validation;
+pub const executor_tx_signing = @import("./tx_signing.zig");
 
 /// Sub-module re-exports for tools — use @import("executor").executor_types etc.
 pub const executor_types = @import("executor_types");
@@ -127,9 +129,11 @@ fn u256ToHashLocal(value: u256) types.Hash {
 /// EIP system caller — accessed during system contract calls but excluded from the BAL.
 const SYSTEM_ADDRESS = primitives.SYSTEM_ADDRESS;
 
+// ─── Public API ───────────────────────────────────────────────────────────────
+
 /// Build a sorted slice of AccessedEntry from the WitnessDatabase access log
 /// and the post-execution alloc delta.  The result is sorted ascending by address.
-fn buildAccessedEntries(
+pub fn buildAccessedEntries(
     alloc: std.mem.Allocator,
     access_log: context_mod.AccessLog,
     post_alloc: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
@@ -304,8 +308,6 @@ fn buildAccessedEntries(
     entries.deinit(alloc);
     return sorted;
 }
-
-// ─── Public API ───────────────────────────────────────────────────────────────
 
 pub const ExecuteBlockResult = struct {
     post_state_root: [32]u8,
