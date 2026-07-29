@@ -20,9 +20,10 @@ Zesu produces a **relocatable rv64im ELF object** (`zesu.rv64im.o`) with all EVM
 | Symbol | Signature | Description |
 |---|---|---|
 | `zkvm_log` | `(u8, [*]const u8, usize) void` | Log a message at the given level |
-| `zkvm_exit` | `(i32) noreturn` | Terminate execution with exit code |
 | `ZKVM_HEAP_POS` | `usize` (var) | Bump heap cursor; allocator advances this |
 | `ZKVM_HEAP_TOP` | `usize` (var) | Heap upper bound; allocator checks against this |
+
+`main()` itself returns its status (0 success / 1 failure from `guestMain()`) in `a0` per the RISC-V C ABI rather than calling an explicit halt function — there is no `zkvm_exit` extern. Each zkVM host's own entry point (`_start`) is responsible for turning that return into its actual halt sequence; see the per-target READMEs in [zesu-zkvm](https://github.com/consensys/zesu-zkvm) for how ZisK, OpenVM, and Linea each do this. A genuine Zig-level panic calls the compiler-emitted `@trap()` builtin instead, matching how Zig's own std library handles panics on freestanding targets.
 
 **Accelerators** — all return `i32` (0 = success, −1 = failure)
 
@@ -169,3 +170,13 @@ build.zig       Builds the apps/tools/tests + rv64im object; exposes the module 
 tools/          Spec-test runners, Hive adapter, t8n tool
 spec-tests/     Downloaded execution-spec-tests fixtures (gitignored)
 ```
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.
