@@ -76,21 +76,26 @@ const EIP8282_EXIT_ADDRESS: input.Address = .{
 /// Execute a single privileged system call as SYSTEM_ADDRESS.
 ///
 /// Skips the call silently if the target contract is not deployed.
-/// Discards state and returns on any execution error — a broken system
-/// contract must not invalidate the block.
-fn runSystemCall(
+/// Discards state on any execution error — a broken system contract must not
+/// invalidate the block. When `capture` is true, returns a caller-owned copy of
+/// the call's return data and surfaces execution failure as
+/// error.SystemContractCallFailed (see applyPostBlockCallsCapture); when false,
+/// the call is fire-and-forget (see applyPreBlockCalls).
+fn runSystemCallImpl(
+    comptime capture: bool,
     ctx: anytype,
     instructions: *handler_mod.Instructions,
     precompiles: *handler_mod.Precompiles,
     target: input.Address,
     calldata: []const u8,
     chain_id: u64,
-) void {
+    alloc: if (capture) std.mem.Allocator else void,
+) if (capture) error{SystemContractCallFailed}![]const u8 else void {
     const SYSTEM_CALL_GAS: u64 = systemCallGasLimit(ctx.cfg.spec);
 
     const account_load = ctx.journaled_state.loadAccount(target) catch {
         ctx.journaled_state.discardTx();
-        return;
+        return if (capture) &.{} else {};
     };
     // Skip the call if the contract has no code (also covers non-existing accounts).
     // EIP-7928 (Amsterdam+): the reference process_unchecked_system_transaction still
@@ -100,7 +105,7 @@ fn runSystemCall(
     // bumps the journal transaction_id, so its EIP-2929 warmth does not carry over.
     if (std.mem.eql(u8, &account_load.data.info.code_hash, &primitives.KECCAK_EMPTY)) {
         ctx.journaled_state.commitTx();
-        return;
+        return if (capture) &.{} else {};
     }
 
     // Bypass normal tx validation for system calls.
@@ -132,7 +137,7 @@ fn runSystemCall(
     var data_list: ?std.ArrayList(u8) = null;
     if (calldata.len > 0) {
         var dl = std.ArrayList(u8).empty;
-        dl.appendSlice(alloc_mod.get(), calldata) catch return;
+        dl.appendSlice(alloc_mod.get(), calldata) catch return if (capture) &.{} else {};
         data_list = dl;
     }
 
@@ -157,9 +162,9 @@ fn runSystemCall(
         ctx.journaled_state.discardTx();
         if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
         ctx.tx.data = null;
-        return;
+        return if (capture) error.SystemContractCallFailed else {};
     };
-    result.deinit();
+    defer result.deinit();
 
     if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
     ctx.tx.data = null;
@@ -170,7 +175,21 @@ fn runSystemCall(
         if (sa.info.nonce > 0) sa.info.nonce -= 1;
     }
 
-    // Notify the fallback database that this system call committed successfully.
+    if (!capture) return;
+    if (result.status != .Success) return error.SystemContractCallFailed;
+    return if (result.return_data.len > 0) alloc.dupe(u8, result.return_data) catch &.{} else &.{};
+}
+
+/// Fire-and-forget system call (pre-block: EIP-4788/EIP-2935). See runSystemCallImpl.
+fn runSystemCall(
+    ctx: anytype,
+    instructions: *handler_mod.Instructions,
+    precompiles: *handler_mod.Precompiles,
+    target: input.Address,
+    calldata: []const u8,
+    chain_id: u64,
+) void {
+    runSystemCallImpl(false, ctx, instructions, precompiles, target, calldata, chain_id, {});
 }
 
 // ─── Pre-block system calls ───────────────────────────────────────────────────
@@ -252,112 +271,5 @@ fn runSystemCallCapture(
     calldata: []const u8,
     chain_id: u64,
 ) error{SystemContractCallFailed}![]const u8 {
-    const SYSTEM_CALL_GAS: u64 = systemCallGasLimit(ctx.cfg.spec);
-
-    const account_load = ctx.journaled_state.loadAccount(target) catch {
-        ctx.journaled_state.discardTx();
-        return &.{};
-    };
-    if (std.mem.eql(u8, &account_load.data.info.code_hash, &primitives.KECCAK_EMPTY)) {
-        ctx.journaled_state.discardTx();
-        return &.{};
-    }
-
-    const saved_nonce = ctx.cfg.disable_nonce_check;
-    const saved_bal = ctx.cfg.disable_balance_check;
-    const saved_fee = ctx.cfg.disable_fee_charge;
-    const saved_basefee = ctx.cfg.disable_base_fee;
-    const saved_block_gas = ctx.cfg.disable_block_gas_limit;
-    const saved_chain_id_check = ctx.cfg.tx_chain_id_check;
-    const saved_cfg_chain_id = ctx.cfg.chain_id;
-    ctx.cfg.disable_nonce_check = true;
-    ctx.cfg.disable_balance_check = true;
-    ctx.cfg.disable_fee_charge = true;
-    ctx.cfg.disable_base_fee = true;
-    ctx.cfg.disable_block_gas_limit = true;
-    ctx.cfg.tx_chain_id_check = false;
-    ctx.cfg.chain_id = chain_id;
-    defer {
-        ctx.cfg.disable_nonce_check = saved_nonce;
-        ctx.cfg.disable_balance_check = saved_bal;
-        ctx.cfg.disable_fee_charge = saved_fee;
-        ctx.cfg.disable_base_fee = saved_basefee;
-        ctx.cfg.disable_block_gas_limit = saved_block_gas;
-        ctx.cfg.tx_chain_id_check = saved_chain_id_check;
-        ctx.cfg.chain_id = saved_cfg_chain_id;
-    }
-
-    var data_list: ?std.ArrayList(u8) = null;
-    if (calldata.len > 0) {
-        var dl = std.ArrayList(u8).empty;
-        dl.appendSlice(alloc_mod.get(), calldata) catch return &.{};
-        data_list = dl;
-    }
-
-    ctx.tx.caller = SYSTEM_ADDRESS;
-    ctx.tx.kind = context_mod.TxKind{ .Call = target };
-    ctx.tx.gas_limit = SYSTEM_CALL_GAS;
-    ctx.tx.gas_price = 0;
-    ctx.tx.gas_priority_fee = null;
-    ctx.tx.value = 0;
-    ctx.tx.nonce = 0;
-    ctx.tx.tx_type = 0;
-    ctx.tx.data = data_list;
-    ctx.tx.access_list = context_mod.AccessList{ .items = null };
-    ctx.tx.blob_hashes = null;
-    ctx.tx.authorization_list = null;
-    ctx.tx.chain_id = chain_id;
-
-    var frames = handler_mod.FrameStack.new();
-    const EvmT = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType);
-    var evm = EvmT.init(ctx, null, instructions, precompiles, &frames);
-
-    var initial_gas = handler_mod.InitialAndFloorGas{ .initial_gas = 0, .floor_gas = 0 };
-
-    handler_mod.MainnetHandler.validate(&evm, &initial_gas) catch {
-        ctx.journaled_state.discardTx();
-        if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
-        ctx.tx.data = null;
-        return error.SystemContractCallFailed;
-    };
-
-    handler_mod.MainnetHandler.preExecution(&evm, &initial_gas) catch {
-        ctx.journaled_state.discardTx();
-        if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
-        ctx.tx.data = null;
-        return error.SystemContractCallFailed;
-    };
-
-    var frame_result = handler_mod.MainnetHandler.executeFrame(&evm, initial_gas) catch {
-        ctx.journaled_state.discardTx();
-        if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
-        ctx.tx.data = null;
-        return error.SystemContractCallFailed;
-    };
-
-    if (frame_result.result.status != .Success) {
-        frame_result.deinit();
-        if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
-        ctx.tx.data = null;
-        return error.SystemContractCallFailed;
-    }
-
-    handler_mod.MainnetHandler.postExecution(&evm, &frame_result, initial_gas) catch {
-        frame_result.deinit();
-        if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
-        ctx.tx.data = null;
-        return error.SystemContractCallFailed;
-    };
-
-    const output = if (frame_result.result.return_data.len > 0) alloc.dupe(u8, frame_result.result.return_data) catch &.{} else &.{};
-    frame_result.deinit();
-
-    if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
-    ctx.tx.data = null;
-
-    if (ctx.journaled_state.inner.evm_state.getPtr(SYSTEM_ADDRESS)) |sa| {
-        if (sa.info.nonce > 0) sa.info.nonce -= 1;
-    }
-
-    return output;
+    return runSystemCallImpl(true, ctx, instructions, precompiles, target, calldata, chain_id, alloc);
 }

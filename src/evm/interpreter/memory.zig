@@ -1,6 +1,8 @@
 const std = @import("std");
 const primitives = @import("primitives");
 const alloc_mod = @import("zesu_allocator");
+const gas_costs = @import("gas_costs.zig");
+const Gas = @import("gas.zig").Gas;
 
 /// EVM memory implementation using a shared buffer
 pub const Memory = struct {
@@ -278,28 +280,41 @@ pub const Memory = struct {
         try self.set(offset, &[_]u8{byte});
     }
 
-    /// Calculate memory expansion cost
+    /// Calculate memory expansion cost. Single source of truth for the
+    /// `3*words + words^2/512` formula lives in gas_costs.memoryExpansionCost;
+    /// this just converts the byte sizes involved to word counts.
     pub fn expansionCost(self: Memory, new_size: usize) u64 {
         if (new_size <= self.buffer.items.len) {
             return 0;
         }
+        return gas_costs.memoryExpansionCost(
+            gas_costs.toWordSize(self.buffer.items.len),
+            gas_costs.toWordSize(new_size),
+        );
+    }
 
-        // std.math.divCeil avoids (n + 31) overflow when n is near maxInt(usize).
-        const new_words = std.math.divCeil(usize, new_size, 32) catch return std.math.maxInt(u64);
-        const current_words = std.math.divCeil(usize, self.buffer.items.len, 32) catch return std.math.maxInt(u64);
+    /// Grow memory to at least `new_size` bytes, charging the expansion cost against
+    /// `gas`. Returns false if `gas` can't cover the cost, if rounding `new_size` up to
+    /// a 32-byte boundary would overflow, or if the resize fails. Note gas charged via
+    /// `spend` is not refunded on a later failure — this is consistent with EVM
+    /// out-of-gas semantics (a frame that fails to expand memory halts and forfeits its
+    /// remaining gas regardless).
+    /// New bytes are zero-initialized per EVM memory semantics.
+    pub fn expandWithGas(self: *Memory, gas: *Gas, new_size: usize) bool {
+        if (new_size == 0 or new_size <= self.buffer.items.len) return true;
 
-        if (new_words <= current_words) {
-            return 0;
-        }
+        const cost = self.expansionCost(new_size);
+        if (!gas.spend(cost)) return false;
 
-        const n: u64 = @intCast(new_words);
-        const c: u64 = @intCast(current_words);
-        const sq_n = std.math.mul(u64, n, n) catch return std.math.maxInt(u64);
-        const cost = std.math.add(u64, sq_n / 512, 3 * n) catch return std.math.maxInt(u64);
-        const sq_c = std.math.mul(u64, c, c) catch return std.math.maxInt(u64);
-        const current_cost = std.math.add(u64, sq_c / 512, 3 * c) catch return std.math.maxInt(u64);
-
-        return cost - current_cost;
+        // Checked: toWordSize used in expansionCost saturates rather than overflow-panics
+        // on huge new_size, so the round-trip back to an aligned byte size must be
+        // checked separately — words*32 can still exceed usize
+        const new_words = std.math.divCeil(usize, new_size, 32) catch return false;
+        const aligned_size = std.math.mul(usize, new_words, 32) catch return false;
+        const old_size = self.buffer.items.len;
+        self.buffer.resize(alloc_mod.get(), aligned_size) catch return false;
+        @memset(self.buffer.items[old_size..aligned_size], 0);
+        return true;
     }
 
     /// Resize memory to a new size

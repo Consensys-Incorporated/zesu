@@ -1,15 +1,9 @@
 const std = @import("std");
 const primitives = @import("primitives");
-const InstructionContext = @import("../instruction_context.zig").InstructionContext;
+const instruction_context = @import("../instruction_context.zig");
+const InstructionContext = instruction_context.InstructionContext;
+const expandMemory = instruction_context.expandMemory;
 const gas_costs = @import("../gas_costs.zig");
-const alloc_mod = @import("zesu_allocator");
-
-fn memoryCostWords(num_words: usize) u64 {
-    const n: u64 = @intCast(num_words);
-    const linear = std.math.mul(u64, n, gas_costs.G_MEMORY) catch return std.math.maxInt(u64);
-    const quadratic = (std.math.mul(u64, n, n) catch return std.math.maxInt(u64)) / 512;
-    return std.math.add(u64, linear, quadratic) catch std.math.maxInt(u64);
-}
 
 /// KECCAK256 opcode (0x20): Compute Keccak-256 hash of memory region
 /// Stack: [offset, length] -> [hash]
@@ -56,24 +50,9 @@ pub fn opKeccak256(ctx: *InstructionContext) void {
 
     // Dynamic: memory expansion
     if (length_usize > 0) {
-        const current_words = (ctx.interpreter.memory.size() + 31) / 32;
-        // std.math.divCeil avoids (end + 31) overflow when end is near maxInt(usize).
-        const new_words = std.math.divCeil(usize, end, 32) catch unreachable;
-        if (new_words > current_words) {
-            const expansion_cost = memoryCostWords(new_words) - memoryCostWords(current_words);
-            if (!ctx.interpreter.gas.spend(expansion_cost)) {
-                ctx.interpreter.halt(.out_of_gas);
-                return;
-            }
-        }
-        const aligned_end = new_words * 32;
-        if (aligned_end > ctx.interpreter.memory.size()) {
-            const old_size = ctx.interpreter.memory.size();
-            ctx.interpreter.memory.buffer.resize(alloc_mod.get(), aligned_end) catch {
-                ctx.interpreter.halt(.memory_limit_oog);
-                return;
-            };
-            @memset(ctx.interpreter.memory.buffer.items[old_size..aligned_end], 0);
+        if (!expandMemory(ctx, end)) {
+            ctx.interpreter.halt(.out_of_gas);
+            return;
         }
     }
 

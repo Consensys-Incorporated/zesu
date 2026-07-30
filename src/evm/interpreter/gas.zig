@@ -28,8 +28,6 @@ pub const Gas = struct {
     /// amount, matching the reference (vm charge_state_gas / credit_state_gas_refund), so a
     /// spilled-then-refunded charge restores regular gas for subsequent 63/64 forwarding.
     state_gas_spilled: u64 = 0,
-    /// Memoisation of values for memory expansion cost.
-    memory: MemoryGas,
 
     /// Creates a new `Gas` struct with the given gas limit.
     pub fn new(limit: u64) Gas {
@@ -41,7 +39,6 @@ pub const Gas = struct {
             .reservoir = 0,
             .state_gas_spent = 0,
             .state_gas_refunded = 0,
-            .memory = MemoryGas.new(),
         };
     }
 
@@ -55,23 +52,12 @@ pub const Gas = struct {
             .reservoir = 0,
             .state_gas_spent = 0,
             .state_gas_refunded = 0,
-            .memory = MemoryGas.new(),
         };
     }
 
     /// Returns the gas limit.
     pub fn getLimit(self: Gas) u64 {
         return self.limit;
-    }
-
-    /// Returns the memory gas.
-    pub fn getMemory(self: Gas) MemoryGas {
-        return self.memory;
-    }
-
-    /// Returns the memory gas mutably.
-    pub fn getMemoryMut(self: *Gas) *MemoryGas {
-        return &self.memory;
     }
 
     /// Returns the total amount of gas that was refunded.
@@ -192,32 +178,6 @@ pub const Gas = struct {
         self.refunded = refund_amount;
     }
 
-    /// Load gas with memory
-    pub fn loadGasWithMemory(self: *Gas, amount: u64, memory: MemoryGas) void {
-        self.remaining = amount;
-        self.memory = memory;
-    }
-
-    /// Load gas with memory and refund
-    pub fn loadGasWithMemoryAndRefund(self: *Gas, amount: u64, memory: MemoryGas, refund_amount: i64) void {
-        self.remaining = amount;
-        self.memory = memory;
-        self.refunded = refund_amount;
-    }
-
-    /// Load gas with limit and memory
-    pub fn loadGasWithLimitAndMemory(self: *Gas, amount: u64, limit: u64, memory: MemoryGas) void {
-        self.remaining = @min(amount, limit);
-        self.memory = memory;
-    }
-
-    /// Load gas with limit, memory and refund
-    pub fn loadGasWithLimitMemoryAndRefund(self: *Gas, amount: u64, limit: u64, memory: MemoryGas, refund_amount: i64) void {
-        self.remaining = @min(amount, limit);
-        self.memory = memory;
-        self.refunded = refund_amount;
-    }
-
     /// Apply EIP-3529 refund cap in-place.
     /// Pre-London: cap at gas_spent / 2. London+: cap at gas_spent / 5.
     pub fn setFinalRefund(self: *Gas, is_london: bool) void {
@@ -232,65 +192,5 @@ pub const Gas = struct {
         const spent = self.getSpent();
         const ref = @as(u64, @intCast(@max(0, self.refunded)));
         return if (spent > ref) spent - ref else 0;
-    }
-};
-
-/// Memory gas tracking for memory expansion costs
-pub const MemoryGas = struct {
-    /// The current memory size in words
-    size: u64,
-    /// The maximum memory size reached during execution
-    max_size: u64,
-
-    pub fn new() MemoryGas {
-        return MemoryGas{
-            .size = 0,
-            .max_size = 0,
-        };
-    }
-
-    /// Get the current memory size in words
-    pub fn getSize(self: MemoryGas) u64 {
-        return self.size;
-    }
-
-    /// Get the maximum memory size reached
-    pub fn maxSize(self: MemoryGas) u64 {
-        return self.max_size;
-    }
-
-    /// Set the memory size
-    pub fn setSize(self: *MemoryGas, size: u64) void {
-        self.size = size;
-        self.max_size = @max(self.max_size, size);
-    }
-
-    /// Calculate memory expansion cost
-    pub fn expansionCost(self: MemoryGas, new_size: u64) u64 {
-        if (new_size <= self.size) {
-            return 0;
-        }
-
-        // std.math.divCeil(u64, n, 32) avoids (n + 31) overflow for large n.
-        const new_words = std.math.divCeil(u64, new_size, 32) catch return std.math.maxInt(u64);
-        const current_words = std.math.divCeil(u64, self.size, 32) catch return std.math.maxInt(u64);
-
-        if (new_words <= current_words) {
-            return 0;
-        }
-
-        const sq_new = std.math.mul(u64, new_words, new_words) catch return std.math.maxInt(u64);
-        const cost = std.math.add(u64, sq_new / 512, 3 * new_words) catch return std.math.maxInt(u64);
-        const sq_cur = std.math.mul(u64, current_words, current_words) catch return std.math.maxInt(u64);
-        const current_cost = std.math.add(u64, sq_cur / 512, 3 * current_words) catch return std.math.maxInt(u64);
-
-        return cost - current_cost;
-    }
-
-    /// Record memory expansion
-    pub fn recordExpansion(self: *MemoryGas, new_size: u64) u64 {
-        const cost = self.expansionCost(new_size);
-        self.setSize(new_size);
-        return cost;
     }
 };

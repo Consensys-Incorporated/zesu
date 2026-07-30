@@ -134,9 +134,11 @@ fn memoryCost(num_words: usize) u64 {
     return std.math.add(u64, linear, quadratic) catch std.math.maxInt(u64);
 }
 
-// Calculate memory size in words (rounded up)
+// Calculate memory size in words (rounded up).
+// Uses divCeil rather than (size + 31) / 32: a huge size must saturate, not
+// overflow-panic, on the intermediate +31.
 pub fn toWordSize(size: usize) usize {
-    return (size + 31) / 32;
+    return std.math.divCeil(usize, size, 32) catch std.math.maxInt(usize);
 }
 
 // Get SLOAD gas cost based on spec and cold/warm access

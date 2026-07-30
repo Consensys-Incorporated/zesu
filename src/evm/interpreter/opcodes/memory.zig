@@ -1,37 +1,9 @@
 const std = @import("std");
 const primitives = @import("primitives");
-const InstructionContext = @import("../instruction_context.zig").InstructionContext;
+const instruction_context = @import("../instruction_context.zig");
+const InstructionContext = instruction_context.InstructionContext;
+const expandMemory = instruction_context.expandMemory;
 const gas_costs = @import("../gas_costs.zig");
-const alloc_mod = @import("zesu_allocator");
-
-fn memoryCostWords(num_words: usize) u64 {
-    const n: u64 = @intCast(num_words);
-    // Use saturating arithmetic: a huge offset must yield OOG, not a panic.
-    const linear = std.math.mul(u64, n, gas_costs.G_MEMORY) catch return std.math.maxInt(u64);
-    const quadratic = (std.math.mul(u64, n, n) catch return std.math.maxInt(u64)) / 512;
-    return std.math.add(u64, linear, quadratic) catch std.math.maxInt(u64);
-}
-
-fn memoryExpansionCost(current_size: usize, new_size: usize) u64 {
-    if (new_size <= current_size) return 0;
-    const current_words = (current_size + 31) / 32;
-    const new_words = (std.math.add(usize, new_size, 31) catch return std.math.maxInt(u64)) / 32;
-    return memoryCostWords(new_words) - memoryCostWords(current_words);
-}
-
-fn expandMemory(ctx: *InstructionContext, new_size: usize) bool {
-    const expansion_cost = memoryExpansionCost(ctx.interpreter.memory.size(), new_size);
-    if (!ctx.interpreter.gas.spend(expansion_cost)) return false;
-    // EVM memory is always a multiple of 32 bytes; new bytes must be zero-initialized.
-    const new_words = (std.math.add(usize, new_size, 31) catch return false) / 32;
-    const aligned_size = new_words * 32;
-    if (aligned_size > ctx.interpreter.memory.size()) {
-        const old_size = ctx.interpreter.memory.size();
-        ctx.interpreter.memory.buffer.resize(alloc_mod.get(), aligned_size) catch return false;
-        @memset(ctx.interpreter.memory.buffer.items[old_size..aligned_size], 0);
-    }
-    return true;
-}
 
 /// MLOAD opcode (0x51): Load word from memory
 /// Stack: [offset] -> [value]   Gas: 3 (G_VERYLOW, dispatch) + memory_expansion

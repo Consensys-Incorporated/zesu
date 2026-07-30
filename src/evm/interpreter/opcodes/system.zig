@@ -1,36 +1,8 @@
 const std = @import("std");
 const primitives = @import("primitives");
-const InstructionContext = @import("../instruction_context.zig").InstructionContext;
-const gas_costs = @import("../gas_costs.zig");
-const alloc_mod = @import("zesu_allocator");
-
-// ---------------------------------------------------------------------------
-// Memory expansion helper
-// ---------------------------------------------------------------------------
-
-fn memoryCostWords(num_words: usize) u64 {
-    const n: u64 = @intCast(num_words);
-    const linear = std.math.mul(u64, n, gas_costs.G_MEMORY) catch return std.math.maxInt(u64);
-    const quadratic = (std.math.mul(u64, n, n) catch return std.math.maxInt(u64)) / 512;
-    return std.math.add(u64, linear, quadratic) catch std.math.maxInt(u64);
-}
-
-fn expandMemory(ctx: *InstructionContext, new_size: usize) bool {
-    if (new_size == 0) return true;
-    const current = ctx.interpreter.memory.size();
-    if (new_size <= current) return true;
-    const current_words = (current + 31) / 32;
-    const new_words = (std.math.add(usize, new_size, 31) catch return false) / 32;
-    if (new_words > current_words) {
-        const cost = memoryCostWords(new_words) - memoryCostWords(current_words);
-        if (!ctx.interpreter.gas.spend(cost)) return false;
-    }
-    const aligned_size = new_words * 32;
-    const old_size = ctx.interpreter.memory.size();
-    ctx.interpreter.memory.buffer.resize(alloc_mod.get(), aligned_size) catch return false;
-    @memset(ctx.interpreter.memory.buffer.items[old_size..aligned_size], 0);
-    return true;
-}
+const instruction_context = @import("../instruction_context.zig");
+const InstructionContext = instruction_context.InstructionContext;
+const expandMemory = instruction_context.expandMemory;
 
 // ---------------------------------------------------------------------------
 // RETURN / REVERT / INVALID
