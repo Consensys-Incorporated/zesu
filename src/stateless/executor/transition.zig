@@ -624,8 +624,13 @@ pub fn transitionWithContext(
         try ctx.journaled_state.inner.bal_pre_accounts.ensureTotalCapacity(account_hint);
         try ctx.journaled_state.inner.bal_pending_accounts.ensureTotalCapacity(account_hint);
     }
-    // ~64 journal entries per tx on average (account touches, balance changes, warms, etc.)
-    try ctx.journaled_state.inner.journal.ensureTotalCapacity(alloc_mod.get(), txs.len * 64);
+    // commitTx and discardTx both clear the journal, so it only ever holds one transaction's
+    // entries and is sized for the heaviest transaction rather than for the whole block. At the ~64
+    // entries an average transaction produces, 4096 absorbs all but a negligible amount of regrowth
+    // and reserves 768 KiB after ArrayList growth overshoot, which the guest free-list allocator
+    // rounds up to a 1 MiB block. Sizing by the block costs 19 MiB of peak heap for the same result.
+    // Reserving nothing instead costs 0.19% more proving cost, again for the same peak heap.
+    try ctx.journaled_state.inner.journal.ensureTotalCapacity(alloc_mod.get(), 4096);
 
     // ── EIP-7928 BAL tracker (Amsterdam+) ────────────────────────────────────
     var tracker: ?BaTracker = if (primitives.isEnabledIn(spec, .amsterdam))
