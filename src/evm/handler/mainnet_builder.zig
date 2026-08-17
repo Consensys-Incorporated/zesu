@@ -448,12 +448,13 @@ pub const MainnetHandler = struct {
                         var fr = main.FrameResult.new(exec_result, cr.gas_remaining, cr.gas_refunded);
                         fr.reservoir_remaining = cr.state_gas_remaining;
                         // EIP-8037 (Amsterdam): on top-level CREATE-tx halt/revert the account
-                        // was never created, so return the non-spilled initcode state gas to the
-                        // reservoir. The spilled portion was drawn from regular gas — on revert it
-                        // returns to regular gas, on halt it stays burned (reference
-                        // refill_frame_state_gas, gas_left burned on halt).
+                        // was never created, so the frame rolls its state gas back to the
+                        // baseline (reference restore_state_gas): the reservoir resets to the
+                        // grant rather than accumulating, which also voids any refund credited
+                        // above what the frame spent. The spilled portion was drawn from regular
+                        // gas — on revert it returns there, on halt it stays burned.
                         if (primitives.isEnabledIn(spec, .amsterdam) and !cr.success) {
-                            fr.reservoir_remaining += ir.state_gas_used -| ir.state_gas_spilled;
+                            fr.reservoir_remaining = tx_reservoir;
                             if (cr_status == .Revert) fr.gas_remaining += ir.state_gas_spilled;
                             fr.result.state_gas_used = 0;
                         }
@@ -537,7 +538,11 @@ pub const MainnetHandler = struct {
                         if (dispatch_oog) {
                             if (initial.auth_checkpoint) |cp| ctx.journaled_state.checkpointRevert(cp);
                             var fr = main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
-                            fr.reservoir_remaining = call_reservoir;
+                            // The rollback also reverts the applied delegations, so their
+                            // committed state charges refill too (reference process_top_level
+                            // restore_state_gas_to_entry): the reservoir returns whole, not
+                            // net of the set_delegation charges.
+                            fr.reservoir_remaining = tx_reservoir;
                             return fr;
                         }
                     }
@@ -573,10 +578,34 @@ pub const MainnetHandler = struct {
 
                 // Precompile dispatch for top-level TX targeting a precompile.
                 if (evm.precompiles.get(target)) |precompile_fn| {
+                    // EIP-2780/8037 (Amsterdam+): a value transfer that creates the precompile
+                    // account charges NEW_ACCOUNT state gas. It is a *dispatch* charge — the
+                    // reference pays it in create_evm, before the frame runs — so starving it
+                    // halts the transaction without executing the precompile, and the rollback
+                    // (which also reverts the applied delegations) refills the whole reservoir.
+                    // The main interpreter path spends it via spendStateGas (reservoir first,
+                    // spilling into regular gas); replicate that arithmetic here.
+                    var pc_reservoir = call_reservoir;
+                    var pc_gas_remaining = call_regular;
+                    if (top_new_account_state_gas > 0) {
+                        if (top_new_account_state_gas <= pc_reservoir) {
+                            pc_reservoir -= top_new_account_state_gas;
+                        } else {
+                            const spill = top_new_account_state_gas - pc_reservoir;
+                            pc_reservoir = 0;
+                            if (pc_gas_remaining < spill) {
+                                ctx.journaled_state.checkpointRevert(initial.auth_checkpoint orelse call_checkpoint);
+                                var fr = main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
+                                fr.reservoir_remaining = tx_reservoir;
+                                return fr;
+                            }
+                            pc_gas_remaining -= spill;
+                        }
+                    }
                     // EIP-7928 (Amsterdam+): record the precompile callee in the BAL.
                     // Mirrors the per-frame setupCallCore handling — see host.zig.
                     _ = try ctx.journaled_state.loadAccount(target);
-                    const pc_result = precompile_fn.execute(calldata, call_regular);
+                    const pc_result = precompile_fn.execute(calldata, pc_gas_remaining);
                     switch (pc_result) {
                         .success => |out| {
                             if (out.reverted) {
@@ -587,32 +616,10 @@ pub const MainnetHandler = struct {
                                 fr.reservoir_remaining = call_reservoir;
                                 return fr;
                             }
-                            // EIP-2780/8037 (Amsterdam+): a value transfer that creates the
-                            // precompile account charges NEW_ACCOUNT state gas. The main
-                            // interpreter path spends it via spendStateGas (reservoir first,
-                            // spilling into regular gas); the precompile fast-path returns
-                            // early and must replicate that arithmetic here. The EIP-7702
-                            // set_delegation charges were already applied to call_regular/
-                            // call_reservoir above (before dispatch).
-                            var pc_reservoir = call_reservoir;
-                            var pc_gas_remaining = call_regular - out.gas_used;
-                            if (top_new_account_state_gas > 0) {
-                                if (top_new_account_state_gas <= pc_reservoir) {
-                                    pc_reservoir -= top_new_account_state_gas;
-                                } else {
-                                    const spill = top_new_account_state_gas - pc_reservoir;
-                                    pc_reservoir = 0;
-                                    if (pc_gas_remaining < spill) {
-                                        ctx.journaled_state.checkpointRevert(call_checkpoint);
-                                        return main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
-                                    }
-                                    pc_gas_remaining -= spill;
-                                }
-                            }
                             ctx.journaled_state.checkpointCommit();
                             var fr = main.FrameResult.new(
                                 main.ExecutionResult.new(.Success, out.gas_used),
-                                pc_gas_remaining,
+                                pc_gas_remaining - out.gas_used,
                                 0,
                             );
                             fr.reservoir_remaining = pc_reservoir;
@@ -661,17 +668,24 @@ pub const MainnetHandler = struct {
                 // checkpoint when there were authorizations, else the top-level call checkpoint
                 // (undoing the value transfer). All gas is burned.
                 const dispatch_oog_checkpoint = initial.auth_checkpoint orelse call_checkpoint;
+                // The rollback also reverts the applied delegations, so every state charge
+                // refills and the reservoir returns whole (reference process_top_level
+                // restore_state_gas_to_entry).
                 if (top_new_account_state_gas > 0) {
                     if (!root_interp.gas.spendStateGas(top_new_account_state_gas)) {
                         ctx.journaled_state.checkpointRevert(dispatch_oog_checkpoint);
-                        return main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
+                        var fr = main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
+                        fr.reservoir_remaining = tx_reservoir;
+                        return fr;
                     }
                 }
                 // EIP-2780 (Amsterdam+): top-frame delegation cold-access regular charge.
                 if (top_delegation_gas > 0) {
                     if (!root_interp.gas.spend(top_delegation_gas)) {
                         ctx.journaled_state.checkpointRevert(dispatch_oog_checkpoint);
-                        return main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
+                        var fr = main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
+                        fr.reservoir_remaining = tx_reservoir;
+                        return fr;
                     }
                 }
                 const ir = try executeIterative(root_interp, &host, &return_data_buf);
@@ -688,15 +702,17 @@ pub const MainnetHandler = struct {
                     else => .Halt,
                 };
                 // EIP-8037 (Amsterdam): on top-level non-success (halt or revert), the journal
-                // was rolled back so no state grew — return the non-spilled state gas to the
-                // reservoir. The spilled portion was drawn from regular gas: on revert it returns
-                // to regular gas (→ sender), on halt it stays burned (reference
-                // refill_frame_state_gas then gas_left is burned on halt, kept on revert).
+                // was rolled back so no state grew — the frame rolls its state gas back to the
+                // baseline (reference restore_state_gas). The reservoir resets to `call_reservoir`
+                // rather than accumulating what the frame returned, so a refund credited above
+                // what the frame spent is voided with the state it was credited for. The spilled
+                // portion was drawn from regular gas: on revert it returns to regular gas
+                // (→ sender), on halt it stays burned.
                 var top_state_gas_used = ir.state_gas_used;
                 var top_reservoir = ir.reservoir_remaining;
                 var top_gas_remaining = ir.gas_remaining;
                 if (primitives.isEnabledIn(spec, .amsterdam) and status != .Success) {
-                    top_reservoir += top_state_gas_used -| ir.state_gas_spilled;
+                    top_reservoir = call_reservoir;
                     if (status == .Revert) top_gas_remaining += ir.state_gas_spilled;
                     top_state_gas_used = 0;
                 }

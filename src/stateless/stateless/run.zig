@@ -13,15 +13,9 @@ const ssz_output = @import("ssz_output");
 const zkvm_io = @import("zkvm_io");
 
 pub const Result = struct {
-    /// zkevm@v0.6.2: a successful SszStatelessValidationResult is 69 bytes
-    /// (32-byte root + 1-byte success + 36-byte SszChainConfig trailer).
-    /// A decode-failure output is 61 bytes (empty default SszChainConfig,
-    /// see ssz_output.DEFAULT_FAILED_OUTPUT). Buffer sized for the larger success case.
-    out: [69]u8,
-    /// Number of valid bytes in `out`: 69 on success, 61 on decode failure. The guest
-    /// commits exactly `out[0..len]` — a rejected input must emit 61 bytes, not a
-    /// zero-padded 69, to match the reference `_default_failed_stateless_output`.
-    len: usize,
+    /// zkevm@v0.8.0: SszStatelessValidationResult is a fixed-size 43-byte container,
+    /// so the decode-failure sentinel and a real result are the same length.
+    out: [ssz_output.OUTPUT_SIZE]u8,
     success: bool,
 };
 
@@ -37,9 +31,7 @@ pub fn runStateless(allocator: std.mem.Allocator) !Result {
 
     const si = ssz_decode.decode(allocator, buf_ptr[0..buf_size]) catch |err| {
         std.log.err("{s}", .{@errorName(err)});
-        var out: [69]u8 = .{0} ** 69;
-        @memcpy(out[0..ssz_output.DEFAULT_FAILED_OUTPUT.len], &ssz_output.DEFAULT_FAILED_OUTPUT);
-        return .{ .out = out, .len = ssz_output.DEFAULT_FAILED_OUTPUT.len, .success = false };
+        return .{ .out = ssz_output.DEFAULT_FAILED_OUTPUT, .success = false };
     };
 
     const ep = &si.new_payload_request.execution_payload;
@@ -54,5 +46,5 @@ pub fn runStateless(allocator: std.mem.Allocator) !Result {
     const out = try ssz_output.serialize(allocator, si.chain_config, si.new_payload_request, success);
     std.log.info("root: 0x{x} success={d}", .{ out[0..32].*, @intFromBool(success) });
 
-    return .{ .out = out, .len = out.len, .success = success };
+    return .{ .out = out, .success = success };
 }

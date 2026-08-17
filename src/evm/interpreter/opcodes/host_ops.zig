@@ -621,10 +621,10 @@ pub fn opSelfdestruct(ctx: *InstructionContext) void {
         primitives.isEnabledIn(spec, .tangerine) and
         (if (primitives.isEnabledIn(spec, .spurious_dragon)) result.had_value else true);
     // Pre-Amsterdam: flat G_NEWACCOUNT (25000) regular.
-    // EIP-8037/8246 (Amsterdam+): ACCOUNT_WRITE (8000) regular, plus NEW_ACCOUNT state gas
+    // EIP-8037/8246 (Amsterdam+): ACCOUNT_WRITE execution gas, plus NEW_ACCOUNT state gas
     // (charged below). Positive balance sent to an empty beneficiary.
     if (selfdestruct_charges_new_account) {
-        dyn_gas += if (primitives.isEnabledIn(spec, .amsterdam)) 8000 else 25000;
+        dyn_gas += if (primitives.isEnabledIn(spec, .amsterdam)) gas_costs.ACCOUNT_WRITE_COST else 25000;
     }
 
     if (!ctx.interpreter.gas.spend(dyn_gas)) {
