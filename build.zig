@@ -536,6 +536,7 @@ pub fn build(b: *std.Build) void {
         .{ .m = mods.handler, .name = "handler" },
         .{ .m = mods.mpt, .name = "mpt" },
         .{ .m = mods.rlp_decode, .name = "rlp_decode" },
+        .{ .m = mods.executor, .name = "executor" },
     }) |t| {
         const tst = b.addTest(.{ .root_module = t.m });
         _ = t.name;

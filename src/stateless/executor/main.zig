@@ -25,6 +25,7 @@ const types = @import("executor_types");
 const db_mod = @import("db");
 const context_mod = @import("context");
 const block_validation = @import("./block_validation.zig");
+const block_rlp_size = @import("./block_rlp_size.zig");
 
 /// Re-export so callers can use these types without importing executor_types directly.
 pub const BlockHashEntry = types.BlockHashEntry;
@@ -41,6 +42,11 @@ pub const executor_output = @import("./output.zig");
 pub const executor_tx_decode = @import("./tx_decode.zig");
 pub const executor_rlp_encode = @import("./rlp_encode.zig");
 
+// Sub-file tests are only collected when the file is referenced from the test root.
+test {
+    _ = block_rlp_size;
+}
+
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
 fn mapWithdrawals(alloc: std.mem.Allocator, withdrawals: []const input.Withdrawal) ![]types.Withdrawal {
@@ -56,6 +62,7 @@ fn buildEnv(
     block_hashes: []types.BlockHashEntry,
     withdrawals: []types.Withdrawal,
     parent: ?rlp_decode.ParentHeader,
+    spec: primitives.SpecId,
 ) types.Env {
     const ep = &req.execution_payload;
     return .{
@@ -72,6 +79,9 @@ fn buildEnv(
         .block_hashes = block_hashes,
         .withdrawals = withdrawals,
         .slot_number = ep.slot_number,
+        // EIP-7934: the guest never sees the block's RLP, so its size is derived
+        // from the payload fields (block_rlp_size.compute).
+        .block_rlp_size = block_rlp_size.compute(ep, spec),
         .gas_used_header = ep.gas_used,
         .blob_gas_used_header = ep.blob_gas_used,
         .parent_gas_limit = if (parent) |p| p.gas_limit else null,
@@ -391,7 +401,7 @@ pub fn executeBlockStateless(
     else
         fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
 
-    const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals), parent_header);
+    const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals), parent_header, spec);
     try block_validation.validateBlock(env, spec);
     const txs = try tx_decode.decodeTxsFromInput(alloc, ep.transactions);
 
