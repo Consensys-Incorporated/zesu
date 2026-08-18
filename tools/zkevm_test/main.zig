@@ -43,9 +43,12 @@ pub fn main(init: std.process.Init) !void {
 
     var passed: u64 = 0;
     var failed: u64 = 0;
+    // Test cases whose blocks carry no stateless artifacts: nothing to execute,
+    // so they are reported separately rather than counted as passes.
+    var skipped: u64 = 0;
 
     if (single_file) |path| {
-        processFile(init.io, allocator, path, &passed, &failed) catch {};
+        processFile(init.io, allocator, path, &passed, &failed, &skipped) catch {};
     } else {
         var dir = std.Io.Dir.cwd().openDir(init.io, fixtures_dir, .{ .iterate = true }) catch |err| {
             std.debug.print("error: cannot open fixtures dir '{s}': {}\n", .{ fixtures_dir, err });
@@ -79,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
             defer allocator.free(full_path);
 
             const failed_before = failed;
-            processFile(init.io, allocator, full_path, &passed, &failed) catch {};
+            processFile(init.io, allocator, full_path, &passed, &failed, &skipped) catch {};
             if (stop_on_fail and failed > failed_before) break;
         }
     }
@@ -89,17 +92,20 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("\n============================================================\n", .{});
     std.debug.print("  Results:  {}/{} passed  ({}%)\n", .{ passed, total, pct });
     if (failed > 0) std.debug.print("  Failed:   {}\n", .{failed});
+    if (skipped > 0) std.debug.print("  Skipped:  {} (no statelessInputBytes in any block)\n", .{skipped});
     std.debug.print("============================================================\n", .{});
 
     if (failed > 0) std.process.exit(1);
 }
 
-fn processFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, passed: *u64, failed: *u64) !void {
+fn processFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, passed: *u64, failed: *u64, skipped: *u64) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const json_text = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(256 * 1024 * 1024)) catch |err| {
+    // 2 GiB: zkevm@v0.8.0 ships a 276 MiB fixture (invalid_negative_excess_blob_gas,
+    // 2744 test cases) that a 256 MiB cap silently dropped from the run.
+    const json_text = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(2 * 1024 * 1024 * 1024)) catch |err| {
         std.debug.print("error: cannot read '{s}': {}\n", .{ path, err });
         return;
     };
@@ -130,6 +136,7 @@ fn processFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, passe
         if (blocks_val != .array) continue;
 
         var test_ok = true;
+        var ran_any = false;
         for (blocks_val.array.items, 0..) |block_val, block_idx| {
             if (block_val != .object) continue;
             const in_hex = switch (block_val.object.get("statelessInputBytes") orelse continue) {
@@ -168,9 +175,10 @@ fn processFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, passe
                 std.debug.print("FAIL {s}[{}]  error: {}\n", .{ test_name, block_idx, err });
                 break :blk false;
             };
+            ran_any = true;
             if (!block_ok) test_ok = false;
         }
-        if (test_ok) passed.* += 1 else failed.* += 1;
+        if (!ran_any) skipped.* += 1 else if (test_ok) passed.* += 1 else failed.* += 1;
     }
 }
 
