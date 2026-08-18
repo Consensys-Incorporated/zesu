@@ -45,6 +45,11 @@ pub const executor_rlp_encode = @import("./rlp_encode.zig");
 // Sub-file tests are only collected when the file is referenced from the test root.
 test {
     _ = block_rlp_size;
+    // Zig only analyses a pub fn when something references it, so an entry point
+    // with no in-repo caller can go stale and still compile. refAllDecls forces
+    // every declaration through semantic analysis, so a signature change that
+    // misses a call site fails `zig build test`.
+    std.testing.refAllDecls(@This());
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
@@ -92,14 +97,6 @@ fn buildEnv(
         .parent_excess_blob_gas = if (parent) |p| p.excess_blob_gas else null,
     };
 }
-
-/// Sentinel used by non-stateless executeBlock path: pre_alloc entries already carry
-/// pre_storage_root; storageRootFor is never called in practice.
-const NullStorageRoots = struct {
-    pub fn storageRootFor(_: *const @This(), _: types.Address) ?types.Hash {
-        return null;
-    }
-};
 
 fn finalizeOutput(
     alloc: std.mem.Allocator,
@@ -350,29 +347,6 @@ pub fn executeBlockFromAlloc(
         .bal_hash = result.bal_hash,
         .requests_hash = result.requests_hash,
     };
-}
-
-pub fn executeBlock(
-    alloc: std.mem.Allocator,
-    pre_state_root: [32]u8,
-    pre_alloc: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
-    index: *mpt.NodeIndex,
-    req: input.NewPayloadRequest,
-    block_hashes: []types.BlockHashEntry,
-    fork_name: ?[]const u8,
-) !output.ProofOutput {
-    const ep = &req.execution_payload;
-    const spec = if (fork_name) |name|
-        fork_mod.specForBlock(name, ep.timestamp) orelse fork_mod.mainnetSpec(ep.block_number, ep.timestamp)
-    else
-        fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
-
-    const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals), null);
-    try block_validation.validateBlock(env, spec);
-    const txs = try tx_decode.decodeTxsFromInput(alloc, ep.transactions);
-    const result = try transition_mod.transition(alloc, pre_alloc, env, txs, spec, 1, fork_mod.blockReward(spec));
-    const null_roots = NullStorageRoots{};
-    return finalizeOutput(alloc, pre_state_root, result, index, spec, &null_roots);
 }
 
 /// Stateless block execution: serves all account/storage reads from the MPT witness
