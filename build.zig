@@ -223,6 +223,7 @@ fn buildModules(
     });
     ssz_decode.addImport("input", input);
     ssz_decode.addImport("rlp_decode", rlp_decode);
+    ssz_decode.addImport("hardfork", hardfork);
 
     const ssz_output = mkmod(b, expose, "ssz_output", .{
         .root_source_file = b.path("src/stateless/stateless/ssz_output.zig"),
@@ -537,6 +538,7 @@ pub fn build(b: *std.Build) void {
         .{ .m = mods.mpt, .name = "mpt" },
         .{ .m = mods.rlp_decode, .name = "rlp_decode" },
         .{ .m = mods.executor, .name = "executor" },
+        .{ .m = mods.hardfork, .name = "hardfork" },
     }) |t| {
         const tst = b.addTest(.{ .root_module = t.m });
         _ = t.name;

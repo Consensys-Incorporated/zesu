@@ -17,6 +17,7 @@
 const std = @import("std");
 const input_mod = @import("input");
 const rlp_decode = @import("rlp_decode");
+const fork_mod = @import("hardfork");
 
 // ── Primitive reads (little-endian) ──────────────────────────────────────────
 
@@ -30,12 +31,20 @@ inline fn readU64(data: []const u8, off: usize) u64 {
 
 // ── Input schema id ──────────────────────────────────────────────────────────
 
-/// `STATELESS_INPUT_SCHEMA_ID` (stateless_ssz.py) = ProtocolFork.Amsterdam (0x15)
-/// << 8 | schema revision (0x01), stored big-endian ahead of the SSZ payload.
-/// The reference guest rejects any other value outright, so the schema pins both
-/// the container layout and the fork the guest implements.
-pub const SCHEMA_ID: u16 = 0x1501;
-const SCHEMA_FORK_NAME = "Amsterdam";
+/// `STATELESS_INPUT_SCHEMA_ID` (stateless_ssz.py) = ProtocolFork index << 8 |
+/// schema revision, stored big-endian ahead of the SSZ payload.
+///
+/// The reference guest is single-fork — each spec module hardcodes its own id
+/// and rejects every other value, so the fork comes from *which* guest you run.
+/// zesu implements every fork in one binary, so it takes the fork from the id
+/// (`specFromProtocolFork`) rather than assuming Amsterdam: an input says which
+/// rules it must be executed under, and no external override is needed.
+///
+/// Unknown fork indices and unknown revisions are still rejected — a guest
+/// cannot execute rules it does not have, and the container layout is pinned to
+/// revision 0x01.
+pub const SCHEMA_ID: u16 = 0x1501; // Amsterdam, revision 1 — what the fixtures carry
+pub const SCHEMA_REVISION: u8 = 0x01;
 
 // ── List[ByteList] decoder ────────────────────────────────────────────────────
 
@@ -134,7 +143,16 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     else
         data;
 
-    if (payload.len < 2 or std.mem.readInt(u16, payload[0..2], .big) != SCHEMA_ID) return error.InvalidSsz;
+    // schema_id is two bytes, big-endian, and each byte stands alone:
+    //   [0] ProtocolFork index — which fork's rules to execute (0x15 = Amsterdam)
+    //   [1] schema revision    — how the rest of the payload is encoded
+    if (payload.len < 2) return error.InvalidSsz;
+    const fork_index = payload[0];
+    const revision = payload[1];
+    if (revision != SCHEMA_REVISION) return error.InvalidSsz;
+    const spec = fork_mod.specFromProtocolFork(fork_index) orelse return error.InvalidSsz;
+    // Kept whole for the output, which echoes back the id it was given.
+    const schema_id = std.mem.readInt(u16, payload[0..2], .big);
 
     // ── SszStatelessInput fixed region (20 bytes) ────────────────────────────
     const body = payload[2..];
@@ -342,8 +360,8 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
         },
         .chain_config = .{
             .chain_id = if (chain_id != 0) chain_id else 1,
-            .fork_name = SCHEMA_FORK_NAME,
-            .schema_id = SCHEMA_ID,
+            .fork_name = fork_mod.specName(spec),
+            .schema_id = schema_id,
         },
         .public_keys = public_keys,
     };
