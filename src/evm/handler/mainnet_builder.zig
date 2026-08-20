@@ -574,6 +574,14 @@ pub const MainnetHandler = struct {
                     {
                         ctx.journaled_state.emitTransferLog(tx.caller, target, tx.value);
                     }
+                } else if (!primitives.isEnabledIn(spec, .spurious_dragon) and
+                    callee_load.data.isLoadedAsNotExistingNotTouched())
+                {
+                    // Pre-EIP-161 (Frontier/Homestead/TangerineWhistle): a zero-value CALL to a
+                    // non-existent address still creates it as an empty account ("touches" it).
+                    // EIP-161 (Spurious Dragon) removed empty accounts on touch, making this a
+                    // no-op there. Mirrors the sub-frame path in host.zig setupCallCore.
+                    ctx.journaled_state.touchAccount(target);
                 }
 
                 // Precompile dispatch for top-level TX targeting a precompile.
