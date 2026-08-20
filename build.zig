@@ -612,7 +612,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
-    const spec_test_version = "tests-glamsterdam-devnet@v8.1.0";
+    const spec_test_version = "tests-glamsterdam-devnet@v8.1.1";
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-specs " ++ spec_test_version ++ " fixtures");
     fetch_fixtures_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
