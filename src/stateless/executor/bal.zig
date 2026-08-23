@@ -336,7 +336,7 @@ pub fn encodeAndHash(alloc: std.mem.Allocator, entries: []const EncodeEntry) ![3
     return rlp.keccak256(bytes);
 }
 
-fn encodeBalRlp(alloc: std.mem.Allocator, entries: []const EncodeEntry) ![]u8 {
+pub fn encodeBalRlp(alloc: std.mem.Allocator, entries: []const EncodeEntry) ![]u8 {
     var items = try std.ArrayListUnmanaged([]const u8).initCapacity(alloc, entries.len);
     for (entries) |entry| try items.append(alloc, try encodeEntryRlp(alloc, entry));
     return rlp.encodeList(alloc, items.items);
