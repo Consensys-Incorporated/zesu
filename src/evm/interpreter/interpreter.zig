@@ -520,10 +520,20 @@ pub const Interpreter = struct {
 // INVARIANT: only add opcodes here that are:
 //   1. Valid since Frontier (no fork gate needed), AND
 //   2. Behavior-stable across all forks (no semantic changes per EIP).
-// Fork-gated opcodes (e.g. SHL/SHR pre-Constantinople, PUSH0 pre-Shanghai)
-// and fork-modified opcodes (e.g. SELFDESTRUCT post-EIP-6780) must stay in
-// the cold `else` path where the InstructionTable enforces the correct
-// per-fork handler.
+// Fork-*modified* opcodes (e.g. SELFDESTRUCT post-EIP-6780) must stay in the
+// cold `else` path where the InstructionTable enforces the correct per-fork
+// handler — a single flag cannot express "different handler per fork".
+//
+// A fork-*gated* opcode — one that is either the same handler or invalid, never
+// a different handler — is admissible under a narrow exception: hoist the fork
+// test out of the loop into a `const` below and guard the case with it, falling
+// through to `else` when the gate is closed so the table still supplies
+// opUnknown. This is sound because the spec is fixed for the lifetime of a
+// frame. It is worth doing only for opcodes hot enough that a register-resident
+// branch beats a table load plus an indirect call; SHL/SHR/SAR qualified on the
+// Amsterdam benchmark tiers, where they measured 3,500-4,810 cost-per-gas
+// against a median of 1,962 with ~80% of it in dispatch rather than the shift.
+// PUSH0 and the rest stay cold.
 
 fn runDispatch(
     self: *Interpreter,
@@ -532,6 +542,8 @@ fn runDispatch(
     comptime check_pending: bool,
 ) void {
     if (!self.bytecode.isNotEnd()) return;
+    // EIP-145. Loop-invariant: spec_id is fixed for the frame.
+    const has_shifts = primitives.isEnabledIn(self.runtime_flags.spec_id, .constantinople);
     sw: switch (self.bytecode.opcode()) {
         0x00 => { // STOP
             self.bytecode.relativeJump(1);
@@ -647,6 +659,45 @@ fn runDispatch(
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
+        // SHL/SHR/SAR — fork-gated on Constantinople (EIP-145), see the note above.
+        // When the gate is closed `coldStep` reads the table, which holds
+        // opUnknown for these on older forks.
+        0x1B => { // SHL
+            self.bytecode.relativeJump(1);
+            if (has_shifts) {
+                if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                    self.halt(.out_of_gas);
+                    return;
+                }
+                opcodes.opShl(ctx);
+            } else if (!coldStep(self, table, ctx, 0x1B)) return;
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x1C => { // SHR
+            self.bytecode.relativeJump(1);
+            if (has_shifts) {
+                if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                    self.halt(.out_of_gas);
+                    return;
+                }
+                opcodes.opShr(ctx);
+            } else if (!coldStep(self, table, ctx, 0x1C)) return;
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x1D => { // SAR
+            self.bytecode.relativeJump(1);
+            if (has_shifts) {
+                if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                    self.halt(.out_of_gas);
+                    return;
+                }
+                opcodes.opSar(ctx);
+            } else if (!coldStep(self, table, ctx, 0x1D)) return;
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
         0x50 => { // POP
             self.bytecode.relativeJump(1);
             if (!self.gas.spend(gas_costs.G_BASE)) {
@@ -654,6 +705,39 @@ fn runDispatch(
                 return;
             }
             opcodes.opPop(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        // MLOAD/MSTORE/MSTORE8 — Frontier, behaviour-stable, and all three charge
+        // G_VERYLOW statically with memory expansion billed inside the handler,
+        // so they meet the invariant unconditionally.
+        0x51 => { // MLOAD
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opMload(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x52 => { // MSTORE
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opMstore(ctx);
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
+        0x53 => { // MSTORE8
+            self.bytecode.relativeJump(1);
+            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opMstore8(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
@@ -728,16 +812,29 @@ fn runDispatch(
         // via the table — opUnknown on old forks, real handler on new forks.
         else => |op| {
             self.bytecode.relativeJump(1);
-            const entry = table[op];
-            if (!self.gas.spend(entry.static_gas)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            entry.func(ctx);
+            if (!coldStep(self, table, ctx, op)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
     }
+}
+
+/// The cold path: table load, static gas, indirect call. Returns false if the
+/// opcode halted the interpreter on gas, in which case the caller must return.
+/// `relativeJump` is the caller's responsibility, as in the inlined cases.
+inline fn coldStep(
+    self: *Interpreter,
+    table: *const InstructionTable,
+    ctx: *InstructionContext,
+    op: u8,
+) bool {
+    const entry = table[op];
+    if (!self.gas.spend(entry.static_gas)) {
+        self.halt(.out_of_gas);
+        return false;
+    }
+    entry.func(ctx);
+    return true;
 }
 
 /// Calculate number of words from bytes
