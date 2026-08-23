@@ -1067,46 +1067,47 @@ fn finalizeCreateCore(
 // ---------------------------------------------------------------------------
 
 /// Convert an Address (20 bytes big-endian) to U256
+// These four converters ran a byte at a time, each iteration shifting a full
+// u256 — around seven machine ops per byte, so 140 for an address and 250 for a
+// hash. They are not incidental: `u256ToAddress` runs on every BALANCE,
+// EXTCODE*, CALL, CALLCODE, DELEGATECALL, STATICCALL and SELFDESTRUCT, which is
+// the hot path of the call-heavy workloads. Converting a machine word at a time
+// costs one byteswap per word instead (this ISA has no `rev8`, so the byteswap
+// is itself shift/or, but over eight bytes rather than one).
+
 pub fn addressToU256(addr: primitives.Address) primitives.U256 {
-    var result: primitives.U256 = 0;
-    for (addr) |byte| {
-        result = (result << 8) | byte;
-    }
-    return result;
+    const U = primitives.U256;
+    return (@as(U, std.mem.readInt(u32, addr[0..4], .big)) << 128) |
+        (@as(U, std.mem.readInt(u64, addr[4..12], .big)) << 64) |
+        @as(U, std.mem.readInt(u64, addr[12..20], .big));
 }
 
 /// Convert U256 to Address (take low 20 bytes)
 pub fn u256ToAddress(val: primitives.U256) primitives.Address {
-    var addr: primitives.Address = [_]u8{0} ** 20;
-    var v = val;
-    var i: usize = 20;
-    while (i > 0) {
-        i -= 1;
-        addr[i] = @intCast(v & 0xFF);
-        v >>= 8;
-    }
+    var addr: primitives.Address = undefined;
+    // Bits at or above 160 are discarded, matching the truncation this replaces.
+    std.mem.writeInt(u32, addr[0..4], @truncate(val >> 128), .big);
+    std.mem.writeInt(u64, addr[4..12], @truncate(val >> 64), .big);
+    std.mem.writeInt(u64, addr[12..20], @truncate(val), .big);
     return addr;
 }
 
 /// Convert a 32-byte Hash to U256 (big-endian)
 pub fn hashToU256(h: primitives.Hash) primitives.U256 {
-    var result: primitives.U256 = 0;
-    for (h) |byte| {
-        result = (result << 8) | byte;
-    }
-    return result;
+    const U = primitives.U256;
+    return (@as(U, std.mem.readInt(u64, h[0..8], .big)) << 192) |
+        (@as(U, std.mem.readInt(u64, h[8..16], .big)) << 128) |
+        (@as(U, std.mem.readInt(u64, h[16..24], .big)) << 64) |
+        @as(U, std.mem.readInt(u64, h[24..32], .big));
 }
 
 /// Convert U256 to a 32-byte Hash (big-endian)
 pub fn u256ToHash(val: primitives.U256) primitives.Hash {
-    var h: primitives.Hash = [_]u8{0} ** 32;
-    var v = val;
-    var i: usize = 32;
-    while (i > 0) {
-        i -= 1;
-        h[i] = @intCast(v & 0xFF);
-        v >>= 8;
-    }
+    var h: primitives.Hash = undefined;
+    std.mem.writeInt(u64, h[0..8], @truncate(val >> 192), .big);
+    std.mem.writeInt(u64, h[8..16], @truncate(val >> 128), .big);
+    std.mem.writeInt(u64, h[16..24], @truncate(val >> 64), .big);
+    std.mem.writeInt(u64, h[24..32], @truncate(val), .big);
     return h;
 }
 

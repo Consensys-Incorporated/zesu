@@ -720,3 +720,42 @@ test "SELFDESTRUCT: stack underflow halts" {
 
     try expectEqual(.stack_underflow, interp.result);
 }
+
+// --- Word-at-a-time U256 <-> Address/Hash converters ---
+//
+// These replaced byte-at-a-time loops on the hot state-access path. The failure
+// mode of a word-at-a-time rewrite is a wrong byte order or a mis-split at a word
+// boundary, neither of which a round-trip alone would catch if both directions
+// shared the same mistake — so pin the byte layout explicitly as well.
+
+const U256 = primitives.U256;
+
+test "u256 <-> Address/Hash converters preserve big-endian byte order" {
+    // Distinct, non-symmetric bytes so any transposition shows up.
+    var addr: primitives.Address = undefined;
+    for (&addr, 0..) |*b, i| b.* = @intCast(0x10 + i);
+    const as_u256 = host_module.addressToU256(addr);
+    try expectEqual(@as(U256, 0x101112131415161718191A1B1C1D1E1F20212223), as_u256);
+    try expectEqual(addr, host_module.u256ToAddress(as_u256));
+
+    var hash: primitives.Hash = undefined;
+    for (&hash, 0..) |*b, i| b.* = @intCast(0x20 + i);
+    const h_u256 = host_module.hashToU256(hash);
+    // Most-significant byte of the u256 must be hash[0], least must be hash[31].
+    try expectEqual(@as(u8, 0x20), @as(u8, @truncate(h_u256 >> 248)));
+    try expectEqual(@as(u8, 0x3F), @as(u8, @truncate(h_u256)));
+    try expectEqual(hash, host_module.u256ToHash(h_u256));
+}
+
+test "u256ToAddress discards bits above 160, u256ToHash round-trips extremes" {
+    // A dirty high half must not leak into the address.
+    const dirty = (@as(U256, std.math.maxInt(u96)) << 160) | 0xDEADBEEF;
+    try expectEqual(host_module.u256ToAddress(0xDEADBEEF), host_module.u256ToAddress(dirty));
+    try expectEqual(@as(U256, 0xDEADBEEF), host_module.addressToU256(host_module.u256ToAddress(dirty)));
+
+    for ([_]U256{ 0, 1, std.math.maxInt(U256), @as(U256, 1) << 255, @as(U256, 1) << 160 }) |v| {
+        try expectEqual(v, host_module.hashToU256(host_module.u256ToHash(v)));
+    }
+    try expectEqual(@as(U256, 0), host_module.addressToU256([_]u8{0} ** 20));
+    try expectEqual(@as(U256, (1 << 160) - 1), host_module.addressToU256([_]u8{0xFF} ** 20));
+}
