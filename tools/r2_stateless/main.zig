@@ -277,12 +277,10 @@ fn runBlock(gpa: std.mem.Allocator, alloc: std.mem.Allocator, block: std.json.Ob
     const out_stripped = if (std.mem.startsWith(u8, out_hex, "0x")) out_hex[2..] else out_hex;
 
     // EIP-8025 (optional proofs): when the stateless input cannot be decoded, the guest
-    // emits the "default failed" result (root=0, successful_validation=false, default
-    // ChainConfig) — reference stateless_guest run_stateless_guest /
-    // _default_failed_stateless_output. The fixture's expected output for such blocks is
-    // exactly ssz_output.DEFAULT_FAILED_OUTPUT (61 bytes), not the normal 69-byte
-    // SszStatelessValidationResult, so the decode attempt must come before any length check
-    // on statelessOutputBytes.
+    // emits the "default failed" result (root=0, successful_validation=false, chain_id=0,
+    // schema_id=0) — reference stateless_guest run_stateless_guest /
+    // _default_failed_stateless_output. The decode attempt must come before any length
+    // check on statelessOutputBytes.
     const si = ssz_decode.decode(alloc, input_bytes) catch {
         const failed_hex = std.fmt.bytesToHex(ssz_output.DEFAULT_FAILED_OUTPUT, .lower);
         const ok = std.ascii.eqlIgnoreCase(out_stripped, &failed_hex);
@@ -295,11 +293,11 @@ fn runBlock(gpa: std.mem.Allocator, alloc: std.mem.Allocator, block: std.json.Ob
         return;
     };
 
-    if (out_stripped.len != 138) {
+    if (out_stripped.len != 2 * ssz_output.OUTPUT_SIZE) {
         try appendResult(gpa, results, number, false, "unexpected statelessOutputBytes length");
         return;
     }
-    var expected: [69]u8 = undefined;
+    var expected: [ssz_output.OUTPUT_SIZE]u8 = undefined;
     _ = std.fmt.hexToBytes(&expected, out_stripped) catch {
         try appendResult(gpa, results, number, false, "invalid statelessOutputBytes hex");
         return;
@@ -316,7 +314,7 @@ fn runBlock(gpa: std.mem.Allocator, alloc: std.mem.Allocator, block: std.json.Ob
     };
 
     // Serialize the SSZ output (the guest's public commitment): 32-byte
-    // new_payload_request root + 1-byte success + 72-byte SszChainConfig.
+    // new_payload_request root + 1-byte success + chain_id + schema_id.
     const computed = try ssz_output.serialize(alloc, si.chain_config, si.new_payload_request, validated);
     const computed_hex = std.fmt.bytesToHex(computed, .lower);
 

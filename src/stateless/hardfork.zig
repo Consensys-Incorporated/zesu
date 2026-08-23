@@ -43,6 +43,8 @@ pub fn specFromFork(name: []const u8) ?primitives.SpecId {
     const table = [_]Entry{
         .{ .k = "Frontier", .v = .frontier },
         .{ .k = "Homestead", .v = .homestead },
+        .{ .k = "DAO", .v = .dao_fork },
+        .{ .k = "DAOFork", .v = .dao_fork },
         .{ .k = "EIP150", .v = .tangerine },
         .{ .k = "TangerineWhistle", .v = .tangerine },
         .{ .k = "EIP158", .v = .spurious_dragon },
@@ -71,6 +73,46 @@ pub fn specFromFork(name: []const u8) ?primitives.SpecId {
         if (std.mem.eql(u8, name, e.k)) return e.v;
     }
     return null;
+}
+
+/// Map a `ProtocolFork` index to its SpecId.
+///
+/// `ProtocolFork` is the stable fork enum the stateless schemas are keyed by
+/// (execution-specs `stateless.py`, tests-zkevm@v0.8.0). A stateless input's
+/// schema id is `fork_index << 8 | revision`, so this table is what lets the
+/// guest execute the fork the input names instead of assuming one.
+///
+/// Values are the reference enum verbatim. Note 0x07 is `StPetersburg`: the
+/// enum merged ConstantinopleFix into it, so there is no separate
+/// Constantinople index.
+///
+/// Returns null for any index the enum does not define — a guest cannot
+/// execute a fork it has no rules for, and the input must be rejected.
+pub fn specFromProtocolFork(index: u8) ?primitives.SpecId {
+    return switch (index) {
+        0x01 => .frontier,
+        0x02 => .homestead,
+        0x03 => .dao_fork,
+        0x04 => .tangerine, // TangerineWhistle
+        0x05 => .spurious_dragon,
+        0x06 => .byzantium,
+        0x07 => .petersburg, // StPetersburg
+        0x08 => .istanbul,
+        0x09 => .muir_glacier,
+        0x0A => .berlin,
+        0x0B => .london,
+        0x0C => .arrow_glacier,
+        0x0D => .gray_glacier,
+        0x0E => .merge, // Paris
+        0x0F => .shanghai,
+        0x10 => .cancun,
+        0x11 => .prague,
+        0x12 => .osaka,
+        0x13 => .bpo1,
+        0x14 => .bpo2,
+        0x15 => .amsterdam,
+        else => null,
+    };
 }
 
 // ─── Transition forks ─────────────────────────────────────────────────────────
@@ -154,4 +196,45 @@ pub fn blockReward(spec: primitives.SpecId) i64 {
         .constantinople, .petersburg, .istanbul, .muir_glacier, .berlin, .london, .arrow_glacier, .gray_glacier => 2_000_000_000_000_000_000,
         else => -1, // post-Merge: no block reward
     };
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+test "specFromProtocolFork: reference enum values" {
+    const t = std.testing;
+    try t.expectEqual(primitives.SpecId.frontier, specFromProtocolFork(0x01).?);
+    try t.expectEqual(primitives.SpecId.dao_fork, specFromProtocolFork(0x03).?);
+    // ProtocolFork merged ConstantinopleFix into StPetersburg — 0x07 is Petersburg,
+    // and no index maps to Constantinople.
+    try t.expectEqual(primitives.SpecId.petersburg, specFromProtocolFork(0x07).?);
+    try t.expectEqual(primitives.SpecId.merge, specFromProtocolFork(0x0E).?); // Paris
+    try t.expectEqual(primitives.SpecId.osaka, specFromProtocolFork(0x12).?);
+    try t.expectEqual(primitives.SpecId.bpo2, specFromProtocolFork(0x14).?);
+    try t.expectEqual(primitives.SpecId.amsterdam, specFromProtocolFork(0x15).?);
+}
+
+test "specFromProtocolFork: undefined indices are rejected" {
+    const t = std.testing;
+    // 0x00 predates the enum; 0x16 is past Amsterdam, the newest fork zesu has
+    // rules for. eip8025's invalid_stateless_input_bytes fixture uses 0x1601 and
+    // requires the guest to reject it.
+    try t.expectEqual(@as(?primitives.SpecId, null), specFromProtocolFork(0x00));
+    try t.expectEqual(@as(?primitives.SpecId, null), specFromProtocolFork(0x16));
+    try t.expectEqual(@as(?primitives.SpecId, null), specFromProtocolFork(0xFF));
+}
+
+test "specFromProtocolFork: every mapped fork survives the name round-trip" {
+    // The decoder stores specName(spec) as the input's fork_name, which
+    // executeStatelessInput resolves back through specFromFork. A fork whose
+    // name is missing from that table would silently fall back to the mainnet
+    // schedule, so every index must round-trip.
+    for (1..0x16) |i| {
+        const spec = specFromProtocolFork(@intCast(i)) orelse return error.MissingFork;
+        const name = specName(spec);
+        const back = specFromFork(name) orelse {
+            std.debug.print("fork index 0x{x:0>2} → \"{s}\" is not in specFromFork\n", .{ i, name });
+            return error.NameNotResolvable;
+        };
+        try std.testing.expectEqual(spec, back);
+    }
 }

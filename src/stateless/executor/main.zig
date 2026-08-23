@@ -25,6 +25,7 @@ const types = @import("executor_types");
 const db_mod = @import("db");
 const context_mod = @import("context");
 const block_validation = @import("./block_validation.zig");
+const block_rlp_size = @import("./block_rlp_size.zig");
 
 /// Re-export so callers can use these types without importing executor_types directly.
 pub const BlockHashEntry = types.BlockHashEntry;
@@ -41,6 +42,16 @@ pub const executor_output = @import("./output.zig");
 pub const executor_tx_decode = @import("./tx_decode.zig");
 pub const executor_rlp_encode = @import("./rlp_encode.zig");
 
+// Sub-file tests are only collected when the file is referenced from the test root.
+test {
+    _ = block_rlp_size;
+    // Zig only analyses a pub fn when something references it, so an entry point
+    // with no in-repo caller can go stale and still compile. refAllDecls forces
+    // every declaration through semantic analysis, so a signature change that
+    // misses a call site fails `zig build test`.
+    std.testing.refAllDecls(@This());
+}
+
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
 fn mapWithdrawals(alloc: std.mem.Allocator, withdrawals: []const input.Withdrawal) ![]types.Withdrawal {
@@ -56,6 +67,7 @@ fn buildEnv(
     block_hashes: []types.BlockHashEntry,
     withdrawals: []types.Withdrawal,
     parent: ?rlp_decode.ParentHeader,
+    spec: primitives.SpecId,
 ) types.Env {
     const ep = &req.execution_payload;
     return .{
@@ -72,6 +84,9 @@ fn buildEnv(
         .block_hashes = block_hashes,
         .withdrawals = withdrawals,
         .slot_number = ep.slot_number,
+        // EIP-7934: the guest never sees the block's RLP, so its size is derived
+        // from the payload fields (block_rlp_size.compute).
+        .block_rlp_size = block_rlp_size.compute(ep, spec),
         .gas_used_header = ep.gas_used,
         .blob_gas_used_header = ep.blob_gas_used,
         .parent_gas_limit = if (parent) |p| p.gas_limit else null,
@@ -82,14 +97,6 @@ fn buildEnv(
         .parent_excess_blob_gas = if (parent) |p| p.excess_blob_gas else null,
     };
 }
-
-/// Sentinel used by non-stateless executeBlock path: pre_alloc entries already carry
-/// pre_storage_root; storageRootFor is never called in practice.
-const NullStorageRoots = struct {
-    pub fn storageRootFor(_: *const @This(), _: types.Address) ?types.Hash {
-        return null;
-    }
-};
 
 fn finalizeOutput(
     alloc: std.mem.Allocator,
@@ -342,29 +349,6 @@ pub fn executeBlockFromAlloc(
     };
 }
 
-pub fn executeBlock(
-    alloc: std.mem.Allocator,
-    pre_state_root: [32]u8,
-    pre_alloc: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
-    index: *mpt.NodeIndex,
-    req: input.NewPayloadRequest,
-    block_hashes: []types.BlockHashEntry,
-    fork_name: ?[]const u8,
-) !output.ProofOutput {
-    const ep = &req.execution_payload;
-    const spec = if (fork_name) |name|
-        fork_mod.specForBlock(name, ep.timestamp) orelse fork_mod.mainnetSpec(ep.block_number, ep.timestamp)
-    else
-        fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
-
-    const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals), null);
-    try block_validation.validateBlock(env, spec);
-    const txs = try tx_decode.decodeTxsFromInput(alloc, ep.transactions);
-    const result = try transition_mod.transition(alloc, pre_alloc, env, txs, spec, 1, fork_mod.blockReward(spec));
-    const null_roots = NullStorageRoots{};
-    return finalizeOutput(alloc, pre_state_root, result, index, spec, &null_roots);
-}
-
 /// Stateless block execution: serves all account/storage reads from the MPT witness
 /// via `WitnessDatabase` (no pre-built pre_alloc needed).
 ///
@@ -391,7 +375,7 @@ pub fn executeBlockStateless(
     else
         fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
 
-    const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals), parent_header);
+    const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals), parent_header, spec);
     try block_validation.validateBlock(env, spec);
     const txs = try tx_decode.decodeTxsFromInput(alloc, ep.transactions);
 
@@ -450,11 +434,21 @@ pub fn executeStatelessInput(
 ) !output.ProofOutput {
     const ep = &si.new_payload_request.execution_payload;
 
-    // EIP-8025: reject blocks where the active fork has not yet activated.
-    const cc = si.chain_config;
-    if (cc.activation_block == null and cc.activation_timestamp == null) return error.ChainConfigInvalid;
-    if (cc.activation_block) |b| if (ep.block_number < b) return error.ChainConfigInvalid;
-    if (cc.activation_timestamp) |t| if (ep.timestamp < t) return error.ChainConfigInvalid;
+    // EIP-4844 / engine API: the payload's versioned hashes must equal the blob
+    // hashes of its blob transactions, concatenated in transaction order
+    // (reference execution_engine/new_payload.py is_valid_versioned_hashes).
+    {
+        var next: usize = 0;
+        for (ep.transactions) |tx| {
+            if (tx.tx_type != 3) continue;
+            for (tx.blob_hashes) |h| {
+                if (next >= si.new_payload_request.versioned_hashes.len) return error.InvalidVersionedHashes;
+                if (!std.mem.eql(u8, &si.new_payload_request.versioned_hashes[next], &h)) return error.InvalidVersionedHashes;
+                next += 1;
+            }
+        }
+        if (next != si.new_payload_request.versioned_hashes.len) return error.InvalidVersionedHashes;
+    }
 
     const pre_state_root_raw = rlp_decode.findPreStateRoot(si.witness.headers, ep.block_number);
     const pre_state_root = pre_state_root_raw orelse ep.state_root;
