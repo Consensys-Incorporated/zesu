@@ -35,16 +35,18 @@ const ACCESS_LIST_STORAGE_KEY_FLOOR_TOKENS: u64 = 32 * FLOOR_NONZERO_TOKEN_COST;
 // calculate_intrinsic_cost.
 const AM_TX_BASE: u64 = 12000; // sender cost (ECDSA recovery + sender access/write)
 const AM_COLD_ACCOUNT_ACCESS: u64 = 3000; // recipient touch (non-self call)
-const AM_COLD_STORAGE_ACCESS: u64 = 3000;
-const AM_ACCOUNT_WRITE: u64 = 8000;
-const AM_CREATE_ACCESS: u64 = AM_ACCOUNT_WRITE + AM_COLD_STORAGE_ACCESS; // 11000
-const AM_TX_VALUE_COST: u64 = 4244; // recipient balance write for a value transfer
-const AM_TRANSFER_LOG_COST: u64 = 1756; // EIP-7708 transfer log
-const AM_TX_DATA_TOKEN_STANDARD: u64 = 4; // regular gas per calldata token
+const AM_WARM_ACCESS: u64 = 100;
+const AM_COLD_STORAGE_ACCESS: u64 = 2100;
+const AM_ACCOUNT_WRITE: u64 = 9000;
+const AM_CREATE_ACCESS: u64 = AM_ACCOUNT_WRITE + AM_COLD_ACCOUNT_ACCESS; // 12000
+const AM_TX_VALUE_COST: u64 = 6000; // recipient balance write for a value transfer
+const AM_TX_DATA_TOKEN_STANDARD: u64 = 4; // execution gas per calldata token
 const AM_TX_DATA_TOKEN_FLOOR: u64 = 16; // floor gas per calldata token
-const AM_TX_ACCESS_LIST_ADDRESS: u64 = AM_COLD_ACCOUNT_ACCESS; // 3000
-const AM_TX_ACCESS_LIST_STORAGE_KEY: u64 = AM_COLD_STORAGE_ACCESS; // 3000
-// REGULAR_PER_AUTH_BASE_COST = AUTH_TUPLE_BYTES(101)*TX_DATA_TOKEN_FLOOR(16)
+// Access-list entries pre-warm, so they pay the cold/warm delta rather than the
+// full cold cost — the warm access itself is charged at first use.
+const AM_TX_ACCESS_LIST_ADDRESS: u64 = AM_COLD_ACCOUNT_ACCESS - AM_WARM_ACCESS; // 2900
+const AM_TX_ACCESS_LIST_STORAGE_KEY: u64 = AM_COLD_STORAGE_ACCESS - AM_WARM_ACCESS; // 2000
+// EXECUTION_PER_AUTH_BASE_COST = AUTH_TUPLE_BYTES(101)*TX_DATA_TOKEN_FLOOR(16)
 //   + PRECOMPILE_ECRECOVER(3000) + COLD_ACCOUNT_ACCESS(3000) + 2*WARM_ACCESS(100)
 const AM_REGULAR_PER_AUTH_BASE_COST: u64 = 101 * 16 + 3000 + 3000 + 2 * 100; // 7816
 const AM_CODE_INIT_PER_WORD: u64 = 2; // EIP-3860 init code word cost
@@ -159,6 +161,18 @@ pub const Validation = struct {
             else
                 TX_BASE_COST;
             if (floor_gas > 0 and tx.gas_limit < floor_base + floor_gas) {
+                return ValidationError.InsufficientGas;
+            }
+        }
+
+        // EIP-7825/8037 (Amsterdam+): the execution-gas budget is capped at
+        // TX_MAX_GAS_LIMIT, so a transaction whose intrinsic execution gas — or whose
+        // calldata floor — exceeds the cap can never be paid for out of it, however
+        // large its gas limit (reference validate_transaction).
+        if (primitives.isEnabledIn(spec, .amsterdam)) {
+            const floor_base: u64 = AM_TX_BASE + recipientRegularGasAmsterdam(tx);
+            if (initial_gas > interpreter_mod.gas_costs.TX_MAX_GAS_LIMIT) return ValidationError.InsufficientGas;
+            if (floor_gas > 0 and floor_base + floor_gas > interpreter_mod.gas_costs.TX_MAX_GAS_LIMIT) {
                 return ValidationError.InsufficientGas;
             }
         }
@@ -396,22 +410,17 @@ pub const Validation = struct {
 
     /// EIP-2780 (Amsterdam+) decomposed intrinsic gas: returns regular + state total.
     /// Mirrors execution-specs amsterdam/transactions.py calculate_intrinsic_cost.
-    /// EIP-2780 (Amsterdam+) recipient regular-gas cost = base_regular_gas − TX_BASE.
-    /// Reference calculate_intrinsic_cost recipient_regular_gas: CREATE_ACCESS (+TRANSFER_LOG
-    /// for a value create); COLD_ACCOUNT_ACCESS (+TRANSFER_LOG+TX_VALUE for a value call);
-    /// 0 for a self-transfer. Anchors both the intrinsic and the calldata floor.
+    /// EIP-2780 (Amsterdam+) recipient execution-gas cost = base_execution_gas − TX_BASE.
+    /// Reference calculate_intrinsic_cost recipient_execution_gas: CREATE_ACCESS for a
+    /// create; COLD_ACCOUNT_ACCESS (+TX_VALUE_COST for a value call); 0 for a
+    /// self-transfer. Anchors both the intrinsic and the calldata floor.
     pub fn recipientRegularGasAmsterdam(tx: *const context.TxEnv) u64 {
-        const has_value = tx.value > 0;
         switch (tx.kind) {
-            .Create => {
-                var g: u64 = AM_CREATE_ACCESS;
-                if (has_value) g += AM_TRANSFER_LOG_COST;
-                return g;
-            },
+            .Create => return AM_CREATE_ACCESS,
             .Call => |target| {
                 if (std.mem.eql(u8, &target, &tx.caller)) return 0; // self-transfer
                 var g: u64 = AM_COLD_ACCOUNT_ACCESS;
-                if (has_value) g += AM_TRANSFER_LOG_COST + AM_TX_VALUE_COST;
+                if (tx.value > 0) g += AM_TX_VALUE_COST;
                 return g;
             },
         }
@@ -441,7 +450,7 @@ pub const Validation = struct {
             // at the top frame (reference prepare_dispatch), not the intrinsic.
         }
 
-        // Access list: 3000 per address, 3000 per storage key, plus floor-token surcharge.
+        // Access list: cold/warm delta per address and per storage key, plus floor-token surcharge.
         var access_list_floor_tokens: u64 = 0;
         if (tx.access_list.items) |items| {
             for (items.items) |item| {

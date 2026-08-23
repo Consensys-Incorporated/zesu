@@ -22,11 +22,11 @@ pub const WARM_ACCOUNT_ACCESS = 100;
 pub const COLD_SLOAD = 2100;
 pub const WARM_SLOAD = 100;
 
-// EIP-8037 (Amsterdam+): cold access repricing. Both cold account access and
-// cold storage access rise to 3000 (from Berlin's 2600 / 2100). Warm access
-// stays 100. See execution-specs amsterdam/vm/gas.py GasCosts.
+// EIP-8037 (Amsterdam+): cold access repricing. Cold account access rises to
+// 3000 (from Berlin's 2600); cold storage access stays at Berlin's 2100. Warm
+// access stays 100. See execution-specs amsterdam/vm/gas.py GasCosts.
 pub const COLD_ACCOUNT_ACCESS_AMSTERDAM = 3000;
-pub const COLD_STORAGE_ACCESS_AMSTERDAM = 3000;
+pub const COLD_STORAGE_ACCESS_AMSTERDAM = 2100;
 
 /// Cold account-access cost for the active spec (EIP-2929 / EIP-8037).
 pub inline fn coldAccountAccess(spec: primitives.SpecId) u64 {
@@ -60,11 +60,15 @@ pub const SSTORE_CLEARS_SCHEDULE_LONDON = 4800;
 pub const GAS_STORAGE_UPDATE: u64 = 5000;
 // EIP-8037 (Amsterdam+): SSTORE regular write cost on first change to a slot.
 pub const STORAGE_WRITE_AMSTERDAM: u64 = 10000;
-// EIP-8037 (Amsterdam+): storage-clear refund = (STORAGE_WRITE + COLD_STORAGE_ACCESS) * 4800/5000 = 12480.
+// EIP-8037 (Amsterdam+): storage-clear refund = (STORAGE_WRITE + COLD_STORAGE_ACCESS) * 4800/5000.
 pub const REFUND_STORAGE_CLEAR_AMSTERDAM: i64 = @intCast((STORAGE_WRITE_AMSTERDAM + COLD_STORAGE_ACCESS_AMSTERDAM) * 4800 / 5000);
-// EIP-8037 (Amsterdam+): regular-lane cost to write a new account (CALL_VALUE, CREATE,
+// EIP-8037 (Amsterdam+): execution-lane cost to write a new account (CALL_VALUE, CREATE,
 // EIP-7702 delegation). Pairs with STATE_BYTES_PER_NEW_ACCOUNT for the state lane.
-pub const ACCOUNT_WRITE_COST: u64 = 8000;
+pub const ACCOUNT_WRITE_COST: u64 = 9000;
+// EIP-8037 (Amsterdam+): CALL_VALUE = ACCOUNT_WRITE + CALL_STIPEND.
+pub const CALL_VALUE_AMSTERDAM: u64 = ACCOUNT_WRITE_COST + CALL_STIPEND;
+// EIP-8037 (Amsterdam+): CREATE_ACCESS = ACCOUNT_WRITE + COLD_ACCOUNT_ACCESS.
+pub const CREATE_ACCESS_AMSTERDAM: u64 = ACCOUNT_WRITE_COST + COLD_ACCOUNT_ACCESS_AMSTERDAM;
 // State bytes charged per operation (used with cost_per_state_byte)
 pub const STATE_BYTES_PER_STORAGE_SET: u64 = 64;
 pub const STATE_BYTES_PER_NEW_ACCOUNT: u64 = 120;
@@ -347,9 +351,9 @@ pub fn getCallGasCost(
         G_CALL_FRONTIER;
 
     // Value transfer cost. Pre-Amsterdam: G_CALLVALUE = 9000.
-    // EIP-8037 (Amsterdam+): CALL_VALUE = ACCOUNT_WRITE(8000) + CALL_STIPEND(2300) = 10300.
+    // EIP-8037 (Amsterdam+): CALL_VALUE = ACCOUNT_WRITE + CALL_STIPEND.
     if (transfers_value) {
-        cost += if (primitives.isEnabledIn(spec, .amsterdam)) 10300 else 9000;
+        cost += if (primitives.isEnabledIn(spec, .amsterdam)) CALL_VALUE_AMSTERDAM else 9000;
         // New account creation cost (G_NEWACCOUNT = 25000).
         // EIP-8037 (Amsterdam+): G_NEWACCOUNT regular cost removed; state gas charged separately
         // in opCall via spendStateGas(STATE_BYTES_PER_NEW_ACCOUNT * cost_per_state_byte).

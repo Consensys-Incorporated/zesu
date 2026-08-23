@@ -4,15 +4,20 @@
 //! All container offsets are relative to the start of each container's byte slice.
 //!
 //! Container layouts (fixed region sizes):
-//!   SszStatelessInput:    16 bytes  [4+4+4+4] all-variable (v0.4.1)
+//!   SszStatelessInput:    20 bytes  [4+4+8+4]  (v0.8.0: chain_config → inline chain_id)
 //!   SszNewPayloadRequest: 44 bytes  [4+4+32+4]
 //!   SszExecutionPayload: 540 bytes  (see EP_FIXED_SIZE)
 //!   SszExecutionWitness:  12 bytes  [4+4+4]
 //!   SszWithdrawal:        44 bytes  fixed (8+8+20+8)
+//!
+//! EIP-7495 `ProgressiveContainer` and EIP-7916 `ProgressiveList` (introduced by
+//! zkevm@v0.8.0) serialize exactly like their stable counterparts, so only
+//! `hash_tree_root` differs — see ssz_output.zig.
 
 const std = @import("std");
 const input_mod = @import("input");
 const rlp_decode = @import("rlp_decode");
+const fork_mod = @import("hardfork");
 
 // ── Primitive reads (little-endian) ──────────────────────────────────────────
 
@@ -24,39 +29,22 @@ inline fn readU64(data: []const u8, off: usize) u64 {
     return std.mem.readInt(u64, data[off..][0..8], .little);
 }
 
-// ── Fork enum (glamsterdam-devnet-6 / zkevm@v0.5.0) ──────────────────────────────────
+// ── Input schema id ──────────────────────────────────────────────────────────
 
-/// ProtocolFork IntEnum values from execution-specs glamsterdam-devnet-7 / zkevm@v0.6.2.
-/// PR#3138 replaced the zero-indexed PROTOCOL_FORKS tuple with a stable IntEnum where
-/// Frontier=0x01, ..., Amsterdam=0x15. The first byte of the 2-byte schema_id prefix
-/// carries this value; the fork is no longer encoded inside SszForkConfig.
-/// The string returned here matches what zesu's spec resolver (fork.specForBlock) expects.
-fn forkNameFromSchemaByte(b: u8) []const u8 {
-    return switch (b) {
-        0x01 => "Frontier",
-        0x02 => "Homestead",
-        0x03 => "DAOFork",
-        0x04 => "TangerineWhistle",
-        0x05 => "SpuriousDragon",
-        0x06 => "Byzantium",
-        0x07 => "StPetersburg",
-        0x08 => "Istanbul",
-        0x09 => "MuirGlacier",
-        0x0a => "Berlin",
-        0x0b => "London",
-        0x0c => "ArrowGlacier",
-        0x0d => "GrayGlacier",
-        0x0e => "Paris",
-        0x0f => "Shanghai",
-        0x10 => "Cancun",
-        0x11 => "Prague",
-        0x12 => "Osaka",
-        0x13 => "BPO1",
-        0x14 => "BPO2",
-        0x15 => "Amsterdam",
-        else => "",
-    };
-}
+/// `STATELESS_INPUT_SCHEMA_ID` (stateless_ssz.py) = ProtocolFork index << 8 |
+/// schema revision, stored big-endian ahead of the SSZ payload.
+///
+/// The reference guest is single-fork — each spec module hardcodes its own id
+/// and rejects every other value, so the fork comes from *which* guest you run.
+/// zesu implements every fork in one binary, so it takes the fork from the id
+/// (`specFromProtocolFork`) rather than assuming Amsterdam: an input says which
+/// rules it must be executed under, and no external override is needed.
+///
+/// Unknown fork indices and unknown revisions are still rejected — a guest
+/// cannot execute rules it does not have, and the container layout is pinned to
+/// revision 0x01.
+pub const SCHEMA_ID: u16 = 0x1501; // Amsterdam, revision 1 — what the fixtures carry
+pub const SCHEMA_REVISION: u8 = 0x01;
 
 // ── List[ByteList] decoder ────────────────────────────────────────────────────
 
@@ -139,12 +127,12 @@ const EP_FIXED_SIZE: usize = 540;
 /// 1. Ere-prefixed (4-byte u32 LE length prefix prepended by `Input::with_prefixed_stdin`):
 ///    stripped when declared length matches remaining bytes, then format re-detected.
 ///
-/// 2. v0.4.1 layout (2-byte big-endian schema_id 0x0001 + 16-byte all-variable container):
-///    [0..2]   schema_id (0x0001 BE)
+/// 2. 2-byte big-endian schema_id + 20-byte SszStatelessInput fixed region:
+///    [0..2]   schema_id (0x1501 BE)
 ///    [2..6]   offset → new_payload_request
 ///    [6..10]  offset → witness
-///    [10..14] offset → chain_config (SszChainConfig: chain_id + SszForkConfig)
-///    [14..18] offset → public_keys (packed ByteVector[65])
+///    [10..18] chain_id (uint64 LE, inline)
+///    [18..22] offset → public_keys (packed ByteVector[65])
 pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessInput {
     // Strip Ere's 4-byte LE length prefix when present. The first 4 bytes of
     // raw SSZ are always a small offset value, so matching against data.len-4
@@ -155,53 +143,30 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     else
         data;
 
-    // zkevm@v0.6.2 (PR#3138): schema_id = fork_byte || revision_byte, where fork_byte is the
-    // ProtocolFork IntEnum value and revision_byte is 0x01 for the first schema revision.
-    if (payload.len < 2 or payload[1] != 0x01) return error.InvalidSsz;
-    const fork_name_bytes = forkNameFromSchemaByte(payload[0]);
-    if (fork_name_bytes.len == 0) return error.InvalidSsz;
+    // schema_id is two bytes, big-endian, and each byte stands alone:
+    //   [0] ProtocolFork index — which fork's rules to execute (0x15 = Amsterdam)
+    //   [1] schema revision    — how the rest of the payload is encoded
+    if (payload.len < 2) return error.InvalidSsz;
+    const fork_index = payload[0];
+    const revision = payload[1];
+    if (revision != SCHEMA_REVISION) return error.InvalidSsz;
+    const spec = fork_mod.specFromProtocolFork(fork_index) orelse return error.InvalidSsz;
+    // Kept whole for the output, which echoes back the id it was given.
+    const schema_id = std.mem.readInt(u16, payload[0..2], .big);
 
-    // ── v0.4.1: schema_id prefix + 16-byte all-variable container ────────────
+    // ── SszStatelessInput fixed region (20 bytes) ────────────────────────────
     const body = payload[2..];
-    if (body.len < 16) return error.InvalidSsz;
+    if (body.len < 20) return error.InvalidSsz;
     const off_npr: usize = readU32(body, 0);
     const off_witness: usize = readU32(body, 4);
-    const off_chain_config: usize = readU32(body, 8);
-    const off_pubkeys: usize = readU32(body, 12);
+    const chain_id = readU64(body, 8);
+    const off_pubkeys: usize = readU32(body, 16);
 
-    if (off_npr != 16 or off_witness > body.len or off_chain_config > body.len or off_pubkeys > body.len) return error.InvalidSsz;
-    if (off_npr > off_witness or off_witness > off_chain_config or off_chain_config > off_pubkeys) return error.InvalidSsz;
+    if (off_npr != 20 or off_witness > body.len or off_pubkeys > body.len) return error.InvalidSsz;
+    if (off_npr > off_witness or off_witness > off_pubkeys) return error.InvalidSsz;
 
-    const chain_config_data = body[off_chain_config..off_pubkeys];
-
-    // SszChainConfig: chain_id (uint64 LE) + offset → active_fork + SszForkConfig.
-    // zkevm@v0.6.2 (PR#3138): SszForkConfig no longer contains fork or blob_schedule;
-    // it only carries activation_offset (4 bytes). Fork identity comes from the schema prefix.
-    if (chain_config_data.len < 12) return error.InvalidSsz;
-    const chain_id = readU64(chain_config_data, 0);
-    const off_active_fork: usize = readU32(chain_config_data, 8);
-    if (off_active_fork + 4 > chain_config_data.len) return error.InvalidSsz;
-
-    // SszForkConfig: activation_offset [0..4] (only field).
-    // SszForkActivation: block_number list offset [0..4], timestamp list offset [4..8]; each
-    // list is 0 bytes (empty) or 8 bytes (a single uint64).
-    var activation_block: ?u64 = null;
-    var activation_timestamp: ?u64 = null;
-    {
-        const af = chain_config_data[off_active_fork..];
-        const off_activation: usize = readU32(af, 0);
-        if (off_activation + 8 <= af.len) {
-            const act = af[off_activation..];
-            const off_bn: usize = readU32(act, 0);
-            const off_ts: usize = readU32(act, 4);
-            if (off_bn <= off_ts and off_ts <= act.len) {
-                if (off_ts - off_bn >= 8) activation_block = readU64(act, off_bn);
-                if (act.len - off_ts >= 8) activation_timestamp = readU64(act, off_ts);
-            }
-        }
-    }
     const npr_data = body[off_npr..off_witness];
-    const witness_data = body[off_witness..off_chain_config];
+    const witness_data = body[off_witness..off_pubkeys];
     const pubkeys_data = body[off_pubkeys..];
 
     // ── SszNewPayloadRequest fixed region (44 bytes) ──────────────────────────
@@ -260,11 +225,8 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     };
 
     // ── SszExecutionPayload fixed region ─────────────────────────────────────────
-    // V3 EP (Prague/Osaka): 528B fixed, off_extra_data == 528. No block_access_list or slot_number.
-    // V4 EP (Amsterdam+):  540B fixed, off_extra_data == 540. Adds both fields.
-    // Detect by the extra_data offset value, which always equals the fixed-region size.
-    const EP_V3_FIXED_SIZE: usize = 528;
-    if (ep_data.len < EP_V3_FIXED_SIZE) return error.InvalidSsz;
+    // The schema id pins the payload to the Amsterdam 19-field layout (540B fixed).
+    if (ep_data.len < EP_FIXED_SIZE) return error.InvalidSsz;
 
     var parent_hash: [32]u8 = undefined;
     @memcpy(&parent_hash, ep_data[0..32]);
@@ -300,14 +262,10 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     const blob_gas_used: u64 = readU64(ep_data, 512);
     const excess_blob_gas: u64 = readU64(ep_data, 520);
 
-    // V4-specific fields (Amsterdam+); use sentinel/null for V3.
-    const ep_is_amsterdam = (off_extra_data == EP_FIXED_SIZE);
-    const ep_is_v3 = (off_extra_data == EP_V3_FIXED_SIZE);
-    if (!ep_is_amsterdam and !ep_is_v3) return error.InvalidSsz;
-    if (ep_is_amsterdam and ep_data.len < EP_FIXED_SIZE) return error.InvalidSsz;
-    // For V3, sentinel points past all variable data so block_access_list comes out empty.
-    const off_block_access_list: usize = if (ep_is_amsterdam) readU32(ep_data, 528) else ep_data.len;
-    const slot_number: ?u64 = if (ep_is_amsterdam) readU64(ep_data, 532) else null;
+    // The first variable-field offset always equals the fixed-region size.
+    if (off_extra_data != EP_FIXED_SIZE) return error.InvalidSsz;
+    const off_block_access_list: usize = readU32(ep_data, 528);
+    const slot_number: ?u64 = readU64(ep_data, 532);
 
     // Validate variable-field offsets (must be ascending and in range)
     if (off_extra_data > off_transactions or off_transactions > off_withdrawals or
@@ -324,11 +282,10 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
         transactions[i] = try rlp_decode.decodeSingleTx(alloc, raw_tx);
     }
 
-    // block_access_list: last variable field (V4 only; empty for V3 via sentinel offset).
+    // block_access_list: last variable field.
     const block_access_list = try alloc.dupe(u8, ep_data[off_block_access_list..]);
 
     // withdrawals: List[SszWithdrawal, N] — packed fixed-size items (no offset table).
-    // off_block_access_list acts as the end sentinel for V3 (== ep_data.len).
     const wd_bytes = ep_data[off_withdrawals..off_block_access_list];
     if (wd_bytes.len % WITHDRAWAL_SIZE != 0) return error.InvalidSsz;
     const wcount = wd_bytes.len / WITHDRAWAL_SIZE;
@@ -403,10 +360,8 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
         },
         .chain_config = .{
             .chain_id = if (chain_id != 0) chain_id else 1,
-            .fork_name = if (fork_name_bytes.len > 0) fork_name_bytes else null,
-            .active_fork_idx = payload[0],
-            .activation_block = activation_block,
-            .activation_timestamp = activation_timestamp,
+            .fork_name = fork_mod.specName(spec),
+            .schema_id = schema_id,
         },
         .public_keys = public_keys,
     };

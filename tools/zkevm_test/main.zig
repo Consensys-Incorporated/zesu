@@ -1,14 +1,14 @@
 /// zkevm-blockchain-test-runner — runner for zkevm execution-specs fixtures.
 ///
-/// Fixture format (zkevm@v0.4.1 — under `blockchain_tests/`):
+/// Fixture format (zkevm@v0.8.0 — under `blockchain_tests/`):
 ///   { "test_name": { "network": "Amsterdam", "blocks": [
 ///       { "statelessInputBytes": "0x...", "statelessOutputBytes": "0x...", ... }
 ///   ] } }
 ///
 /// For each block, decodes the SSZ input, runs stateless execution, serializes
-/// the 105-byte SSZ output and asserts it matches `statelessOutputBytes`.
-/// (zkevm@v0.4.1's `blockchain_tests_engine/` directory uses a different JSON
-///  engine-API layout and is NOT consumed by this runner.)
+/// the 43-byte SSZ output and asserts it matches `statelessOutputBytes`.
+/// (The `blockchain_tests_engine/` directory uses a different JSON engine-API
+///  layout and is NOT consumed by this runner.)
 ///
 /// Usage:
 ///   zkevm-blockchain-test-runner [--fixtures DIR] [--file FILE] [-q] [-x]
@@ -43,9 +43,12 @@ pub fn main(init: std.process.Init) !void {
 
     var passed: u64 = 0;
     var failed: u64 = 0;
+    // Test cases whose blocks carry no stateless artifacts: nothing to execute,
+    // so they are reported separately rather than counted as passes.
+    var skipped: u64 = 0;
 
     if (single_file) |path| {
-        processFile(init.io, allocator, path, &passed, &failed) catch {};
+        processFile(init.io, allocator, path, &passed, &failed, &skipped) catch {};
     } else {
         var dir = std.Io.Dir.cwd().openDir(init.io, fixtures_dir, .{ .iterate = true }) catch |err| {
             std.debug.print("error: cannot open fixtures dir '{s}': {}\n", .{ fixtures_dir, err });
@@ -79,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
             defer allocator.free(full_path);
 
             const failed_before = failed;
-            processFile(init.io, allocator, full_path, &passed, &failed) catch {};
+            processFile(init.io, allocator, full_path, &passed, &failed, &skipped) catch {};
             if (stop_on_fail and failed > failed_before) break;
         }
     }
@@ -89,17 +92,20 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("\n============================================================\n", .{});
     std.debug.print("  Results:  {}/{} passed  ({}%)\n", .{ passed, total, pct });
     if (failed > 0) std.debug.print("  Failed:   {}\n", .{failed});
+    if (skipped > 0) std.debug.print("  Skipped:  {} (no statelessInputBytes in any block)\n", .{skipped});
     std.debug.print("============================================================\n", .{});
 
     if (failed > 0) std.process.exit(1);
 }
 
-fn processFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, passed: *u64, failed: *u64) !void {
+fn processFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, passed: *u64, failed: *u64, skipped: *u64) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const json_text = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(256 * 1024 * 1024)) catch |err| {
+    // 2 GiB: zkevm@v0.8.0 ships a 276 MiB fixture (invalid_negative_excess_blob_gas,
+    // 2744 test cases) that a 256 MiB cap silently dropped from the run.
+    const json_text = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(2 * 1024 * 1024 * 1024)) catch |err| {
         std.debug.print("error: cannot read '{s}': {}\n", .{ path, err });
         return;
     };
@@ -130,6 +136,7 @@ fn processFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, passe
         if (blocks_val != .array) continue;
 
         var test_ok = true;
+        var ran_any = false;
         for (blocks_val.array.items, 0..) |block_val, block_idx| {
             if (block_val != .object) continue;
             const in_hex = switch (block_val.object.get("statelessInputBytes") orelse continue) {
@@ -168,9 +175,10 @@ fn processFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, passe
                 std.debug.print("FAIL {s}[{}]  error: {}\n", .{ test_name, block_idx, err });
                 break :blk false;
             };
+            ran_any = true;
             if (!block_ok) test_ok = false;
         }
-        if (test_ok) passed.* += 1 else failed.* += 1;
+        if (!ran_any) skipped.* += 1 else if (test_ok) passed.* += 1 else failed.* += 1;
     }
 }
 
@@ -190,12 +198,12 @@ fn runBlock(
     _ = try std.fmt.hexToBytes(input_bytes, in_stripped);
 
     // EIP-8025 (optional proofs): when the stateless input cannot be decoded, the guest
-    // emits the "default failed" result (root=0, successful_validation=false, default
-    // ChainConfig chain_id=0 / fork=Frontier) — reference stateless_guest
-    // run_stateless_guest / _default_failed_stateless_output. Assert the fixture's expected
-    // output equals the exact bytes the guest commits (ssz_output.DEFAULT_FAILED_OUTPUT),
-    // byte-for-byte including its 61-byte length — so a regression in the guest's
-    // failed-output encoding or length is caught here instead of silently passing.
+    // emits the "default failed" result (root=0, successful_validation=false,
+    // chain_id=0, schema_id=0) — reference stateless_guest run_stateless_guest /
+    // _default_failed_stateless_output. Assert the fixture's expected output equals the
+    // exact bytes the guest commits (ssz_output.DEFAULT_FAILED_OUTPUT) byte-for-byte, so
+    // a regression in the guest's failed-output encoding is caught here instead of
+    // silently passing.
     const si = ssz_decode.decode(alloc, input_bytes) catch {
         const failed_hex = std.fmt.bytesToHex(ssz_output.DEFAULT_FAILED_OUTPUT, .lower);
         if (std.ascii.eqlIgnoreCase(out_stripped, &failed_hex)) return true;
@@ -203,10 +211,10 @@ fn runBlock(
         return false;
     };
 
-    // zkevm@v0.6.2 (PR#3138): SszForkConfig dropped fork and blob_schedule, so a successful
-    // SszStatelessValidationResult shrank from 105 to 69 bytes (138 hex chars).
-    if (out_stripped.len != 138) return error.BadOutputLength;
-    var expected: [69]u8 = undefined;
+    // zkevm@v0.8.0: SszStatelessValidationResult is a flat 43-byte container
+    // (root + successful_validation + chain_id + schema_id) → 86 hex chars.
+    if (out_stripped.len != 2 * ssz_output.OUTPUT_SIZE) return error.BadOutputLength;
+    var expected: [ssz_output.OUTPUT_SIZE]u8 = undefined;
     _ = try std.fmt.hexToBytes(&expected, out_stripped);
 
     const ep = &si.new_payload_request.execution_payload;
@@ -228,9 +236,8 @@ fn runBlock(
 
     // successful_validation mirrors spec: True iff execution succeeds AND
     // post_state_root and receipts_root match the payload. executeStatelessInput
-    // validates the roots itself (StateRootMismatch / ReceiptsRootMismatch) and
-    // the chain_config activation (ChainConfigInvalid / EIP-8025), so a successful
-    // return is authoritative.
+    // validates the roots itself (StateRootMismatch / ReceiptsRootMismatch), so a
+    // successful return is authoritative.
     var exec_err: anyerror = error.Success;
     const successful_validation = if (tx_root_mismatch) false else blk: {
         _ = executor.executeStatelessInput(alloc, si, fork_name) catch |err| {
