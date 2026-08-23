@@ -56,7 +56,7 @@ pub fn opDiv(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = if (b == 0) 0 else fromLimbs(limbDivMod(toLimbs(a), toLimbs(b)).q);
+    stack.setTopUnsafe().* = divU256(a, b);
 }
 
 /// SDIV opcode (0x05): a / b (signed, division by zero returns 0)
@@ -84,7 +84,7 @@ pub fn opMod(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = if (b == 0) 0 else fromLimbs(limbDivMod(toLimbs(a), toLimbs(b)).r);
+    stack.setTopUnsafe().* = modU256(a, b);
 }
 
 /// SMOD opcode (0x07): a % b (signed, mod by zero returns 0)
@@ -174,10 +174,58 @@ pub fn opSignextend(ctx: *InstructionContext) void {
 
 // --- Helpers ---
 
+/// Unsigned 256-bit division, quotient only. Returns 0 when b == 0 (per EVM spec).
+///
+/// The general path is Knuth Algorithm D over 4 limbs, which costs the same
+/// whatever the operands look like. These three tests are a handful of
+/// instructions each and skip it entirely for the operand shapes that dominate
+/// real bytecode: `a < b` (any `x / BIG`), a power-of-two divisor (every `/ 2**k`,
+/// including the `/ 32` and `/ 1e18` idioms), and operands that both fit in a
+/// machine word, where a single hardware `divu` replaces the whole algorithm.
+/// The u64 test only needs to check `a`: we have already returned unless b <= a.
+///
+/// Kept separate from `modU256` so neither pays for the half it discards —
+/// `limbDivMod` computes the quotient/remainder pair and callers threw one away.
+pub fn divU256(a: primitives.U256, b: primitives.U256) primitives.U256 {
+    if (b == 0) return 0;
+    if (a < b) return 0;
+    if (b & (b - 1) == 0) return a >> @intCast(@ctz(b));
+    if (a >> 64 == 0) {
+        const a0: u64 = @truncate(a);
+        const b0: u64 = @truncate(b);
+        return a0 / b0;
+    }
+    return fromLimbs(limbDivMod(toLimbs(a), toLimbs(b)).q);
+}
+
+/// Unsigned 256-bit remainder. Returns 0 when b == 0 (per EVM spec).
+/// See `divU256` for why the fast paths are worth their tests; the general path
+/// here is `limbMod`, which computes only the remainder.
+pub fn modU256(a: primitives.U256, b: primitives.U256) primitives.U256 {
+    if (b == 0) return 0;
+    if (a < b) return a;
+    if (b & (b - 1) == 0) return a & (b - 1);
+    if (a >> 64 == 0) {
+        const a0: u64 = @truncate(a);
+        const b0: u64 = @truncate(b);
+        return a0 % b0;
+    }
+    return fromLimbs(limbMod(4, toLimbs(a), toLimbs(b)));
+}
+
 /// Compute (a + b) % n using full limb arithmetic.
 /// Returns 0 when n == 0 (per EVM spec).
 pub fn addmod(a: primitives.U256, b: primitives.U256, n: primitives.U256) primitives.U256 {
     if (n == 0) return 0;
+    // Power-of-two modulus: reducing mod 2^k is exactly "keep the low k bits",
+    // and the wrapping add already holds the true sum's low 256 bits, so for any
+    // k <= 256 masking is not an approximation.
+    if (n & (n - 1) == 0) return (a +% b) & (n - 1);
+    // All operands in a machine word: the sum needs 65 bits, so one u128 remainder.
+    if ((a | b | n) >> 64 == 0) {
+        const s: u128 = @as(u128, @as(u64, @truncate(a))) + @as(u64, @truncate(b));
+        return @intCast(s % @as(u64, @truncate(n)));
+    }
     const al = toLimbs(a);
     const bl = toLimbs(b);
     const nl = toLimbs(n);
@@ -208,6 +256,14 @@ pub fn addmod(a: primitives.U256, b: primitives.U256, n: primitives.U256) primit
 pub fn mulmod(a: primitives.U256, b: primitives.U256, n: primitives.U256) primitives.U256 {
     if (n == 0) return 0;
     if (a == 0 or b == 0) return 0;
+    // Power-of-two modulus: same argument as addmod. Skips the 512-bit multiply
+    // and the Knuth reduction both.
+    if (n & (n - 1) == 0) return (a *% b) & (n - 1);
+    // All operands in a machine word: the product needs 128 bits, so one u128 remainder.
+    if ((a | b | n) >> 64 == 0) {
+        const p: u128 = @as(u128, @as(u64, @truncate(a))) * @as(u64, @truncate(b));
+        return @intCast(p % @as(u64, @truncate(n)));
+    }
     const nl = toLimbs(n);
     const product = mulFull(a, b);
     // Fast path: product fits in 256 bits
@@ -663,7 +719,7 @@ pub fn sdiv(a: primitives.U256, b: primitives.U256) primitives.U256 {
     const abs_a = if (a_negative) (~a) +% 1 else a;
     const abs_b = if (b_negative) (~b) +% 1 else b;
 
-    const abs_result = fromLimbs(limbDivMod(toLimbs(abs_a), toLimbs(abs_b)).q);
+    const abs_result = divU256(abs_a, abs_b);
     const result_negative = a_negative != b_negative;
     return if (result_negative) (~abs_result) +% 1 else abs_result;
 }
@@ -681,7 +737,7 @@ pub fn smod(a: primitives.U256, b: primitives.U256) primitives.U256 {
     const abs_a = if (a_negative) (~a) +% 1 else a;
     const abs_b = if (b_negative) (~b) +% 1 else b;
 
-    const abs_result = fromLimbs(limbDivMod(toLimbs(abs_a), toLimbs(abs_b)).r);
+    const abs_result = modU256(abs_a, abs_b);
     return if (a_negative) (~abs_result) +% 1 else abs_result;
 }
 
