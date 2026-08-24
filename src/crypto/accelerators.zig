@@ -7,6 +7,7 @@
 ///   zesu-core (zkvm):  accel_impl = extern_bridge.zig  (extern fn zkvm_* → zisk_accel.o)
 const impl = @import("accel_impl");
 const std = @import("std");
+const primitives = @import("primitives");
 
 // ── keccak256 key-hash memo ───────────────────────────────────────────────────
 //
@@ -71,9 +72,25 @@ pub const Bls12PairingPair = extern struct {
 
 // ── Public API — delegating to accel_impl ─────────────────────────────────────
 
+/// Bucket index for the 20/32-byte memo keys.
+///
+/// The leading bytes of a memo key carry almost no entropy: sequential or
+/// shared-prefix addresses agree on them, and a 32-byte storage slot is a
+/// big-endian u256 whose low slot numbers are all-zero for the first 24 bytes.
+/// Indexing on `data[0..4]` therefore piled every such key into bucket 0 — a 0%
+/// hit rate plus the full compare cost on every lookup. So fold the head with
+/// the tail, where those keys actually differ, and run it through the same
+/// avalanche the address maps use; see `primitives.mix64` for why the two-
+/// multiply form is required rather than a cheaper single mix.
+inline fn kmemoIndex(data: []const u8) usize {
+    const head = std.mem.readInt(u64, data[0..8], .little);
+    const tail = std.mem.readInt(u64, data[data.len - 8 ..][0..8], .little);
+    return @intCast(primitives.mix64(head ^ std.math.rotl(u64, tail, 27)) & (KMEMO_LEN - 1));
+}
+
 pub inline fn keccak256(data: []const u8, output: *Hash32) void {
     if (data.len == 20 or data.len == 32) {
-        const idx = std.mem.readInt(u32, data[0..4], .little) & (KMEMO_LEN - 1);
+        const idx = kmemoIndex(data);
         if (kmemo_len[idx] == data.len and std.mem.eql(u8, kmemo_key[idx][0..data.len], data)) {
             output.* = kmemo_val[idx];
             return;
