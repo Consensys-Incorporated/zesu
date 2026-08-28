@@ -360,7 +360,10 @@ pub const Host = struct {
 
     /// Load account info. Returns null on database error.
     pub fn accountInfo(self: *Host, addr: primitives.Address) ?struct { balance: primitives.U256, is_cold: bool, is_empty: bool } {
-        const load = self.js_vtable.accountInfo(self.js, addr) catch return null;
+        const load = self.js_vtable.accountInfo(self.js, addr) catch {
+            self.ctx_error.* = context_mod.ContextError.database_error;
+            return null;
+        };
         return .{
             .balance = load.info.balance,
             .is_cold = load.is_cold,
@@ -425,12 +428,18 @@ pub const Host = struct {
     }
 
     pub fn sload(self: *Host, addr: primitives.Address, key: primitives.U256) ?struct { value: primitives.U256, is_cold: bool } {
-        const load = self.js_vtable.sload(self.js, addr, key) catch return null;
+        const load = self.js_vtable.sload(self.js, addr, key) catch {
+            self.ctx_error.* = context_mod.ContextError.database_error;
+            return null;
+        };
         return .{ .value = load.data, .is_cold = load.is_cold };
     }
 
     pub fn sstore(self: *Host, addr: primitives.Address, key: primitives.U256, val: primitives.U256) ?struct { original: primitives.U256, current: primitives.U256, new: primitives.U256, is_cold: bool } {
-        const result = self.js_vtable.sstore(self.js, addr, key, val) catch return null;
+        const result = self.js_vtable.sstore(self.js, addr, key, val) catch {
+            self.ctx_error.* = context_mod.ContextError.database_error;
+            return null;
+        };
         return .{
             .original = result.data.original_value,
             .current = result.data.present_value,
@@ -452,7 +461,10 @@ pub const Host = struct {
     }
 
     pub fn selfdestruct(self: *Host, addr: primitives.Address, target: primitives.Address) ?SelfDestructLoadResult {
-        const result = self.js_vtable.selfdestruct(self.js, addr, target) catch return null;
+        const result = self.js_vtable.selfdestruct(self.js, addr, target) catch {
+            self.ctx_error.* = context_mod.ContextError.database_error;
+            return null;
+        };
         return .{
             .had_value = result.data.had_value,
             .target_exists = result.data.target_exists,
@@ -847,7 +859,10 @@ fn recordCreateTargetCore(
         accel.keccak256(init_code, &init_hash);
         break :blk create2Address(caller, salt, init_hash);
     } else createAddress(caller, nonce);
-    const load = js.loadAccount(new_addr) catch return null;
+    const load = js.loadAccount(new_addr) catch {
+        host.ctx_error.* = context_mod.ContextError.database_error;
+        return null;
+    };
     // is_account_alive: reference generic_create charges NEW_ACCOUNT only when the target
     // leaf does not already exist (balance/nonce/code present).
     const info = load.data.info;
@@ -1259,5 +1274,103 @@ test "setupCreateCore marks ctx_error when the CREATE target cannot be loaded" {
         else => return error.ExpectedCreateToFail,
     }
     // The block must be rejected rather than accepting the fabricated failure.
+    try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
+}
+
+// Reported by Cursor Bugbot on #99: making WitnessDatabase.storage() return
+// InvalidWitness was not sufficient on its own. Host.sload swallowed it with
+// `catch return null`, and opSload turns null into halt(.invalid_opcode) — a
+// consensus-visible EVM failure — so the transaction failed and the block was
+// still ACCEPTED. Same fabricated success, different mask than the zero it
+// replaced. These accessors now mark ctx_error like their siblings
+// (blockHash, codeInfo) already did.
+test "Host.sload marks ctx_error when the slot cannot be proven" {
+    var ctx = context_mod.Context(MissingTargetDb).new(.{}, primitives.SpecId.prague);
+    defer ctx.journaled_state.deinit();
+    var host = Host.init(MissingTargetDb, &ctx, null);
+
+    _ = try ctx.journaled_state.loadAccount(MissingTargetDb.CALLER);
+    try std.testing.expectEqual(context_mod.ContextError.ok, ctx.ctx_error);
+
+    const result = host.sload(MissingTargetDb.CALLER, 1);
+
+    try std.testing.expect(result == null);
+    try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
+}
+
+test "Host.sstore marks ctx_error when the slot cannot be proven" {
+    var ctx = context_mod.Context(MissingTargetDb).new(.{}, primitives.SpecId.prague);
+    defer ctx.journaled_state.deinit();
+    var host = Host.init(MissingTargetDb, &ctx, null);
+
+    _ = try ctx.journaled_state.loadAccount(MissingTargetDb.CALLER);
+    try std.testing.expectEqual(context_mod.ContextError.ok, ctx.ctx_error);
+
+    const result = host.sstore(MissingTargetDb.CALLER, 1, 42);
+
+    try std.testing.expect(result == null);
+    try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
+}
+
+// The remaining accessors that used to swallow database errors. All five are the
+// same defect: a stateless witness that cannot answer becomes a plain `null`, the
+// caller turns that into an EVM-level failure, and the block is accepted with a
+// fabricated result. Each is pinned separately so reverting any one site alone
+// fails a test.
+test "Host.accountInfo marks ctx_error when the account cannot be proven" {
+    var ctx = context_mod.Context(MissingTargetDb).new(.{}, primitives.SpecId.prague);
+    defer ctx.journaled_state.deinit();
+    var host = Host.init(MissingTargetDb, &ctx, null);
+
+    const unknown: primitives.Address = @splat(0xE1);
+    try std.testing.expectEqual(context_mod.ContextError.ok, ctx.ctx_error);
+
+    const result = host.accountInfo(unknown);
+
+    try std.testing.expect(result == null);
+    try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
+}
+
+test "Host.selfdestruct marks ctx_error when the target cannot be proven" {
+    var ctx = context_mod.Context(MissingTargetDb).new(.{}, primitives.SpecId.prague);
+    defer ctx.journaled_state.deinit();
+    var host = Host.init(MissingTargetDb, &ctx, null);
+
+    _ = try ctx.journaled_state.loadAccount(MissingTargetDb.CALLER);
+    const unknown: primitives.Address = @splat(0xE2);
+    try std.testing.expectEqual(context_mod.ContextError.ok, ctx.ctx_error);
+
+    const result = host.selfdestruct(MissingTargetDb.CALLER, unknown);
+
+    try std.testing.expect(result == null);
+    try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
+}
+
+// recordCreateTargetCore mirrors setupCreateCore's pre-checks to decide whether to
+// charge NEW_ACCOUNT gas, and loads the CREATE target the same way. It takes
+// `js: anytype`, so the same stub injection works.
+test "recordCreateTargetCore marks ctx_error when the CREATE target cannot be loaded" {
+    // Amsterdam: recordCreateTargetCore returns null immediately on earlier specs
+    // because EIP-7928 BAL recording is Amsterdam+ only, so it would never reach
+    // the target load and the test would pass for the wrong reason.
+    var ctx = context_mod.Context(MissingTargetDb).new(.{}, primitives.SpecId.amsterdam);
+    defer ctx.journaled_state.deinit();
+    var host = Host.init(MissingTargetDb, &ctx, null);
+
+    _ = try ctx.journaled_state.loadAccount(MissingTargetDb.CALLER);
+    try std.testing.expectEqual(context_mod.ContextError.ok, ctx.ctx_error);
+
+    const result = recordCreateTargetCore(
+        &ctx.journaled_state,
+        &host,
+        MissingTargetDb.CALLER,
+        0,
+        &[_]u8{0x00},
+        false,
+        0,
+        0,
+    );
+
+    try std.testing.expect(result == null);
     try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
 }
