@@ -1521,3 +1521,107 @@ fn extractPostState(
 
     return post;
 }
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+const TEST_SENDER: input.Address = @splat(0x11);
+const TEST_COINBASE: input.Address = @splat(0x22);
+const TEST_RECIPIENT: input.Address = @splat(0x33);
+
+// A database that resolves only the accounts a block legitimately needs and fails
+// for anything else, standing in for a stateless witness that is missing the
+// CREATE target account. Mirrors WitnessDatabase's duck-typed surface.
+const PartialWitnessDb = struct {
+    fn known(address: input.Address) bool {
+        return std.mem.eql(u8, &address, &TEST_SENDER) or
+            std.mem.eql(u8, &address, &TEST_COINBASE) or
+            std.mem.eql(u8, &address, &TEST_RECIPIENT);
+    }
+
+    pub fn basic(_: *@This(), address: input.Address) !?state_mod.AccountInfo {
+        if (!known(address)) return error.InvalidWitness;
+        var info = state_mod.AccountInfo.default();
+        info.balance = 1_000_000_000_000;
+        return info;
+    }
+
+    pub fn codeByHash(_: *@This(), _: primitives.Hash) !bytecode_mod.Bytecode {
+        return bytecode_mod.Bytecode.newLegacy(&.{});
+    }
+
+    pub fn storage(_: *@This(), _: primitives.Address, _: primitives.StorageKey) !primitives.StorageValue {
+        return 0;
+    }
+
+    pub fn blockHash(_: *@This(), _: u64) !primitives.Hash {
+        return @splat(0);
+    }
+};
+
+fn testEnv() input.Env {
+    return .{ .coinbase = TEST_COINBASE, .gas_limit = 30_000_000, .base_fee = 0 };
+}
+
+fn runTestBlock(arena: std.mem.Allocator, txs: []input.TxInput) !TransitionResult {
+    var ctx = context_mod.Context(PartialWitnessDb).new(.{}, primitives.SpecId.shanghai);
+    const pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) = .{};
+    return transitionWithContext(
+        arena,
+        &ctx,
+        pre_alloc,
+        testEnv(),
+        txs,
+        primitives.SpecId.shanghai,
+        1,
+        0,
+        &.{},
+    );
+}
+
+// This is the integration counterpart to the unit tests in db/test.zig and
+// host.zig: those prove the error is raised and recorded, this proves the block is
+// actually rejected. setupCreateCore cannot return an error, so a database failure
+// while loading the CREATE target is recorded on the journal and checked after
+// execution — deleting either check in transitionWithContext must not go
+// unnoticed, since a fabricated "create failed" would otherwise be accepted as a
+// valid block.
+test "a CREATE whose target is absent from the witness rejects the block" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    // to == null makes this a CREATE. The target address is derived from the
+    // sender and nonce, so it is not one of the addresses the stub DB can resolve.
+    var txs = [_]input.TxInput{.{
+        .from = TEST_SENDER,
+        .to = null,
+        .nonce = 0,
+        .gas = 200_000,
+        .gas_price = 1,
+        .data = &[_]u8{ 0x60, 0x00, 0x60, 0x00, 0xf3 }, // RETURN empty
+    }};
+
+    if (runTestBlock(arena_state.allocator(), &txs)) |_| {
+        return error.BlockAcceptedDespiteUnprovableCreateTarget;
+    } else |_| {
+        // Correct: the block is rejected rather than being given a fabricated result.
+    }
+}
+
+// Control: the same stub DB and block shape, but a plain transfer to an address
+// the witness *can* prove. Without this, the test above would also pass if
+// transitionWithContext rejected every block for an unrelated reason.
+test "a block whose accounts are all provable is accepted" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var txs = [_]input.TxInput{.{
+        .from = TEST_SENDER,
+        .to = TEST_RECIPIENT,
+        .nonce = 0,
+        .gas = 100_000,
+        .gas_price = 1,
+        .value = 1,
+    }};
+
+    _ = try runTestBlock(arena_state.allocator(), &txs);
+}
