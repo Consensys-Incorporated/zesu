@@ -924,7 +924,13 @@ fn setupCreateCore(
         }
     }
 
-    _ = js.loadAccount(new_addr) catch return .{ .failed = CreateResult.preExecFailure(gas_limit) };
+    // Record before failing: with a stateless witness this error means the CREATE
+    // target could not be resolved, so "create failed" is a fabricated outcome and
+    // the block must be rejected (see JournalInner.witness_error).
+    _ = js.loadAccount(new_addr) catch |err| {
+        js.recordWitnessError(err);
+        return .{ .failed = CreateResult.preExecFailure(gas_limit) };
+    };
 
     // EIP-8037 (Amsterdam+): was the target already alive (pre-funded) before creation?
     // Captured before createAccountCheckpoint transfers value / bumps nonce. A deployable
@@ -955,6 +961,10 @@ fn setupCreateCore(
         }
     }
 
+    // Safe to swallow: createAccountCheckpoint's error set is exactly TransferError
+    // (OutOfFunds, OverflowPayment, CreateCollision), all of which are legitimate
+    // CREATE failures rather than "outcome could not be determined". It cannot
+    // surface a database error, so there is nothing to record here.
     const checkpoint = js.createAccountCheckpoint(caller, new_addr, value, spec_id) catch {
         return .{ .failed = CreateResult.failure() };
     };
@@ -1171,4 +1181,71 @@ pub fn create2Address(sender: primitives.Address, salt: primitives.U256, init_co
     var addr: primitives.Address = undefined;
     @memcpy(&addr, hash[12..32]);
     return addr;
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+// A database that can resolve one address and fails for every other, standing in
+// for a stateless witness that is missing the CREATE target account.
+const MissingTargetDb = struct {
+    pub const CALLER: primitives.Address = @splat(0xC0);
+
+    pub fn basic(_: *@This(), address: primitives.Address) !?state_mod.AccountInfo {
+        if (std.mem.eql(u8, &address, &CALLER)) {
+            var info = state_mod.AccountInfo.default();
+            info.balance = 1_000_000;
+            return info;
+        }
+        return error.InvalidWitness;
+    }
+
+    pub fn codeByHash(_: *@This(), _: primitives.Hash) !bytecode_mod.Bytecode {
+        return bytecode_mod.Bytecode.newLegacy(&.{});
+    }
+
+    pub fn storage(_: *@This(), _: primitives.Address, _: primitives.StorageKey) !primitives.StorageValue {
+        return error.InvalidWitness;
+    }
+
+    pub fn blockHash(_: *@This(), _: u64) !primitives.Hash {
+        return error.InvalidWitness;
+    }
+};
+
+// setupCreateCore cannot return an error (it yields a plain CreateSetupResult), so
+// a database failure while loading the CREATE target can only become "create
+// failed". With a stateless witness that outcome is fabricated, so the error must
+// be recorded on the journal for the block to be rejected afterwards. Deleting the
+// recordWitnessError call must not go unnoticed.
+test "setupCreateCore records a witness error when the CREATE target cannot be loaded" {
+    var ctx = context_mod.Context(MissingTargetDb).new(.{}, primitives.SpecId.prague);
+    defer ctx.journaled_state.deinit();
+
+    var host = Host.init(MissingTargetDb, &ctx, null);
+
+    // The caller is read from evm_state, not the DB, so load it first: we want the
+    // CREATE to fail on the *target*, not on its own caller lookup.
+    _ = try ctx.journaled_state.loadAccount(MissingTargetDb.CALLER);
+
+    try std.testing.expect(ctx.journaled_state.witnessError() == null);
+
+    const setup = setupCreateCore(
+        &ctx.journaled_state,
+        &host,
+        MissingTargetDb.CALLER,
+        0,
+        &[_]u8{0x00},
+        100_000,
+        false,
+        0,
+        false,
+        0,
+        true,
+    );
+
+    switch (setup) {
+        .failed => {},
+        else => return error.ExpectedCreateToFail,
+    }
+    try std.testing.expect(ctx.journaled_state.witnessError() != null);
 }

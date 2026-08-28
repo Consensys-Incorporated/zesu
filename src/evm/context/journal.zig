@@ -404,6 +404,19 @@ pub const JournaledAccount = struct {
 ///
 /// Spec Id is a essential information for the Journal.
 pub const JournalInner = struct {
+    /// First database error swallowed by a code path that has no error channel.
+    ///
+    /// Parts of the interpreter (notably setupCreateCore) return plain result
+    /// unions, so a DB failure there can only be turned into "the operation
+    /// failed". For a stateless witness that is a wrong execution result rather
+    /// than a legitimate outcome: an incomplete witness would let a CREATE
+    /// succeed or fail on fabricated information. Those sites record the error
+    /// here instead, and the per-transaction driver rejects the block after
+    /// execution (see stateless/executor/transition.zig).
+    ///
+    /// Sticky and first-write-wins: the first error is the informative one, and
+    /// execution after it is meaningless anyway.
+    witness_error: ?anyerror = null,
     /// The current evm_state
     evm_state: state.EvmState,
     /// Transient storage that is discarded after every transaction.
@@ -455,6 +468,7 @@ pub const JournalInner = struct {
 
     pub fn new() JournalInner {
         return .{
+            .witness_error = null,
             .evm_state = state.EvmState.init(alloc_mod.get()),
             .transient_storage = state.TransientStorage.init(alloc_mod.get()),
             .logs = std.ArrayList(primitives.Log).empty,
@@ -1652,9 +1666,36 @@ pub fn Journal(comptime DB: type) type {
 
         /// Returns true if the address has any non-zero storage in the DB.
         /// Used by CREATE collision check; returns false for DB types without this method.
-        pub fn hasNonZeroStorageForAddress(self: *const @This(), addr: primitives.Address) bool {
-            if (comptime @hasDecl(DB, "hasNonZeroStorageForAddress")) return self.getDb().hasNonZeroStorageForAddress(addr);
+        ///
+        /// A DB that can fail (a stateless witness) is not allowed to have its
+        /// failure silently become "no storage here": that would let a CREATE
+        /// succeed where the reference rejects it. The error is recorded so the
+        /// block is rejected after execution, and `true` is returned meanwhile so
+        /// the in-flight CREATE fails closed rather than proceeding on a guess.
+        pub fn hasNonZeroStorageForAddress(self: *@This(), addr: primitives.Address) bool {
+            if (comptime @hasDecl(DB, "hasNonZeroStorageForAddress")) {
+                const result = self.getDb().hasNonZeroStorageForAddress(addr);
+                if (comptime @typeInfo(@TypeOf(result)) == .error_union) {
+                    return result catch |err| {
+                        self.recordWitnessError(err);
+                        return true;
+                    };
+                }
+                return result;
+            }
             return false;
+        }
+
+        /// Record a database error raised where no error can be returned. Sticky:
+        /// keeps the first error. See JournalInner.witness_error.
+        pub fn recordWitnessError(self: *@This(), err: anyerror) void {
+            if (self.inner.witness_error == null) self.inner.witness_error = err;
+        }
+
+        /// The first swallowed database error, if any. The per-transaction driver
+        /// checks this after execution and rejects the block.
+        pub fn witnessError(self: *const @This()) ?anyerror {
+            return self.inner.witness_error;
         }
 
         /// Check whether an address is already in the EVM state cache (was loaded before
@@ -1670,4 +1711,56 @@ pub fn Journal(comptime DB: type) type {
             return AccountInfoLoad.new(@constCast(&account.data.info), account.is_cold, account.data.stateClearAwareIsEmpty(spec));
         }
     };
+}
+
+// ─── Tests: swallowed-database-error channel ──────────────────────────────────
+
+// A stub DB whose hasNonZeroStorageForAddress always fails, standing in for a
+// stateless witness that cannot prove the account. Only the members Journal
+// touches on this path are provided.
+const FailingStorageDb = struct {
+    pub fn hasNonZeroStorageForAddress(_: *const @This(), _: primitives.Address) !bool {
+        return error.InvalidWitness;
+    }
+};
+
+// The CREATE collision check must not read a DB failure as "no storage here":
+// that would let a CREATE succeed at an address the reference rejects. The error
+// has to be recorded so the block is rejected, and the in-flight CREATE must fail
+// closed (true) rather than proceed on a guess.
+test "a failing hasNonZeroStorageForAddress is recorded and fails closed" {
+    var j = Journal(FailingStorageDb).new(.{});
+    defer j.deinit();
+
+    try std.testing.expect(j.witnessError() == null);
+    const answer = j.hasNonZeroStorageForAddress(@splat(0x11));
+
+    try std.testing.expect(answer); // fail closed, not a fabricated "false"
+    try std.testing.expectEqual(@as(?anyerror, error.InvalidWitness), j.witnessError());
+}
+
+// An infallible DB (InMemoryDB returns plain bool) must keep working unchanged,
+// and must never set the error channel.
+test "an infallible DB is unaffected by the error channel" {
+    const PlainDb = struct {
+        pub fn hasNonZeroStorageForAddress(_: *const @This(), _: primitives.Address) bool {
+            return true;
+        }
+    };
+    var j = Journal(PlainDb).new(.{});
+    defer j.deinit();
+
+    try std.testing.expect(j.hasNonZeroStorageForAddress(@splat(0x22)));
+    try std.testing.expect(j.witnessError() == null);
+}
+
+// Sticky and first-write-wins: later errors must not mask the first, which is the
+// informative one.
+test "witness_error keeps the first error" {
+    var j = Journal(FailingStorageDb).new(.{});
+    defer j.deinit();
+
+    j.recordWitnessError(error.InvalidWitness);
+    j.recordWitnessError(error.OutOfMemory);
+    try std.testing.expectEqual(@as(?anyerror, error.InvalidWitness), j.witnessError());
 }

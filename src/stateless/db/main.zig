@@ -119,11 +119,18 @@ pub const WitnessDatabase = struct {
             else => return DbError.InvalidWitness,
         };
 
+        // These puts must propagate rather than `catch {}`. storageRootFor() is a
+        // bare cache `get()`, so a dropped entry is indistinguishable from "this
+        // account was never loaded", and the post-execution batch trie update
+        // treats that as "no pre-state storage" and rebuilds the storage trie from
+        // only the touched slots (see executor/output.zig:188). Swallowing the
+        // failure would therefore turn an allocation failure into a silently wrong
+        // state root reported as success.
         const as = account_state orelse {
-            self.storage_root_cache.put(address, EMPTY_TRIE_HASH) catch {};
+            try self.storage_root_cache.put(address, EMPTY_TRIE_HASH);
             return null;
         };
-        self.storage_root_cache.put(address, as.storage_root) catch {};
+        try self.storage_root_cache.put(address, as.storage_root);
         return state.AccountInfo{
             .balance = as.balance,
             .nonce = as.nonce,
@@ -165,16 +172,29 @@ pub const WitnessDatabase = struct {
                 address,
                 self.node_index,
             ) catch |err| switch (err) {
-                error.InvalidProof => break :blk EMPTY_TRIE_HASH,
+                // InvalidProof means the witness lacks the node needed to prove
+                // anything here — genuine absence is reported as a null
+                // account_state below ("valid non-inclusion" in mpt/main.zig).
+                // Defaulting to EMPTY_TRIE_HASH would make every subsequent slot
+                // read on this account return 0, i.e. a wrong execution result
+                // from an incomplete witness. Matches basic()'s handling.
+                error.InvalidProof => return DbError.InvalidWitness,
                 else => return DbError.InvalidWitness,
             };
             const root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
-            self.storage_root_cache.put(address, root) catch {};
+            // Propagate, for the same reason as in basic(): a dropped entry later
+            // reads as "no pre-state storage" and yields a wrong state root.
+            try self.storage_root_cache.put(address, root);
             break :blk root;
         };
         const slot = u256ToHash(index);
         const value = mpt.verifyStorageIndexed(storage_root, slot, self.node_index) catch |err| switch (err) {
-            error.InvalidProof => return 0,
+            // A slot that is genuinely unset yields null from verifyStorageIndexed
+            // (valid non-inclusion), which becomes 0 without an error. Reaching
+            // InvalidProof means the storage node is missing from the witness, so
+            // returning 0 would fabricate a value — the slot's real contents are
+            // unknown and may be non-zero.
+            error.InvalidProof => return DbError.InvalidWitness,
             else => return DbError.InvalidWitness,
         };
         return value;
@@ -182,7 +202,12 @@ pub const WitnessDatabase = struct {
 
     // ── hasNonZeroStorageForAddress ─────────────────────────────────────────
 
-    pub fn hasNonZeroStorageForAddress(self: *const Self, address: primitives.Address) bool {
+    /// Fallible: this feeds the CREATE collision check, so "I cannot prove it"
+    /// must not collapse into "no storage here". Doing so would let a CREATE
+    /// succeed at an address the reference rejects — a consensus-level wrong
+    /// result from an incomplete witness. A genuinely absent account still
+    /// resolves to null (valid non-inclusion) and returns false without error.
+    pub fn hasNonZeroStorageForAddress(self: *const Self, address: primitives.Address) !bool {
         if (self.storage_root_cache.get(address)) |root| {
             return !std.mem.eql(u8, &root, &EMPTY_TRIE_HASH);
         }
@@ -190,7 +215,7 @@ pub const WitnessDatabase = struct {
             self.pre_state_root,
             address,
             self.node_index,
-        ) catch return false;
+        ) catch return DbError.InvalidWitness;
         const as = account_state orelse return false;
         return !std.mem.eql(u8, &as.storage_root, &EMPTY_TRIE_HASH);
     }

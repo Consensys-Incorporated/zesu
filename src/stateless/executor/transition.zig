@@ -1073,6 +1073,12 @@ pub fn transitionWithContext(
             return err;
         };
 
+        // Parts of the interpreter cannot return an error (setupCreateCore returns a
+        // plain result union), so a database failure there was turned into "the
+        // operation failed" and recorded instead. With a stateless witness that
+        // outcome is fabricated, so reject the block rather than carry on with it.
+        if (ctx.journaled_state.witnessError()) |witness_err| return witness_err;
+
         if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
         ctx.tx.data = null;
         ctx.tx.access_list.deinit();
@@ -1202,6 +1208,12 @@ pub fn transitionWithContext(
 
     // Detect changes from mining reward + withdrawals + post-block calls (all at BAI=N+1)
     if (tracker) |*t| t.detectAndRecord(txs.len + 1, ctx, txs.len);
+
+    // Final backstop for swallowed database errors. The per-transaction check above
+    // covers the common case, but system calls also swallow execution errors and a
+    // block may have no transaction after them, so re-check once here — before the
+    // state root is computed — so a recorded error can never escape as a valid block.
+    if (ctx.journaled_state.witnessError()) |witness_err| return witness_err;
 
     // ── Extract post-state ────────────────────────────────────────────────────
     const post_alloc = try extractPostState(arena, pre_alloc_in, ctx, spec);
