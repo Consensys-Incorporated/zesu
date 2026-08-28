@@ -1073,7 +1073,6 @@ pub fn transitionWithContext(
             return err;
         };
 
-
         if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
         ctx.tx.data = null;
         ctx.tx.access_list.deinit();
