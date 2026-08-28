@@ -1073,11 +1073,6 @@ pub fn transitionWithContext(
             return err;
         };
 
-        // Parts of the interpreter cannot return an error (setupCreateCore returns a
-        // plain result union), so a database failure there was turned into "the
-        // operation failed" and recorded instead. With a stateless witness that
-        // outcome is fabricated, so reject the block rather than carry on with it.
-        if (ctx.journaled_state.witnessError()) |witness_err| return witness_err;
 
         if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
         ctx.tx.data = null;
@@ -1208,12 +1203,6 @@ pub fn transitionWithContext(
 
     // Detect changes from mining reward + withdrawals + post-block calls (all at BAI=N+1)
     if (tracker) |*t| t.detectAndRecord(txs.len + 1, ctx, txs.len);
-
-    // Final backstop for swallowed database errors. The per-transaction check above
-    // covers the common case, but system calls also swallow execution errors and a
-    // block may have no transaction after them, so re-check once here — before the
-    // state root is computed — so a recorded error can never escape as a valid block.
-    if (ctx.journaled_state.witnessError()) |witness_err| return witness_err;
 
     // ── Extract post-state ────────────────────────────────────────────────────
     const post_alloc = try extractPostState(arena, pre_alloc_in, ctx, spec);
@@ -1562,12 +1551,15 @@ fn testEnv() input.Env {
     return .{ .coinbase = TEST_COINBASE, .gas_limit = 30_000_000, .base_fee = 0 };
 }
 
-fn runTestBlock(arena: std.mem.Allocator, txs: []input.TxInput) !TransitionResult {
-    var ctx = context_mod.Context(PartialWitnessDb).new(.{}, primitives.SpecId.shanghai);
+fn makeTestCtx() context_mod.Context(PartialWitnessDb) {
+    return context_mod.Context(PartialWitnessDb).new(.{}, primitives.SpecId.shanghai);
+}
+
+fn runTestBlock(arena: std.mem.Allocator, ctx: anytype, txs: []input.TxInput) !TransitionResult {
     const pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) = .{};
     return transitionWithContext(
         arena,
-        &ctx,
+        ctx,
         pre_alloc,
         testEnv(),
         txs,
@@ -1578,14 +1570,13 @@ fn runTestBlock(arena: std.mem.Allocator, txs: []input.TxInput) !TransitionResul
     );
 }
 
-// This is the integration counterpart to the unit tests in db/test.zig and
-// host.zig: those prove the error is raised and recorded, this proves the block is
-// actually rejected. setupCreateCore cannot return an error, so a database failure
-// while loading the CREATE target is recorded on the journal and checked after
-// execution — deleting either check in transitionWithContext must not go
-// unnoticed, since a fabricated "create failed" would otherwise be accepted as a
-// valid block.
-test "a CREATE whose target is absent from the witness rejects the block" {
+// Integration counterpart to the unit tests in db/test.zig and host.zig: those
+// prove the database error is raised and that setupCreateCore marks ctx_error,
+// this proves it survives a whole block execution. transitionWithContext does not
+// itself reject -- the block-level driver (executor/main.zig) turns a non-ok
+// ctx_error into InvalidWitness -- so the contract asserted here is that the block
+// is *marked* invalid rather than completing as if the CREATE legitimately failed.
+test "a CREATE whose target is absent from the witness marks the block invalid" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
 
@@ -1600,17 +1591,20 @@ test "a CREATE whose target is absent from the witness rejects the block" {
         .data = &[_]u8{ 0x60, 0x00, 0x60, 0x00, 0xf3 }, // RETURN empty
     }};
 
-    if (runTestBlock(arena_state.allocator(), &txs)) |_| {
-        return error.BlockAcceptedDespiteUnprovableCreateTarget;
-    } else |_| {
-        // Correct: the block is rejected rather than being given a fabricated result.
-    }
+    var ctx = makeTestCtx();
+    // Whether this returns a value or an error is not the contract; the mark is.
+    _ = runTestBlock(arena_state.allocator(), &ctx, &txs) catch {};
+
+    try std.testing.expectEqual(
+        context_mod.ContextError.database_error,
+        ctx.ctx_error,
+    );
 }
 
 // Control: the same stub DB and block shape, but a plain transfer to an address
-// the witness *can* prove. Without this, the test above would also pass if
-// transitionWithContext rejected every block for an unrelated reason.
-test "a block whose accounts are all provable is accepted" {
+// the witness *can* prove. Without this, the test above would also pass if every
+// block were marked invalid for an unrelated reason.
+test "a block whose accounts are all provable is not marked invalid" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
 
@@ -1623,5 +1617,8 @@ test "a block whose accounts are all provable is accepted" {
         .value = 1,
     }};
 
-    _ = try runTestBlock(arena_state.allocator(), &txs);
+    var ctx = makeTestCtx();
+    _ = try runTestBlock(arena_state.allocator(), &ctx, &txs);
+
+    try std.testing.expectEqual(context_mod.ContextError.ok, ctx.ctx_error);
 }

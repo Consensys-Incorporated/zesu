@@ -924,11 +924,12 @@ fn setupCreateCore(
         }
     }
 
-    // Record before failing: with a stateless witness this error means the CREATE
-    // target could not be resolved, so "create failed" is a fabricated outcome and
-    // the block must be rejected (see JournalInner.witness_error).
-    _ = js.loadAccount(new_addr) catch |err| {
-        js.recordWitnessError(err);
+    // Mark the block invalid before failing: with a stateless witness this error
+    // means the CREATE target could not be resolved, so "create failed" would be a
+    // fabricated outcome. Note js.loadAccount is a Journal call and so bypasses the
+    // Host accessors that already set ctx_error on a database error.
+    _ = js.loadAccount(new_addr) catch {
+        host.ctx_error.* = context_mod.ContextError.database_error;
         return .{ .failed = CreateResult.preExecFailure(gas_limit) };
     };
 
@@ -955,7 +956,15 @@ fn setupCreateCore(
     {
         const storage_wiped = if (js.inner.evm_state.get(new_addr)) |acct| acct.status.storage_wiped else false;
         if (!storage_wiped) {
-            if (js.hasNonZeroStorageForAddress(new_addr)) {
+            // A database error here means we cannot tell whether the target has
+            // storage. Treating that as "no storage" would let the CREATE proceed
+            // at an address the reference rejects, so mark the block invalid and
+            // fail the CREATE closed.
+            const has_storage = js.hasNonZeroStorageForAddress(new_addr) catch {
+                host.ctx_error.* = context_mod.ContextError.database_error;
+                return .{ .failed = CreateResult.failure() };
+            };
+            if (has_storage) {
                 return .{ .failed = CreateResult.failure() };
             }
         }
@@ -1214,10 +1223,12 @@ const MissingTargetDb = struct {
 
 // setupCreateCore cannot return an error (it yields a plain CreateSetupResult), so
 // a database failure while loading the CREATE target can only become "create
-// failed". With a stateless witness that outcome is fabricated, so the error must
-// be recorded on the journal for the block to be rejected afterwards. Deleting the
-// recordWitnessError call must not go unnoticed.
-test "setupCreateCore records a witness error when the CREATE target cannot be loaded" {
+// failed". With a stateless witness that outcome is fabricated, so ctx_error must
+// be marked -- the block-level driver (stateless/executor/main.zig) turns a
+// non-ok ctx_error into InvalidWitness. Note js.loadAccount is a Journal call and
+// bypasses the Host accessors that already do this, which is why it needs its own
+// marking here.
+test "setupCreateCore marks ctx_error when the CREATE target cannot be loaded" {
     var ctx = context_mod.Context(MissingTargetDb).new(.{}, primitives.SpecId.prague);
     defer ctx.journaled_state.deinit();
 
@@ -1227,7 +1238,7 @@ test "setupCreateCore records a witness error when the CREATE target cannot be l
     // CREATE to fail on the *target*, not on its own caller lookup.
     _ = try ctx.journaled_state.loadAccount(MissingTargetDb.CALLER);
 
-    try std.testing.expect(ctx.journaled_state.witnessError() == null);
+    try std.testing.expectEqual(context_mod.ContextError.ok, ctx.ctx_error);
 
     const setup = setupCreateCore(
         &ctx.journaled_state,
@@ -1247,5 +1258,6 @@ test "setupCreateCore records a witness error when the CREATE target cannot be l
         .failed => {},
         else => return error.ExpectedCreateToFail,
     }
-    try std.testing.expect(ctx.journaled_state.witnessError() != null);
+    // The block must be rejected rather than accepting the fabricated failure.
+    try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
 }
