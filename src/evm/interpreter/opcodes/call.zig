@@ -440,10 +440,10 @@ pub fn opCreate(ctx: *InstructionContext) void {
         return;
     }
 
-    // Base cost: EIP-8037 (Amsterdam+) replaces the 32000 regular CREATE cost with
-    // CREATE_ACCESS = ACCOUNT_WRITE(8000) + COLD_STORAGE_ACCESS(3000) = 11000; the
-    // NEW_ACCOUNT + code-deposit state gas is charged separately.
-    const create_base_cost: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) 11000 else gas_costs.G_CREATE;
+    // Base cost: EIP-8037 (Amsterdam+) replaces the 32000 execution CREATE cost with
+    // CREATE_ACCESS = ACCOUNT_WRITE + COLD_ACCOUNT_ACCESS; the NEW_ACCOUNT +
+    // code-deposit state gas is charged separately.
+    const create_base_cost: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) gas_costs.CREATE_ACCESS_AMSTERDAM else gas_costs.G_CREATE;
     if (!ctx.interpreter.gas.spend(create_base_cost)) {
         ctx.interpreter.halt(.out_of_gas);
         return;
@@ -602,8 +602,8 @@ pub fn opCreate2(ctx: *InstructionContext) void {
         return;
     }
 
-    // EIP-8037 (Amsterdam+): CREATE_ACCESS = ACCOUNT_WRITE(8000) + COLD_STORAGE_ACCESS(3000).
-    const create2_base_cost: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) 11000 else gas_costs.G_CREATE;
+    // EIP-8037 (Amsterdam+): CREATE_ACCESS = ACCOUNT_WRITE + COLD_ACCOUNT_ACCESS.
+    const create2_base_cost: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) gas_costs.CREATE_ACCESS_AMSTERDAM else gas_costs.G_CREATE;
     if (!ctx.interpreter.gas.spend(create2_base_cost)) {
         ctx.interpreter.halt(.out_of_gas);
         return;

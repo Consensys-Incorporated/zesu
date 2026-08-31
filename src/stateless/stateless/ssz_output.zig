@@ -1,22 +1,19 @@
-//! SSZ serialization for SszStatelessValidationResult (glamsterdam-devnet-7 / zkevm@v0.6.2).
+//! SSZ serialization for SszStatelessValidationResult (glamsterdam-devnet-8 / zkevm@v0.8.2).
 //!
-//! Output layout (69 bytes):
-//!   [0..32]  new_payload_request_root  Bytes32        SSZ hash_tree_root of SszNewPayloadRequest
-//!   [32]     successful_validation     boolean        0x01 = valid
-//!   [33..69] chain_config              SszChainConfig variable-length SSZ container
+//! Output layout (43 bytes, all fields fixed-size):
+//!   [0..32]  new_payload_request_root  Bytes32  SSZ hash_tree_root of SszNewPayloadRequest
+//!   [32]     successful_validation     boolean  0x01 = valid
+//!   [33..41] chain_id                  uint64
+//!   [41..43] schema_id                 uint16   0x1501 (fork_index || revision)
 //!
-//! SszStatelessValidationResult schema (stateless_ssz.py, PR#3138):
-//!   new_payload_request_root: Bytes32
-//!   successful_validation:    boolean
-//!   chain_config:             SszChainConfig { chain_id: uint64, active_fork: SszForkConfig }
-//!
-//! SszForkConfig (v0.6.2): fork and blob_schedule removed; only activation remains.
+//! zkevm@v0.8.2 replaced the SszChainConfig trailer with a flat chain_id + schema_id,
+//! and switched the payload containers to EIP-7495 `ProgressiveContainer` /
+//! EIP-7916 `ProgressiveList`. Serialization of those is byte-identical to the
+//! stable forms, but `hash_tree_root` is not — see `progressiveRoot`.
 
 const std = @import("std");
 const input = @import("input");
 const accel = @import("accelerators");
-const primitives = @import("primitives");
-const hardfork = @import("hardfork");
 
 // ── SHA-256 ───────────────────────────────────────────────────────────────────
 
@@ -151,6 +148,62 @@ fn merkleizeExact(chunks: []const [32]u8) [32]u8 {
     return buf[0];
 }
 
+// ── Progressive Merkle tree (EIP-7916 / EIP-7495) ────────────────────────────
+
+/// `subtree_fill_progressive`: the tree is a right-leaning spine of subtrees
+/// holding 1, 4, 16, 64, ... leaves. The spine terminates in a single zero
+/// chunk (not a zero subtree), so the root grows with the actual element count
+/// instead of a fixed capacity.
+fn progressiveRoot(nodes: []const [32]u8) [32]u8 {
+    return progressiveRootAt(nodes, 0);
+}
+
+fn progressiveRootAt(nodes: []const [32]u8, depth: u8) [32]u8 {
+    if (nodes.len == 0) return ZERO_HASHES[0];
+    const base = @as(usize, 1) << @intCast(depth);
+    const n = @min(base, nodes.len);
+    return sha2(sparseRoot(nodes[0..n], depth), progressiveRootAt(nodes[n..], depth + 2));
+}
+
+/// hash_tree_root of a `ProgressiveList` whose elements are not packed
+/// (each element contributes one node): mix_in_length over the progressive root.
+fn progressiveListRoot(roots: []const [32]u8) [32]u8 {
+    return mixInLength(progressiveRoot(roots), roots.len);
+}
+
+/// hash_tree_root of a `ProgressiveByteList` — bytes packed into 32-byte chunks,
+/// then mix_in_length with the *byte* length.
+fn htProgressiveByteList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
+    if (data.len == 0) return mixInLength(ZERO_HASHES[0], 0);
+    const nchunks = (data.len + 31) / 32;
+    const chunks = try alloc.alloc([32]u8, nchunks);
+    defer alloc.free(chunks);
+    for (0..nchunks) |i| {
+        chunks[i] = [_]u8{0} ** 32;
+        const start = i * 32;
+        const end = @min(start + 32, data.len);
+        @memcpy(chunks[i][0 .. end - start], data[start..end]);
+    }
+    return mixInLength(progressiveRoot(chunks), data.len);
+}
+
+/// hash_tree_root of `Bitvector[256]` holding `n` leading 1 bits — the
+/// active_fields mix-in of a `ProgressiveContainer`. One chunk, so the packed
+/// bits *are* the root.
+fn activeFields(comptime n: u8) [32]u8 {
+    return comptime blk: {
+        var b: [32]u8 = .{0} ** 32;
+        for (0..n) |i| b[i / 8] |= @as(u8, 1) << @intCast(i % 8);
+        break :blk b;
+    };
+}
+
+/// hash_tree_root of a `ProgressiveContainer`: progressive root of the field
+/// nodes, paired with the active_fields bitvector.
+fn progressiveContainerRoot(fields: []const [32]u8, comptime n_active: u8) [32]u8 {
+    return sha2(progressiveRoot(fields), activeFields(n_active));
+}
+
 // ── Primitive hash_tree_root helpers ─────────────────────────────────────────
 
 fn htU64(v: u64) [32]u8 {
@@ -190,95 +243,6 @@ fn htByteList32(data: []const u8) [32]u8 {
     return mixInLength(chunk, data.len);
 }
 
-/// ByteList[2^30]: one raw transaction.
-/// limit = 2^30 bytes → 2^25 chunk limit → depth 25.
-fn htByteList2_30(tx_bytes: []const u8) [32]u8 {
-    const chunk_limit_depth = 25;
-    if (tx_bytes.len == 0) return mixInLength(zeroHash(chunk_limit_depth), 0);
-
-    const nchunks = (tx_bytes.len + 31) / 32;
-    var leaf_buf: [32][32]u8 = undefined; // max 1MB tx → way more than 32 chunks
-    // For large txs, allocate dynamically. For typical txs (< 1KB), nchunks ≤ 32.
-    if (nchunks <= 32) {
-        for (0..nchunks) |i| {
-            leaf_buf[i] = [_]u8{0} ** 32;
-            const start = i * 32;
-            const end = @min(start + 32, tx_bytes.len);
-            @memcpy(leaf_buf[i][0 .. end - start], tx_bytes[start..end]);
-        }
-        const root = sparseRoot(leaf_buf[0..nchunks], chunk_limit_depth);
-        return mixInLength(root, tx_bytes.len);
-    } else {
-        // Large tx: fall back to iterative chunking
-        // (rare in practice; use a heap-less approximation: treat as the hashed identity of the bytes)
-        // TODO: handle very large transactions via allocator
-        // For now, compute chunks via a running hash tree
-        const root = sparseRootFromBytes(tx_bytes, chunk_limit_depth);
-        return mixInLength(root, tx_bytes.len);
-    }
-}
-
-/// Compute sparseRoot from a byte slice, packing into 32-byte chunks.
-/// Used for large transactions that don't fit in a fixed-size stack buffer.
-fn sparseRootFromBytes(data: []const u8, depth: u8) [32]u8 {
-    if (data.len == 0) return zeroHash(depth);
-
-    // Build a virtual sparse tree where leaves are packed 32-byte chunks.
-    // We do a single pass, building the tree bottom-up using a stack of partial roots.
-    // For each chunk position, fold it into the running tree.
-    const nchunks = (data.len + 31) / 32;
-
-    // Use a persistent array of 64 "running partial roots" (one per tree level).
-    // Inspired by Merkle single-pass streaming.
-    var stack: [26][32]u8 = undefined;
-    var stack_filled: [26]bool = [_]bool{false} ** 26;
-
-    for (0..nchunks) |i| {
-        var chunk: [32]u8 = [_]u8{0} ** 32;
-        const start = i * 32;
-        const end = @min(start + 32, data.len);
-        @memcpy(chunk[0 .. end - start], data[start..end]);
-
-        var node = chunk;
-        var level: u8 = 0;
-        while (stack_filled[level]) : (level += 1) {
-            node = sha2(stack[level], node);
-            stack_filled[level] = false;
-        }
-        stack[level] = node;
-        stack_filled[level] = true;
-    }
-
-    // Fold remaining stack entries up to `depth`.
-    // Track result_height so we pad with the correct zero-subtree size before
-    // combining with a higher-level stack entry.
-    var result: [32]u8 = [_]u8{0} ** 32;
-    var found = false;
-    var result_height: u8 = 0;
-    for (0..@as(usize, depth) + 1) |lv| {
-        const level: u8 = @intCast(lv);
-        if (stack_filled[level]) {
-            if (!found) {
-                result = stack[level];
-                result_height = level;
-                found = true;
-            } else {
-                // Pad result up to height `level` before combining.
-                while (result_height < level) : (result_height += 1) {
-                    result = sha2(result, zeroHash(result_height));
-                }
-                result = sha2(stack[level], result);
-                result_height = level + 1;
-            }
-        } else if (found and result_height < depth) {
-            result = sha2(result, zeroHash(result_height));
-            result_height += 1;
-        }
-    }
-
-    return if (found) result else zeroHash(depth);
-}
-
 // ── SszWithdrawal hash_tree_root ──────────────────────────────────────────────
 
 fn htWithdrawal(w: input.Withdrawal) [32]u8 {
@@ -296,8 +260,8 @@ fn htWithdrawal(w: input.Withdrawal) [32]u8 {
 // ── SszExecutionPayload hash_tree_root ────────────────────────────────────────
 
 fn htExecutionPayload(alloc: std.mem.Allocator, ep: input.ExecutionPayload) !([32]u8) {
-    // 19 fields → pad to 32 (next power of 2), 13 zero chunks appended.
-    var chunks: [32][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** 32;
+    // ProgressiveContainer(active_fields=[1] * 19).
+    var chunks: [19][32]u8 = undefined;
 
     // f0..f5: simple fixed fields
     chunks[0] = htBytes32(ep.parent_hash);
@@ -322,77 +286,57 @@ fn htExecutionPayload(alloc: std.mem.Allocator, ep: input.ExecutionPayload) !([3
     // f12: block_hash: Bytes32
     chunks[12] = htBytes32(ep.block_hash);
 
-    // f13: transactions: List[ByteList[2^30], 2^20]
+    // f13: transactions: ProgressiveList[ProgressiveByteList]
     chunks[13] = try htTransactionList(alloc, ep.raw_transactions);
 
-    // f14: withdrawals: List[SszWithdrawal, 2^16]
+    // f14: withdrawals: ProgressiveList[SszWithdrawal]
     chunks[14] = try htWithdrawalList(alloc, ep.withdrawals);
 
     // f15..f16: blob gas fields
     chunks[15] = htU64(ep.blob_gas_used);
     chunks[16] = htU64(ep.excess_blob_gas);
 
-    // f17..f18: Amsterdam+ only. V3 EP (Prague/Osaka) has slot_number == null;
-    // leave chunks[17..31] as zero to match Reth's 17-field ExecutionPayloadV3 hash.
-    if (ep.slot_number != null) {
-        chunks[17] = htByteList2_30(ep.block_access_list);
-        chunks[18] = htU64(ep.slot_number.?);
-    }
+    // f17..f18: block_access_list: ProgressiveByteList, slot_number: uint64
+    chunks[17] = try htProgressiveByteList(alloc, ep.block_access_list);
+    chunks[18] = htU64(ep.slot_number orelse 0);
 
-    // f19..f31: zero (already zero-initialized above)
-
-    return merkleizeExact(&chunks);
+    return progressiveContainerRoot(&chunks, 19);
 }
 
 fn htTransactionList(alloc: std.mem.Allocator, raw_txs: []const []const u8) !([32]u8) {
-    // List[ByteList[2^30], 2^20]: each tx is a ByteList, list limit = 2^20.
-    // Depth for the list = 20.
-    const list_depth = 20;
-
-    if (raw_txs.len == 0) return mixInLength(zeroHash(list_depth), 0);
+    if (raw_txs.len == 0) return progressiveListRoot(&.{});
 
     const tx_roots = try alloc.alloc([32]u8, raw_txs.len);
     defer alloc.free(tx_roots);
-    for (raw_txs, 0..) |tx, i| tx_roots[i] = htByteList2_30(tx);
+    for (raw_txs, 0..) |tx, i| tx_roots[i] = try htProgressiveByteList(alloc, tx);
 
-    const root = sparseRoot(tx_roots, list_depth);
-    return mixInLength(root, raw_txs.len);
+    return progressiveListRoot(tx_roots);
 }
 
 fn htWithdrawalList(alloc: std.mem.Allocator, withdrawals: []const input.Withdrawal) !([32]u8) {
-    // bal-devnet-7 / zkevm@v0.4.1: MAX_WITHDRAWALS_PER_PAYLOAD = 2**4 (was 2**16
-    // in v0.3.x — re-aligned with the consensus-layer limit).
-    const list_depth = 4;
-
-    if (withdrawals.len == 0) return mixInLength(zeroHash(list_depth), 0);
+    if (withdrawals.len == 0) return progressiveListRoot(&.{});
 
     const roots = try alloc.alloc([32]u8, withdrawals.len);
     defer alloc.free(roots);
     for (withdrawals, 0..) |w, i| roots[i] = htWithdrawal(w);
 
-    const root = sparseRoot(roots, list_depth);
-    return mixInLength(root, withdrawals.len);
+    return progressiveListRoot(roots);
 }
 
 // ── SszNewPayloadRequest hash_tree_root ───────────────────────────────────────
 
-/// hash_tree_root for List[Bytes32, 4096] (versioned_hashes).
-/// limit = 4096 → depth 12. Elements are already 32-byte chunks.
+/// hash_tree_root for ProgressiveList[Bytes32] (versioned_hashes).
+/// Bytes32 is a ByteVector, not a basic type, so elements are unpacked —
+/// each hash is already exactly one chunk.
 fn htVersionedHashes(hashes: []const [32]u8) [32]u8 {
-    const list_depth = 12;
-    if (hashes.len == 0) return mixInLength(zeroHash(list_depth), 0);
-    const root = sparseRoot(hashes, list_depth);
-    return mixInLength(root, hashes.len);
+    return progressiveListRoot(hashes);
 }
 
 // ── SszExecutionRequests hash_tree_root ──────────────────────────────────────
 //
-// SszExecutionRequests is a 5-field container (pad to 8 for merkleization):
-//   deposits:        List[SszDepositRequest,        2^13]  depth=13
-//   withdrawals:     List[SszWithdrawalRequest,     2^4]   depth=4
-//   consolidations:  List[SszConsolidationRequest,  2^1]   depth=1
-//   builder_deposits:List[SszBuilderDepositRequest, 2^6]   depth=6   (EIP-8282, Amsterdam+)
-//   builder_exits:   List[SszBuilderExitRequest,    2^4]   depth=4   (EIP-8282, Amsterdam+)
+// SszExecutionRequests is a ProgressiveContainer(active_fields=[1] * 5) whose
+// fields are all ProgressiveLists — so no per-list capacity enters the root:
+//   deposits, withdrawals, consolidations, builder_deposits, builder_exits
 //
 // Fixed item sizes:
 //   SszDepositRequest:       pubkey(48)+withdrawal_creds(32)+amount(8)+signature(96)+index(8) = 192
@@ -470,108 +414,51 @@ fn htBuilderExitRequest(bytes: *const [68]u8) [32]u8 {
     return merkleizeExact(&chunks);
 }
 
-fn htDepositList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
-    const SIZE = 192;
-    const list_depth = 13;
-    if (data.len == 0) return mixInLength(zeroHash(list_depth), 0);
-    if (data.len % SIZE != 0) return error.InvalidSsz;
-    const n = data.len / SIZE;
-    const roots = try alloc.alloc([32]u8, n);
-    defer alloc.free(roots);
-    for (0..n) |i| roots[i] = htDepositRequest(data[i * SIZE ..][0..SIZE]);
-    return mixInLength(sparseRoot(roots, list_depth), n);
-}
-
-fn htWithdrawalRequestList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
-    const SIZE = 76;
-    const list_depth = 4;
-    if (data.len == 0) return mixInLength(zeroHash(list_depth), 0);
-    if (data.len % SIZE != 0) return error.InvalidSsz;
-    const n = data.len / SIZE;
-    const roots = try alloc.alloc([32]u8, n);
-    defer alloc.free(roots);
-    for (0..n) |i| roots[i] = htWithdrawalRequest(data[i * SIZE ..][0..SIZE]);
-    return mixInLength(sparseRoot(roots, list_depth), n);
-}
-
-fn htConsolidationRequestList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
-    const SIZE = 116;
-    const list_depth = 1;
-    if (data.len == 0) return mixInLength(zeroHash(list_depth), 0);
-    if (data.len % SIZE != 0) return error.InvalidSsz;
-    const n = data.len / SIZE;
-    const roots = try alloc.alloc([32]u8, n);
-    defer alloc.free(roots);
-    for (0..n) |i| roots[i] = htConsolidationRequest(data[i * SIZE ..][0..SIZE]);
-    return mixInLength(sparseRoot(roots, list_depth), n);
-}
-
-fn htBuilderDepositList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
-    const SIZE = 184;
-    // MAX_BUILDER_DEPOSIT_REQUESTS_PER_PAYLOAD = 2**6 (consensus-specs, gloas/beacon-chain.md)
-    const list_depth = 6;
-    if (data.len == 0) return mixInLength(zeroHash(list_depth), 0);
-    if (data.len % SIZE != 0) return error.InvalidSsz;
-    const n = data.len / SIZE;
-    const roots = try alloc.alloc([32]u8, n);
-    defer alloc.free(roots);
-    for (0..n) |i| roots[i] = htBuilderDepositRequest(data[i * SIZE ..][0..SIZE]);
-    return mixInLength(sparseRoot(roots, list_depth), n);
-}
-
-fn htBuilderExitList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
-    const SIZE = 68;
-    // MAX_BUILDER_EXIT_REQUESTS_PER_PAYLOAD = 2**4 (consensus-specs, gloas/beacon-chain.md)
-    const list_depth = 4;
-    if (data.len == 0) return mixInLength(zeroHash(list_depth), 0);
-    if (data.len % SIZE != 0) return error.InvalidSsz;
-    const n = data.len / SIZE;
-    const roots = try alloc.alloc([32]u8, n);
-    defer alloc.free(roots);
-    for (0..n) |i| roots[i] = htBuilderExitRequest(data[i * SIZE ..][0..SIZE]);
-    return mixInLength(sparseRoot(roots, list_depth), n);
-}
-
-/// hash_tree_root for SszExecutionRequests container. EIP-8282 widens it from 3 fields
-/// to 5 at Amsterdam, which moves the padded width from 4 leaves to 8.
-fn htExecutionRequests(
+/// hash_tree_root of a ProgressiveList over the flat, packed request bytes of
+/// one request type. `itemRoot` hashes a single fixed-size request.
+fn htRequestList(
     alloc: std.mem.Allocator,
-    spec: primitives.SpecId,
-    er: input.ExecutionRequests,
+    data: []const u8,
+    comptime SIZE: usize,
+    comptime itemRoot: fn (*const [SIZE]u8) [32]u8,
 ) ![32]u8 {
-    const h0 = try htDepositList(alloc, er.deposits);
-    const h1 = try htWithdrawalRequestList(alloc, er.withdrawals);
-    const h2 = try htConsolidationRequestList(alloc, er.consolidations);
-    const z = [_]u8{0} ** 32;
-    if (!primitives.isEnabledIn(spec, .amsterdam)) {
-        // 4 leaves: [h0,h1,h2,0]
-        return sha2(sha2(h0, h1), sha2(h2, z));
-    }
-    const h3 = try htBuilderDepositList(alloc, er.builder_deposits);
-    const h4 = try htBuilderExitList(alloc, er.builder_exits);
-    // 8 leaves: [h0,h1,h2,h3,h4,0,0,0]
-    const l0 = sha2(sha2(h0, h1), sha2(h2, h3));
-    const l1 = sha2(sha2(h4, z), sha2(z, z));
-    return sha2(l0, l1);
+    if (data.len == 0) return progressiveListRoot(&.{});
+    if (data.len % SIZE != 0) return error.InvalidSsz;
+    const n = data.len / SIZE;
+    const roots = try alloc.alloc([32]u8, n);
+    defer alloc.free(roots);
+    for (0..n) |i| roots[i] = itemRoot(data[i * SIZE ..][0..SIZE]);
+    return progressiveListRoot(roots);
+}
+
+/// hash_tree_root for the SszExecutionRequests ProgressiveContainer.
+fn htExecutionRequests(alloc: std.mem.Allocator, er: input.ExecutionRequests) ![32]u8 {
+    const chunks: [5][32]u8 = .{
+        try htRequestList(alloc, er.deposits, 192, htDepositRequest),
+        try htRequestList(alloc, er.withdrawals, 76, htWithdrawalRequest),
+        try htRequestList(alloc, er.consolidations, 116, htConsolidationRequest),
+        try htRequestList(alloc, er.builder_deposits, 184, htBuilderDepositRequest),
+        try htRequestList(alloc, er.builder_exits, 68, htBuilderExitRequest),
+    };
+    return progressiveContainerRoot(&chunks, 5);
 }
 
 /// Compute the SSZ hash_tree_root of SszNewPayloadRequest.
 /// This is the `new_payload_request_root` field in the output.
 ///
-/// SszNewPayloadRequest has 4 fields (already power of 2):
+/// SszNewPayloadRequest is a plain Container with 4 fields (already power of 2):
 ///   execution_payload:        SszExecutionPayload
-///   versioned_hashes:         List[Bytes32, 4096]
+///   versioned_hashes:         ProgressiveList[Bytes32]
 ///   parent_beacon_block_root: Bytes32
 ///   execution_requests:       SszExecutionRequests
 pub fn newPayloadRequestRoot(
     alloc: std.mem.Allocator,
-    spec: primitives.SpecId,
     req: input.NewPayloadRequest,
 ) ![32]u8 {
     const h0 = try htExecutionPayload(alloc, req.execution_payload);
     const h1 = htVersionedHashes(req.versioned_hashes);
     const h2 = htBytes32(req.parent_beacon_block_root);
-    const h3 = try htExecutionRequests(alloc, spec, req.execution_requests);
+    const h3 = try htExecutionRequests(alloc, req.execution_requests);
 
     // merkleize([h0, h1, h2, h3]): 4 chunks, power of 2
     return sha2(sha2(h0, h1), sha2(h2, h3));
@@ -579,78 +466,32 @@ pub fn newPayloadRequestRoot(
 
 // ── Serialize output ──────────────────────────────────────────────────────────
 
-/// zkevm@v0.6.2 (PR#3138): SszForkConfig no longer contains fork or blob_schedule.
-/// SszChainConfig = { chain_id: uint64, active_fork: SszForkConfig }
-/// SszForkConfig  = { activation: SszForkActivation }  (only field)
-/// SszForkActivation = { block_number: List[uint64], timestamp: List[uint64] }
-///
-/// Amsterdam mainnet: block_number list empty, timestamp list = [0].
-/// Hardcoded as a 36-byte literal (offset + chain_config body) that follows the
-/// successful_validation boolean in the SszStatelessValidationResult output.
-const SSZ_CHAIN_CONFIG_AMSTERDAM_MAINNET: [36]u8 = .{
-    // offset to chain_config from SszStatelessValidationResult start (= 32 + 1 + 4 = 37)
-    0x25, 0x00, 0x00, 0x00,
-    // chain_config.chain_id = 1 (uint64 LE)
-    0x01, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00,
-    // chain_config: offset to active_fork (= 12, relative to chain_config start)
-    0x0c, 0x00, 0x00, 0x00,
-    // active_fork: offset to activation (= 4, only field in SszForkConfig)
-    0x04, 0x00, 0x00, 0x00,
-    // activation.block_number offset = 8 (empty list)
-    0x08, 0x00, 0x00, 0x00,
-    // activation.timestamp offset = 8 (1-element list follows)
-    0x08, 0x00, 0x00, 0x00,
-    // activation.timestamp[0] = 0 (uint64 LE, Amsterdam activates at genesis on mainnet)
-    0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00,
-};
+/// Serialized size of SszStatelessValidationResult: 32 + 1 + 8 + 2.
+pub const OUTPUT_SIZE: usize = 43;
 
 /// EIP-8025: canonical "default failed" stateless output, emitted when the SSZ
 /// input cannot be decoded (reference stateless_guest `_default_failed_stateless_output`):
-/// root=0, successful_validation=0, and a DEFAULT SszChainConfig (chain_id=0,
-/// empty activation lists). zkevm@v0.6.2: SszForkConfig no longer has fork or
-/// blob_schedule, so the default output shrinks to 61 bytes. The guest must commit
-/// exactly these 61 bytes for a rejected input to match the reference output.
-pub const DEFAULT_FAILED_OUTPUT: [61]u8 = blk: {
-    var b: [61]u8 = .{0} ** 61;
-    // [33] offset to chain_config = 37 (0x25)
-    b[33] = 0x25;
-    // [45] chain_config.offset_active_fork = 12 (0x0c)
-    b[45] = 0x0c;
-    // [49] active_fork.offset_activation = 4 (only field in SszForkConfig)
-    b[49] = 0x04;
-    // [53] activation.bn_offset = 8 (empty block_number list)
-    b[53] = 0x08;
-    // [57] activation.ts_offset = 8 (empty timestamp list)
-    b[57] = 0x08;
-    break :blk b;
-};
+/// root=0, successful_validation=false, chain_id=0, schema_id=0 — i.e. all zeroes.
+/// The guest must commit exactly these bytes for a rejected input to match the
+/// reference output.
+pub const DEFAULT_FAILED_OUTPUT: [OUTPUT_SIZE]u8 = .{0} ** OUTPUT_SIZE;
 
-/// Serialize SszStatelessValidationResult (glamsterdam-devnet-7 / zkevm@v0.6.2):
+/// Serialize SszStatelessValidationResult (glamsterdam-devnet-8 / zkevm@v0.8.2):
 ///   [0..32]  new_payload_request_root  Bytes32
 ///   [32]     successful_validation     boolean (0x01 = valid, 0x00 = invalid)
-///   [33..69] chain_config (variable, encoded as SszChainConfig with offset)
-///
-/// The trailing 36-byte chain_config is hardcoded for mainnet Amsterdam (the only
-/// target of the current zkevm fixtures). chain_id and activation_timestamp are
-/// patched in after copying the constant.
+///   [33..41] chain_id                  uint64
+///   [41..43] schema_id                 uint16
 pub fn serialize(
     alloc: std.mem.Allocator,
     chain_config: input.ChainConfig,
     req: input.NewPayloadRequest,
     successful_validation: bool,
-) ![69]u8 {
-    const spec = hardfork.specFromFork(chain_config.fork_name orelse "") orelse .frontier;
-    const root = try newPayloadRequestRoot(alloc, spec, req);
-    var out: [69]u8 = undefined;
+) ![OUTPUT_SIZE]u8 {
+    const root = try newPayloadRequestRoot(alloc, req);
+    var out: [OUTPUT_SIZE]u8 = undefined;
     @memcpy(out[0..32], &root);
     out[32] = if (successful_validation) 0x01 else 0x00;
-    @memcpy(out[33..69], &SSZ_CHAIN_CONFIG_AMSTERDAM_MAINNET);
-    // chain_id (u64 LE) at out[37..45], immediately after the 4-byte chain_config offset.
-    std.mem.writeInt(u64, out[37..45], chain_config.chain_id, .little);
-    // activation.timestamp (u64 LE) at out[61..69] — echo the input's activation timestamp
-    // rather than the mainnet default so rejected future-activation blocks serialize correctly.
-    std.mem.writeInt(u64, out[61..69], chain_config.activation_timestamp orelse 0, .little);
+    std.mem.writeInt(u64, out[33..41], chain_config.chain_id, .little);
+    std.mem.writeInt(u16, out[41..43], chain_config.schema_id, .little);
     return out;
 }

@@ -54,6 +54,5 @@ export fn main() callconv(.c) c_int {
 fn guestMain() !void {
     const allocator = zesu_allocator.get();
     const result = try runner.runStateless(allocator);
-    // Commit exactly result.len bytes: 105 on success, 73 for a rejected input.
-    zkvm_io.write_output(result.out[0..result.len]);
+    zkvm_io.write_output(&result.out);
 }

@@ -223,6 +223,7 @@ fn buildModules(
     });
     ssz_decode.addImport("input", input);
     ssz_decode.addImport("rlp_decode", rlp_decode);
+    ssz_decode.addImport("hardfork", hardfork);
 
     const ssz_output = mkmod(b, expose, "ssz_output", .{
         .root_source_file = b.path("src/stateless/stateless/ssz_output.zig"),
@@ -536,6 +537,8 @@ pub fn build(b: *std.Build) void {
         .{ .m = mods.handler, .name = "handler" },
         .{ .m = mods.mpt, .name = "mpt" },
         .{ .m = mods.rlp_decode, .name = "rlp_decode" },
+        .{ .m = mods.executor, .name = "executor" },
+        .{ .m = mods.hardfork, .name = "hardfork" },
     }) |t| {
         const tst = b.addTest(.{ .root_module = t.m });
         _ = t.name;
@@ -589,7 +592,7 @@ pub fn build(b: *std.Build) void {
         const rv64im_target = b.resolveTargetQuery(.{
             .cpu_arch = .riscv64,
             .cpu_model = .{ .explicit = &std.Target.riscv.cpu.baseline_rv64 },
-            .cpu_features_add = std.Target.riscv.featureSet(&.{ .m, .zicclsm }),
+            .cpu_features_add = std.Target.riscv.featureSet(&.{ .m, .zicclsm, .unaligned_scalar_mem }),
             .cpu_features_sub = std.Target.riscv.featureSet(&.{ .a, .c, .zca, .zcb, .d, .f, .zicsr, .zaamo, .zalrsc }),
             .os_tag = .freestanding,
             .abi = .none,
@@ -609,7 +612,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
-    const spec_test_version = "tests-glamsterdam-devnet@v7.2.0";
+    const spec_test_version = "tests-glamsterdam-devnet@v8.1.1";
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-specs " ++ spec_test_version ++ " fixtures");
     fetch_fixtures_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
@@ -624,7 +627,7 @@ pub fn build(b: *std.Build) void {
             "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
     }).step);
 
-    const zkevm_version = "tests-zkevm@v0.6.2";
+    const zkevm_version = "tests-zkevm@v0.8.2";
     const fetch_zkevm_step = b.step("fetch-zkevm-fixtures", "Download " ++ zkevm_version ++ " execution-specs fixtures");
     fetch_zkevm_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",

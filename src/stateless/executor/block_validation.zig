@@ -120,8 +120,8 @@ pub fn blobGasMax(spec: primitives.SpecId) u64 {
 }
 
 /// Computed-vs-declared block commitments, validated by `validatePostExecution`.
-/// Pass `null` for paths that don't validate against a claimed header (e.g. the
-/// non-stateless executeBlock used by t8n).
+/// Pass `null` for paths that don't validate against a claimed header (e.g.
+/// executeBlockFromAlloc, used by t8n and the blockchain-test runner).
 pub const RootCommitments = struct {
     computed_state_root: [32]u8,
     expected_state_root: [32]u8,
