@@ -533,6 +533,10 @@ pub const Account = struct {
     /// Selfdestruct the account by clearing its storage and resetting its account info
     pub fn selfdestruct(self: *Self) void {
         self.storage.clearAndFree();
+        // Each account's code is a uniquely-owned analysis (codeByHash/analyzeLegacy
+        // allocates a fresh jump-table bit vector per load, never shared across
+        // accounts), so freeing it here before it's dropped is safe.
+        if (self.info.code) |*code| code.deinit();
         self.info = AccountInfo.default();
     }
 
