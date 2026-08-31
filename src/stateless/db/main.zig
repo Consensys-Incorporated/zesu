@@ -95,12 +95,16 @@ pub const WitnessDatabase = struct {
     /// deployed by CREATE in that transaction. Allows codeByHash to serve them without
     /// requiring them in the witness (EIP-8025: the verifier derives them from execution).
     pub fn notifyCodeDeployed(self: *Self, code_hash: primitives.Hash, code: bytecode.Bytecode) !void {
-        // Re-analyze from the raw bytes to get an independently-owned jump table.
-        // The caller's Bytecode shares the same jump_table.data allocation as the
-        // account in evm_state; selfdestruct() or CodeChanged deinit can free it
-        // while deployed_codes still holds the entry, causing UAF on a later codeByHash hit.
-        const owned = bytecode.Bytecode.newLegacy(code.originalBytes());
-        try self.deployed_codes.put(code_hash, owned);
+        // getOrPut avoids two pitfalls from a naive newLegacy + put sequence:
+        //   1. duplicate hash (same bytecode deployed at two addresses): put would
+        //      overwrite the existing entry without deinitting its jump table → leak.
+        //   2. put OOM after newLegacy already allocated: the new jump table is
+        //      abandoned with no way to free it → leak.
+        // Same hash ⟹ same bytecode content, so the existing entry is always correct.
+        const gop = try self.deployed_codes.getOrPut(code_hash);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = bytecode.Bytecode.newLegacy(code.originalBytes());
+        }
     }
 
     // ── basic ───────────────────────────────────────────────────────────────
