@@ -85,6 +85,8 @@ pub const WitnessDatabase = struct {
 
     pub fn deinit(self: *Self) void {
         self.witness_codes.deinit();
+        var bc_it = self.deployed_codes.valueIterator();
+        while (bc_it.next()) |bc| bc.deinit();
         self.deployed_codes.deinit();
         self.storage_root_cache.deinit();
     }
@@ -93,7 +95,12 @@ pub const WitnessDatabase = struct {
     /// deployed by CREATE in that transaction. Allows codeByHash to serve them without
     /// requiring them in the witness (EIP-8025: the verifier derives them from execution).
     pub fn notifyCodeDeployed(self: *Self, code_hash: primitives.Hash, code: bytecode.Bytecode) !void {
-        try self.deployed_codes.put(code_hash, code);
+        // Re-analyze from the raw bytes to get an independently-owned jump table.
+        // The caller's Bytecode shares the same jump_table.data allocation as the
+        // account in evm_state; selfdestruct() or CodeChanged deinit can free it
+        // while deployed_codes still holds the entry, causing UAF on a later codeByHash hit.
+        const owned = bytecode.Bytecode.newLegacy(code.originalBytes());
+        try self.deployed_codes.put(code_hash, owned);
     }
 
     // ── basic ───────────────────────────────────────────────────────────────
