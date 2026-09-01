@@ -103,7 +103,18 @@ pub fn computeStateRootDelta(
     const total = alloc_map.count() + deleted_accounts.len;
     if (total == 0) return pre_state_root;
 
-    const changes = try alloc.alloc(mpt.BatchChange, total);
+    // Every RLP encoding and intermediate trie-node byte string produced while
+    // batch-applying these changes is scratch: only the returned root hash
+    // outlives this call, and nothing looks up `index` entries inserted during
+    // this computation again afterward (each batchUpdateIndexed traversal is
+    // self-contained — see mpt/main.zig's updNodeExImpl doc comment). Scope
+    // them to an arena so the whole batch is reclaimed in one free instead of
+    // leaking one allocation per touched trie node into the caller's allocator.
+    var scratch_arena = std.heap.ArenaAllocator.init(alloc);
+    defer scratch_arena.deinit();
+    const scratch = scratch_arena.allocator();
+
+    const changes = try scratch.alloc(mpt.BatchChange, total);
     var n: usize = 0;
 
     var it = alloc_map.iterator();
@@ -115,7 +126,7 @@ pub fn computeStateRootDelta(
         const pre_storage_root: ?[32]u8 = acct.pre_storage_root orelse
             pre_storage_roots.storageRootFor(addr);
 
-        const storage_root = try computeStorageRootBatch(alloc, acct, pre_storage_root, index);
+        const storage_root = try computeStorageRootBatch(scratch, acct, pre_storage_root, index);
         const code_hash: [32]u8 = acct.code_hash orelse
             if (acct.code.len > 0) mpt_builder.keccak256(acct.code) else KECCAK_EMPTY;
 
@@ -126,7 +137,7 @@ pub fn computeStateRootDelta(
             std.mem.eql(u8, &storage_root, &mpt_builder.EMPTY_TRIE_HASH))
             null
         else
-            try encodeAccountRlp(alloc, acct.nonce, acct.balance, storage_root, code_hash);
+            try encodeAccountRlp(scratch, acct.nonce, acct.balance, storage_root, code_hash);
 
         changes[n] = .{ .key = addr_key, .value = account_rlp };
         n += 1;
@@ -143,7 +154,7 @@ pub fn computeStateRootDelta(
         }
     }.lt);
 
-    return mpt.batchUpdateIndexed(alloc, pre_state_root, changes[0..n], index);
+    return mpt.batchUpdateIndexed(scratch, pre_state_root, changes[0..n], index);
 }
 
 /// stateRoot: state trie, keys = keccak256(address), values = account RLP.
