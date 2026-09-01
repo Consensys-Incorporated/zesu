@@ -588,6 +588,7 @@ pub fn transitionWithDb(
 ) !TransitionResult {
     const DB = @TypeOf(db);
     var ctx = context_mod.Context(DB).new(db, spec);
+    defer ctx.journaled_state.deinit();
     ctx.block = buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
     ctx.cfg.disable_base_fee = (env.base_fee == null);
@@ -1444,7 +1445,7 @@ fn extractPostState(
                     acct.code = buf;
                 } else {
                     const raw = bc.originalBytes();
-                    acct.code = if (raw.len > 0) raw else &.{};
+                    acct.code = if (raw.len > 0) try arena.dupe(u8, raw) else &.{};
                 }
             } else {
                 if (ctx.journaled_state.database.codeByHash(account.info.code_hash)) |db_bc| {
@@ -1457,7 +1458,7 @@ fn extractPostState(
                         acct.code = buf;
                     } else {
                         const raw = db_bc.originalBytes();
-                        acct.code = if (raw.len > 0) raw else &.{};
+                        acct.code = if (raw.len > 0) try arena.dupe(u8, raw) else &.{};
                     }
                 } else |_| {}
             }

@@ -510,7 +510,7 @@ pub fn executeStatelessInput(
     // last header's hash must match EP.parent_hash (chain anchor). Out-of-order
     // headers (e.g. reversed) break the hash-linkage check and are rejected.
     // After chain validation, the last header IS the parent block — decode its
-    // gas/basefee/blob-gas fields so executeBlockStateless can populate Env.parent_*.
+    // gas/basefee/blob-gas fields so ckStateless can populate Env.parent_*.
     var parent_header: ?rlp_decode.ParentHeader = null;
     if (header_infos.items.len > 0) {
         for (0..header_infos.items.len - 1) |k| {
