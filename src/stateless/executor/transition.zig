@@ -554,6 +554,9 @@ fn effectiveGasPrice(tx: *const input.TxInput, base_fee: u64) u128 {
 
 /// Backward-compatible entry point: builds InMemoryDB from pre_alloc, then runs transition.
 /// Used by blockchain-test runner, t8n, and the stateful executor path.
+/// The journal (evm_state, BAL maps, etc.) is allocated from alloc_mod.get() internally and
+/// freed before this function returns — callers receive a TransitionResult whose code slices
+/// are owned by `arena`, not the journal.
 pub fn transition(
     arena: std.mem.Allocator,
     pre_alloc_in: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
@@ -569,8 +572,10 @@ pub fn transition(
 
 /// Entry point for stateless execution: accepts any DB type (InMemoryDB for the stateful
 /// path, WitnessDatabase for the stateless path), plus optional pre-recovered public keys.
-/// Builds the EVM context internally. Use transitionWithContext when you need access to the
-/// context (and its DB) after execution — e.g., to call witness_db.takeAccessLog().
+/// Builds the EVM context internally and owns its full lifecycle: the journal is freed before
+/// this function returns and the returned TransitionResult's code slices are arena-owned.
+/// Use transitionWithContext when you need access to the context (and its DB or journal)
+/// after execution — e.g., to call witness_db.takeAccessLog() or ctx.journaled_state.takeAccessLog().
 pub fn transitionWithDb(
     arena: std.mem.Allocator,
     db: anytype,
@@ -588,6 +593,7 @@ pub fn transitionWithDb(
 ) !TransitionResult {
     const DB = @TypeOf(db);
     var ctx = context_mod.Context(DB).new(db, spec);
+    defer ctx.journaled_state.database.deinit();
     defer ctx.journaled_state.deinit();
     ctx.block = buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
@@ -596,7 +602,9 @@ pub fn transitionWithDb(
 }
 
 /// Low-level entry point: executes block transition on a pre-built context.
-/// The caller owns the context and can access its DB (e.g., for takeAccessLog) after return.
+/// The caller owns the context — including its journal (alloc_mod.get() allocations) — and
+/// must call ctx.journaled_state.deinit() when done. The context and its DB remain accessible
+/// after return (e.g., for ctx.journaled_state.takeAccessLog() or ctx.getDb()).
 pub fn transitionWithContext(
     arena: std.mem.Allocator,
     ctx: anytype,
