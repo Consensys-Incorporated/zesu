@@ -383,15 +383,14 @@ pub fn executeBlockStateless(
         try db_mod.WitnessDatabase.init(alloc, node_index, pre_state_root, witness_codes, block_hashes),
         spec,
     );
-    // The journal owns evm_state, the logs, the entry list and the BAL maps, all
-    // allocated from alloc_mod.get() rather than from `alloc` — so the caller's
-    // arena cannot reclaim them and they leak once per block. Declared here, before
-    // the defers below, so it runs last: everything that aliases journal-owned
-    // memory (post-state `code` slices reach into evm_state bytecode) is consumed
-    // by finalizeOutput and validatePostExecution first. The returned ProofOutput
-    // holds no journal memory of its own — its receipts arena.dupe their data and
-    // topics — and Journal.deinit() frees only `inner`, leaving the database that
-    // finalizeOutput reads through ctx.getDb() intact.
+    // Both the journal (evm_state, BAL maps, logs, etc.) and the WitnessDatabase
+    // (witness_codes, deployed_codes, storage_root_cache) are allocated from
+    // alloc_mod.get() and must be freed explicitly. Both defers are declared before
+    // the defers below so they run last — after finalizeOutput and validatePostExecution
+    // have consumed all journal- and database-owned memory. Database is declared first
+    // so it runs after the journal (LIFO): evm_state code references into the database
+    // are freed before the database itself.
+    defer ctx.journaled_state.database.deinit();
     defer ctx.journaled_state.deinit();
     ctx.block = transition_mod.buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
@@ -510,7 +509,7 @@ pub fn executeStatelessInput(
     // last header's hash must match EP.parent_hash (chain anchor). Out-of-order
     // headers (e.g. reversed) break the hash-linkage check and are rejected.
     // After chain validation, the last header IS the parent block — decode its
-    // gas/basefee/blob-gas fields so executeBlockStateless can populate Env.parent_*.
+    // gas/basefee/blob-gas fields so ckStateless can populate Env.parent_*.
     var parent_header: ?rlp_decode.ParentHeader = null;
     if (header_infos.items.len > 0) {
         for (0..header_infos.items.len - 1) |k| {
