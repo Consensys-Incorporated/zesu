@@ -23,17 +23,10 @@ pub const StorageKey = U256;
 /// Used to store data values in smart contract storage slots.
 pub const StorageValue = U256;
 
-/// murmur3's fmix64 avalanche.
-///
-/// Both multiplies are load-bearing. With only one, the low bits go blind
-/// whenever the input's low bits are zero — a key varying only in its top 16
-/// bits, say, keeps all its entropy up there, and a multiply cannot carry
-/// entropy downwards, so every such key lands on one bucket. The pre-multiply
-/// shift is what brings the high half down first. Measured over the address and
-/// storage-slot shapes that actually occur (sequential, ground CREATE2 prefix,
-/// head-only, middle-only, big-endian slot numbers, uniform) this holds every one
-/// at the random-hash bound; every single-multiply variant tried collapsed at
-/// least one shape to a single bucket.
+/// murmur3's fmix64 avalanche — distributes entropy across the full space of
+/// the u64. Keep both multiply/shift rounds: a single-multiply variant cannot
+/// carry entropy downwards, so inputs whose low bits are all zero stay
+/// concentrated. Callers relying on that are the place to document why.
 pub inline fn mix64(x: u64) u64 {
     var h = x;
     h ^= h >> 33;

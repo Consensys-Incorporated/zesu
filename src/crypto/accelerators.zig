@@ -80,8 +80,14 @@ pub const Bls12PairingPair = extern struct {
 /// Indexing on `data[0..4]` therefore piled every such key into bucket 0 — a 0%
 /// hit rate plus the full compare cost on every lookup. So fold the head with
 /// the tail, where those keys actually differ, and run it through the same
-/// avalanche the address maps use; see `primitives.mix64` for why the two-
-/// multiply form is required rather than a cheaper single mix.
+/// avalanche the address maps use.
+///
+/// `primitives.mix64`'s two-multiply form is required here rather than a cheaper
+/// single mix. Measured over the address and storage-slot shapes that actually
+/// occur (sequential, shared CREATE2 prefix, head-only, middle-only, big-endian
+/// slot numbers, uniform), the two-multiply form holds every one at the
+/// random-hash bound, while every single-multiply variant tried collapsed at
+/// least one shape to a single bucket.
 inline fn kmemoIndex(data: []const u8) usize {
     const head = std.mem.readInt(u64, data[0..8], .little);
     const tail = std.mem.readInt(u64, data[data.len - 8 ..][0..8], .little);
