@@ -433,6 +433,9 @@ pub const MainnetHandler = struct {
                                 exec_result.return_data = @constCast(&[_]u8{});
                                 var fr = main.FrameResult.new(exec_result, 0, 0);
                                 fr.reservoir_remaining = tx_reservoir;
+                                // root_interp never reached executeIterative, which is where
+                                // ownership of its Stack/Memory/Bytecode would otherwise transfer.
+                                root_interp.deinit();
                                 return fr;
                             }
                         }
@@ -682,6 +685,7 @@ pub const MainnetHandler = struct {
                 if (top_new_account_state_gas > 0) {
                     if (!root_interp.gas.spendStateGas(top_new_account_state_gas)) {
                         ctx.journaled_state.checkpointRevert(dispatch_oog_checkpoint);
+                        root_interp.deinit();
                         var fr = main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
                         fr.reservoir_remaining = tx_reservoir;
                         return fr;
@@ -691,6 +695,7 @@ pub const MainnetHandler = struct {
                 if (top_delegation_gas > 0) {
                     if (!root_interp.gas.spend(top_delegation_gas)) {
                         ctx.journaled_state.checkpointRevert(dispatch_oog_checkpoint);
+                        root_interp.deinit();
                         var fr = main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
                         fr.reservoir_remaining = tx_reservoir;
                         return fr;
