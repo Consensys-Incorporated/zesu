@@ -19,6 +19,12 @@ const runner = @import("runner");
 const zkvm_io = @import("zkvm_io");
 const zesu_allocator = @import("zesu_allocator");
 
+// Single-threaded __atomic_* builtins; see atomics.zig for why compiler_rt's
+// versions are unusable on this target.
+comptime {
+    _ = @import("atomics.zig");
+}
+
 extern fn zkvm_log(level: u8, msg_ptr: [*]const u8, msg_len: usize) void;
 
 pub const std_options: std.Options = .{ .logFn = logFn };
