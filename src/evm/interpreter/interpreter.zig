@@ -807,9 +807,10 @@ fn runDispatch(
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw self.bytecode.opcode();
         },
-        // Cold path: table lookup + indirect call (same as the old step() loop).
-        // Fork-gated opcodes (SHL/SHR/PUSH0 etc.) land here and are handled correctly
-        // via the table — opUnknown on old forks, real handler on new forks.
+        // Cold path: table lookup + indirect call.
+        // Fork-gated opcodes (PUSH0, TLOAD/TSTORE etc.) land here and are handled
+        // correctly via the table — opUnknown on old forks, real handler on new
+        // forks. SHL/SHR/SAR reach it too whenever `has_shifts` is false.
         else => |op| {
             self.bytecode.relativeJump(1);
             if (!coldStep(self, table, ctx, op)) return;
