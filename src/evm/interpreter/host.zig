@@ -1064,17 +1064,13 @@ fn finalizeCreateCore(
 
 // ---------------------------------------------------------------------------
 // Conversion helpers (exported for use by opcode handlers)
+//
+// Word at a time: one byteswap per 8 bytes, not a full-u256 shift per byte.
+// `u256ToAddress` is on the hot path of BALANCE, EXTCODE*, the CALL family and
+// SELFDESTRUCT.
 // ---------------------------------------------------------------------------
 
 /// Convert an Address (20 bytes big-endian) to U256
-// These four converters ran a byte at a time, each iteration shifting a full
-// u256 — around seven machine ops per byte, so 140 for an address and 250 for a
-// hash. They are not incidental: `u256ToAddress` runs on every BALANCE,
-// EXTCODE*, CALL, CALLCODE, DELEGATECALL, STATICCALL and SELFDESTRUCT, which is
-// the hot path of the call-heavy workloads. Converting a machine word at a time
-// costs one byteswap per word instead (this ISA has no `rev8`, so the byteswap
-// is itself shift/or, but over eight bytes rather than one).
-
 pub fn addressToU256(addr: primitives.Address) primitives.U256 {
     const U = primitives.U256;
     return (@as(U, std.mem.readInt(u32, addr[0..4], .big)) << 128) |
@@ -1085,7 +1081,7 @@ pub fn addressToU256(addr: primitives.Address) primitives.U256 {
 /// Convert U256 to Address (take low 20 bytes)
 pub fn u256ToAddress(val: primitives.U256) primitives.Address {
     var addr: primitives.Address = undefined;
-    // Bits at or above 160 are discarded, matching the truncation this replaces.
+    // Bits at or above 160 are discarded.
     std.mem.writeInt(u32, addr[0..4], @truncate(val >> 128), .big);
     std.mem.writeInt(u64, addr[4..12], @truncate(val >> 64), .big);
     std.mem.writeInt(u64, addr[12..20], @truncate(val), .big);

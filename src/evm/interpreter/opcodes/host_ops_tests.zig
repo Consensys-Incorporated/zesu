@@ -723,10 +723,8 @@ test "SELFDESTRUCT: stack underflow halts" {
 
 // --- Word-at-a-time U256 <-> Address/Hash converters ---
 //
-// These replaced byte-at-a-time loops on the hot state-access path. The failure
-// mode of a word-at-a-time rewrite is a wrong byte order or a mis-split at a word
-// boundary, neither of which a round-trip alone would catch if both directions
-// shared the same mistake — so pin the byte layout explicitly as well.
+// A round-trip passes even if both directions share the same byte-order or
+// word-boundary mistake, so pin the byte layout explicitly too.
 
 const U256 = primitives.U256;
 
