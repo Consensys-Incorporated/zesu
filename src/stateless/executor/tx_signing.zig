@@ -8,6 +8,7 @@ const primitives = @import("primitives");
 const input = @import("executor_types");
 const rlp = @import("./rlp_encode.zig");
 const accel = @import("accelerators");
+const ScratchArena = @import("./scratch_arena.zig");
 
 // ─── RLP helpers (private) ────────────────────────────────────────────────────
 
@@ -212,7 +213,7 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
     // call — so build it in a scoped arena instead of leaking every field's
     // encoding into the caller's allocator (see rlp_encode.zig's own "use an
     // arena for easy cleanup" contract, which nothing downstream was honoring).
-    var arena = std.heap.ArenaAllocator.init(alloc);
+    var arena = ScratchArena.init(alloc);
     defer arena.deinit();
     const payload = try encodeTxPayload(arena.allocator(), tx, chain_id, false, {});
     return rlp.keccak256(payload);
@@ -223,7 +224,7 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
 /// Compute the signing hash for a single EIP-7702 authorization item.
 /// hash = keccak256(0x05 || rlp([chain_id, address, nonce]))
 pub fn authorizationSigningHash(alloc: std.mem.Allocator, item: *const input.AuthorizationItem) ![32]u8 {
-    var arena = std.heap.ArenaAllocator.init(alloc);
+    var arena = ScratchArena.init(alloc);
     defer arena.deinit();
     const a = arena.allocator();
     const fields = [_][]const u8{
@@ -242,7 +243,7 @@ pub fn txHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64)
         .r = tx.r orelse 0,
         .s = tx.s orelse 0,
     };
-    var arena = std.heap.ArenaAllocator.init(alloc);
+    var arena = ScratchArena.init(alloc);
     defer arena.deinit();
     const payload = try encodeTxPayload(arena.allocator(), tx, chain_id, true, sig);
     return rlp.keccak256(payload);
@@ -296,7 +297,7 @@ pub fn recoverSender(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_i
 
 /// Compute CREATE address: keccak256(RLP([sender, nonce]))[12:]
 pub fn createAddress(alloc: std.mem.Allocator, sender: input.Address, nonce: u64) !input.Address {
-    var arena = std.heap.ArenaAllocator.init(alloc);
+    var arena = ScratchArena.init(alloc);
     defer arena.deinit();
     const a = arena.allocator();
     const items = [_][]const u8{
