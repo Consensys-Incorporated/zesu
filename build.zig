@@ -90,6 +90,9 @@ fn buildModules(
         .optimize = optimize,
     });
     accelerators.addImport("accel_impl", accel_impl);
+    // For primitives.mix64 — the keccak memo indexes on the same non-uniform key
+    // material as the address maps and needs the identical mixer, so both share one.
+    accelerators.addImport("primitives", primitives);
 
     const precompile_types = mkmod(b, expose, "precompile_types", .{
         .root_source_file = b.path("src/evm/precompile/types.zig"),

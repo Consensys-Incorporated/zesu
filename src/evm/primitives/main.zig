@@ -23,6 +23,19 @@ pub const StorageKey = U256;
 /// Used to store data values in smart contract storage slots.
 pub const StorageValue = U256;
 
+/// murmur3's fmix64 avalanche — distributes entropy across the full space of
+/// the u64. Keep both multiply/shift rounds: a single-multiply variant cannot
+/// carry entropy downwards, so inputs whose low bits are all zero stay
+/// concentrated. Callers relying on that are the place to document why.
+pub inline fn mix64(x: u64) u64 {
+    var h = x;
+    h ^= h >> 33;
+    h *%= 0xFF51AFD7ED558CCD;
+    h ^= h >> 29;
+    h *%= 0xC4CEB9FE1A85EC53;
+    return h ^ (h >> 32);
+}
+
 /// Hash context for HashMap keyed on Address ([20]u8).
 /// Addresses are already uniformly distributed — truncate the first 8 bytes
 /// instead of running Wyhash over the whole key.
