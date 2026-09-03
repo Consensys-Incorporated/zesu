@@ -201,9 +201,14 @@ jobs:
           curl -fsSL "https://raw.githubusercontent.com/0xPolygonHermez/zisk/main/ziskup/ziskup" \
             -o "$ZISK_BIN_DIR/ziskup"
           chmod +x "$ZISK_BIN_DIR/ziskup"
-          "$ZISK_BIN_DIR/ziskup" --cpu --nokey
+          # Pin the emulator to the same ZisK as the staticlib and the linker
+          # script. Bare `ziskup` resolves "latest" at run time, so the emulator
+          # can silently outrun them — a >=1.1.0 emulator rejects the RWX text
+          # segment a 1.0.0-era script emits, as a W^X violation.
+          "$ZISK_BIN_DIR/ziskup" -v "${{ steps.zisk.outputs.version }}" --cpu --nokey
           echo "$ZISK_BIN_DIR" >> $GITHUB_PATH
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          ziskemu --version
 
       - name: Install Zisk Rust toolchain
         run: cargo +zisk --version 2>/dev/null || cargo-zisk toolchain install
