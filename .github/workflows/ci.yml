@@ -146,6 +146,93 @@ jobs:
             exit 1
           fi
 
+  guest-zisk:
+    name: ZisK Guest Vectors
+    runs-on: ubuntu-latest
+    env:
+      # zesu-zkvm commit supplying the linker script, host object and vectors.
+      # Bump when the guest ABI or memory map changes. The ZisK version is read
+      # from that commit's own workflow, so the two cannot drift apart.
+      ZKVM_REF: "8339361a8a97a91496d8c7193a8ae0a708d43c00"
+
+    steps:
+      - name: Checkout zesu
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: zesu
+
+      - name: Checkout zesu-zkvm
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: Consensys-Incorporated/zesu-zkvm
+          ref: ${{ env.ZKVM_REF }}
+          path: zesu-zkvm
+
+      - name: Resolve the ZisK version zesu-zkvm builds against
+        id: zisk
+        run: |
+          v=$(grep -m1 'ZISK_VERSION:' zesu-zkvm/.github/workflows/ci.yml | sed 's/.*"\(.*\)".*/\1/')
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "ZisK $v"
+
+      - name: Checkout zisk
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: 0xPolygonHermez/zisk
+          ref: v${{ steps.zisk.outputs.version }}
+          path: zisk
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@abea47f85e598557f500fa1fd2ab7464fcb39406 # v2.2.1
+        with:
+          version: '0.16.0'
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install cargo-zisk runtime deps
+        run: sudo apt-get install -y libomp5 libopenmpi3t64
+
+      - name: Install cargo-zisk
+        run: |
+          ZISK_BIN_DIR="${HOME}/.config/.zisk/bin"
+          mkdir -p "$ZISK_BIN_DIR"
+          curl -fsSL "https://raw.githubusercontent.com/0xPolygonHermez/zisk/main/ziskup/ziskup" \
+            -o "$ZISK_BIN_DIR/ziskup"
+          chmod +x "$ZISK_BIN_DIR/ziskup"
+          "$ZISK_BIN_DIR/ziskup" --cpu --nokey
+          echo "$ZISK_BIN_DIR" >> $GITHUB_PATH
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install Zisk Rust toolchain
+        run: cargo +zisk --version 2>/dev/null || cargo-zisk toolchain install
+
+      - name: Cache libziskos_staticlib.a
+        id: cache-libziskos
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: zesu-zkvm/zisk/lib/libziskos_staticlib.a
+          key: libziskos-staticlib-${{ steps.zisk.outputs.version }}-${{ runner.os }}
+
+      - name: Build libziskos_staticlib.a
+        if: steps.cache-libziskos.outputs.cache-hit != 'true'
+        working-directory: zesu-zkvm/zisk
+        run: make lib/libziskos_staticlib.a ZISK_DIR=$GITHUB_WORKSPACE/zisk
+
+      # Compiles zesu for riscv64-freestanding with no atomics, no libc and a
+      # bump allocator — a target no other job in this workflow exercises.
+      - name: Build the rv64im guest object
+        working-directory: zesu
+        run: zig build rv64im-object -Doptimize=ReleaseFast
+
+      # Executes a real mainnet block inside the emulator. This is the only
+      # coverage for guest-only failures: code can compile, pass every native
+      # suite, and still abort here (see #97).
+      - name: Run guest vectors
+        working-directory: zesu-zkvm/zisk
+        run: make test ZESU_OBJ=$GITHUB_WORKSPACE/zesu/zig-out/lib/zesu.o
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
