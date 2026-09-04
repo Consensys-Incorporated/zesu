@@ -140,8 +140,6 @@ pub const FrameResult = struct {
     reservoir_remaining: u64,
     /// Memory
     memory: interpreter.Memory,
-    /// Stack
-    stack: interpreter.Stack,
 
     /// Create new frame result
     pub fn new(result: ExecutionResult, gas_remaining: u64, gas_refunded: i64) FrameResult {
@@ -151,7 +149,6 @@ pub const FrameResult = struct {
             .gas_refunded = gas_refunded,
             .reservoir_remaining = 0,
             .memory = interpreter.Memory.new(),
-            .stack = interpreter.Stack.new(),
         };
     }
 
@@ -159,7 +156,6 @@ pub const FrameResult = struct {
     pub fn deinit(self: *FrameResult) void {
         self.result.deinit();
         self.memory.deinit();
-        self.stack.deinit();
     }
 };
 

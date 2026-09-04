@@ -8,6 +8,7 @@ const primitives = @import("primitives");
 const input = @import("executor_types");
 const rlp = @import("./rlp_encode.zig");
 const accel = @import("accelerators");
+const ScratchArena = @import("./scratch_arena.zig");
 
 // ─── RLP helpers (private) ────────────────────────────────────────────────────
 
@@ -208,7 +209,13 @@ fn encodeTxPayload(
 }
 
 fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64) ![32]u8 {
-    const payload = try encodeTxPayload(alloc, tx, chain_id, false, {});
+    // The RLP pre-image is pure scratch — only the returned hash outlives this
+    // call — so build it in a scoped arena instead of leaking every field's
+    // encoding into the caller's allocator (see rlp_encode.zig's own "use an
+    // arena for easy cleanup" contract, which nothing downstream was honoring).
+    var arena = ScratchArena.init(alloc);
+    defer arena.deinit();
+    const payload = try encodeTxPayload(arena.allocator(), tx, chain_id, false, {});
     return rlp.keccak256(payload);
 }
 
@@ -217,12 +224,15 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
 /// Compute the signing hash for a single EIP-7702 authorization item.
 /// hash = keccak256(0x05 || rlp([chain_id, address, nonce]))
 pub fn authorizationSigningHash(alloc: std.mem.Allocator, item: *const input.AuthorizationItem) ![32]u8 {
+    var arena = ScratchArena.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
     const fields = [_][]const u8{
-        try rlp.encodeU256(alloc, item.chain_id),
-        try rlp.encodeBytes(alloc, &item.address),
-        try rlp.encodeU64(alloc, item.nonce),
+        try rlp.encodeU256(a, item.chain_id),
+        try rlp.encodeBytes(a, &item.address),
+        try rlp.encodeU64(a, item.nonce),
     };
-    const payload = try rlp.concat(alloc, &.{ &.{0x05}, try rlp.encodeList(alloc, &fields) });
+    const payload = try rlp.concat(a, &.{ &.{0x05}, try rlp.encodeList(a, &fields) });
     return rlp.keccak256(payload);
 }
 
@@ -233,7 +243,9 @@ pub fn txHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64)
         .r = tx.r orelse 0,
         .s = tx.s orelse 0,
     };
-    const payload = try encodeTxPayload(alloc, tx, chain_id, true, sig);
+    var arena = ScratchArena.init(alloc);
+    defer arena.deinit();
+    const payload = try encodeTxPayload(arena.allocator(), tx, chain_id, true, sig);
     return rlp.keccak256(payload);
 }
 
@@ -285,11 +297,14 @@ pub fn recoverSender(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_i
 
 /// Compute CREATE address: keccak256(RLP([sender, nonce]))[12:]
 pub fn createAddress(alloc: std.mem.Allocator, sender: input.Address, nonce: u64) !input.Address {
+    var arena = ScratchArena.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
     const items = [_][]const u8{
-        try rlp.encodeBytes(alloc, &sender),
-        try rlp.encodeU64(alloc, nonce),
+        try rlp.encodeBytes(a, &sender),
+        try rlp.encodeU64(a, nonce),
     };
-    const encoded = try rlp.encodeList(alloc, &items);
+    const encoded = try rlp.encodeList(a, &items);
     const hash = rlp.keccak256(encoded);
     var addr: input.Address = undefined;
     @memcpy(&addr, hash[12..32]);

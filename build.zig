@@ -90,6 +90,9 @@ fn buildModules(
         .optimize = optimize,
     });
     accelerators.addImport("accel_impl", accel_impl);
+    // For primitives.mix64 — the keccak memo indexes on the same non-uniform key
+    // material as the address maps and needs the identical mixer, so both share one.
+    accelerators.addImport("primitives", primitives);
 
     const precompile_types = mkmod(b, expose, "precompile_types", .{
         .root_source_file = b.path("src/evm/precompile/types.zig"),
@@ -631,7 +634,7 @@ pub fn build(b: *std.Build) void {
             "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
     }).step);
 
-    const zkevm_version = "tests-zkevm@v0.8.0";
+    const zkevm_version = "tests-zkevm@v0.8.2";
     const fetch_zkevm_step = b.step("fetch-zkevm-fixtures", "Download " ++ zkevm_version ++ " execution-specs fixtures");
     fetch_zkevm_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",

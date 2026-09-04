@@ -182,7 +182,7 @@ pub const ChainConfig = struct {
     /// are null, the executor falls back to mainnet timestamp-based spec lookup.
     fork_name: ?[]const u8 = null,
     /// The stateless input schema the guest decoded: fork_index << 8 | revision.
-    /// Echoed verbatim in the SSZ validation result (zkevm@v0.8.0).
+    /// Echoed verbatim in the SSZ validation result (zkevm@v0.8.2).
     schema_id: u16 = 0,
 };
 
