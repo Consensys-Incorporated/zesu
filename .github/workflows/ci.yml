@@ -208,7 +208,8 @@ jobs:
           "$ZISK_BIN_DIR/ziskup" -v "${{ steps.zisk.outputs.version }}" --cpu --nokey
           echo "$ZISK_BIN_DIR" >> $GITHUB_PATH
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          ziskemu --version
+          # By absolute path: GITHUB_PATH only applies to later steps.
+          "$ZISK_BIN_DIR/ziskemu" --version
 
       - name: Install Zisk Rust toolchain
         run: cargo +zisk --version 2>/dev/null || cargo-zisk toolchain install
