@@ -153,7 +153,7 @@ jobs:
       # zesu-zkvm commit supplying the linker script, host object and vectors.
       # Bump when the guest ABI or memory map changes. The ZisK version is read
       # from that commit's own workflow, so the two cannot drift apart.
-      ZKVM_REF: "8339361a8a97a91496d8c7193a8ae0a708d43c00"
+      ZKVM_REF: "b65d52377c3cd8cf8acde16dfd76d3fbb5d48b98"
 
     steps:
       - name: Checkout zesu
