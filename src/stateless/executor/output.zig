@@ -9,6 +9,7 @@ const types = @import("executor_types");
 const rlp = @import("./rlp_encode.zig");
 const mpt_builder = @import("mpt").builder;
 const mpt = @import("mpt");
+const ScratchArena = @import("./scratch_arena.zig");
 
 // ─── Logs hash ────────────────────────────────────────────────────────────────
 
@@ -110,7 +111,7 @@ pub fn computeStateRootDelta(
     // self-contained — see mpt/main.zig's updNodeExImpl doc comment). Scope
     // them to an arena so the whole batch is reclaimed in one free instead of
     // leaking one allocation per touched trie node into the caller's allocator.
-    var scratch_arena = std.heap.ArenaAllocator.init(alloc);
+    var scratch_arena = ScratchArena.init(alloc);
     defer scratch_arena.deinit();
     const scratch = scratch_arena.allocator();
 
