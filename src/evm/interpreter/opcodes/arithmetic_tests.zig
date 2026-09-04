@@ -477,3 +477,67 @@ test "SIGNEXTEND: index >= 31 returns value unchanged" {
     opSignextend(&ctx);
     try expectEqual(@as(U, 0xABCD), interp.stack.popUnsafe());
 }
+
+// --- Differential fuzz: the div/mod fast paths against the language's own operators ---
+//
+// divU256/modU256/addmod/mulmod short-circuit Knuth Algorithm D for small,
+// power-of-two and a<b operands. Each short-circuit is a separate chance to be
+// subtly wrong, and the spec-test suites only reach the operand shapes their
+// fixtures happen to contain. So generate the shapes deliberately — with the
+// boundaries (0, 1, 2^64-1, 2^64, 2^255, MAX) and the exact powers of two forced
+// to appear rather than left to chance — and compare against Zig's own operators,
+// which are an independent reference here because they share none of the limb code.
+
+/// Operands that are individually interesting, plus PRNG fill.
+fn fuzzOperand(rand: std.Random, i: usize) U {
+    const corners = [_]U{
+        0,                    1,                   2,
+        std.math.maxInt(u64), @as(U, 1) << 64,     (@as(U, 1) << 64) + 1,
+        std.math.maxInt(u128), @as(U, 1) << 128,   @as(U, 1) << 255,
+        MAX,                  MAX - 1,             32,
+        1_000_000_000_000_000_000,
+    };
+    return switch (i % 4) {
+        0 => corners[rand.uintLessThan(usize, corners.len)],
+        // u8 spans exactly the 256 valid shift amounts, so this hits every
+        // power-of-two divisor and modulus.
+        1 => @as(U, 1) << rand.int(u8),
+        2 => rand.int(u64), // small enough for the single-word path
+        else => rand.int(U), // full width, the general path
+    };
+}
+
+test "DIV/MOD fast paths agree with the u256 operators over generated operands" {
+    var prng = std.Random.DefaultPrng.init(0xE7C0FFEE);
+    const rand = prng.random();
+    for (0..20000) |i| {
+        const a = fuzzOperand(rand, i);
+        const b = fuzzOperand(rand, i + 1);
+        const want_q: U = if (b == 0) 0 else a / b;
+        const want_r: U = if (b == 0) 0 else a % b;
+        try expectEqual(want_q, arithmetic.divU256(a, b));
+        try expectEqual(want_r, arithmetic.modU256(a, b));
+        // SDIV/SMOD route through the same helpers on absolute values, so check
+        // them too — on sign-bit-clear operands, where signed and unsigned agree.
+        const pos_a = a & ~(@as(U, 1) << 255);
+        const pos_b = b & ~(@as(U, 1) << 255);
+        try expectEqual(if (pos_b == 0) 0 else pos_a / pos_b, arithmetic.sdiv(pos_a, pos_b));
+        try expectEqual(if (pos_b == 0) 0 else pos_a % pos_b, arithmetic.smod(pos_a, pos_b));
+    }
+}
+
+test "ADDMOD/MULMOD fast paths agree with a wider-integer reference" {
+    var prng = std.Random.DefaultPrng.init(0x5EEDCAFE);
+    const rand = prng.random();
+    for (0..20000) |i| {
+        const a = fuzzOperand(rand, i);
+        const b = fuzzOperand(rand, i + 1);
+        const n = fuzzOperand(rand, i + 2);
+        // Widen so the intermediate cannot wrap: the reference has to be exact
+        // even where the 256-bit result is not the whole story.
+        const want_add: U = if (n == 0) 0 else @intCast((@as(u512, a) + b) % n);
+        const want_mul: U = if (n == 0) 0 else @intCast((@as(u512, a) * b) % n);
+        try expectEqual(want_add, arithmetic.addmod(a, b, n));
+        try expectEqual(want_mul, arithmetic.mulmod(a, b, n));
+    }
+}
