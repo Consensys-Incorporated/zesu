@@ -616,6 +616,11 @@ pub fn transitionWithContext(
     reward: i64,
     public_keys: []const []const u8,
 ) !TransitionResult {
+    // Clear the swallowed-allocation-failure channel for this block. It is
+    // process-global and sticky, and the spec-test runners execute thousands of
+    // blocks in one process, so one failure must not condemn the rest.
+    alloc_mod.resetOom();
+
     var instructions = handler_mod.Instructions.new(spec);
     var precompiles = handler_mod.Precompiles.new(spec);
 
@@ -674,6 +679,13 @@ pub fn transitionWithContext(
 
     // ── Execute each transaction ──────────────────────────────────────────────
     for (txs, 0..) |*tx, tx_idx| {
+        // Anything computed after a swallowed allocation failure is untrustworthy,
+        // so stop at the first transaction boundary rather than executing the rest
+        // of the block on degraded values. A boundary check rather than a
+        // per-instruction one: the interpreter loop is hot enough that a check
+        // there would cost trace cells on every block.
+        if (alloc_mod.oomSeen()) return error.OutOfMemory;
+
         // 1. Determine sender
         var sender: input.Address = undefined;
         const maybe_sender: ?input.Address = blk: {
@@ -1248,6 +1260,13 @@ pub fn transitionWithContext(
         post_block_reqs.builder_deposit_requests,
         post_block_reqs.builder_exit_requests,
     );
+
+    // Final gate. Post-block system calls and the BAL/requests hashing above run
+    // after the last transaction, so a failure there is only visible here.
+    // Placed in this function rather than in the callers because five call sites
+    // execute blocks and only one used to check — a caller that forgot would be
+    // silently wrong again.
+    if (alloc_mod.oomSeen()) return error.OutOfMemory;
 
     return TransitionResult{
         .alloc = post_alloc,

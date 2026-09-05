@@ -398,10 +398,6 @@ pub fn executeBlockStateless(
     ctx.cfg.disable_base_fee = (env.base_fee == null);
 
     const empty_pre_alloc = std.AutoHashMapUnmanaged(types.Address, types.AllocAccount).empty;
-    // The OOM channel is process-global and sticky, so clear it per block: the
-    // spec-test runners execute thousands of blocks in one process and one
-    // failure must not condemn every block after it.
-    alloc_mod.resetOom();
     const result = transition_mod.transitionWithContext(
         alloc,
         &ctx,
@@ -420,11 +416,6 @@ pub fn executeBlockStateless(
         return err;
     };
     if (ctx.ctx_error != .ok) return error.InvalidWitness;
-    // A swallowed allocation failure means some infallible path carried on with a
-    // degraded value, so anything computed after it is untrustworthy. Reject the
-    // block naming memory as the cause rather than emitting a root that looks
-    // like a consensus disagreement. See zesu_allocator's OOM channel.
-    if (alloc_mod.oomSeen()) return error.OutOfMemory;
     // EIP-7928 (Amsterdam+): the block access list is only validated on Amsterdam+
     // (validatePostExecution gates the comparison). Pre-Amsterdam, skip draining the
     // access log and building the accessed entries entirely; validatePostExecution
