@@ -76,4 +76,3 @@ pub fn oomSeen() bool {
 pub fn resetOom() void {
     oom = false;
 }
-

@@ -825,3 +825,57 @@ pub const testing = struct {
         try std.testing.expectEqual(@as(usize, 1), bytecode.len());
     }
 };
+
+// ─── Swallowed-allocation-failure channel ─────────────────────────────────────
+//
+// analyzeLegacy cannot return an error: its callers (Bytecode.newLegacy/newRaw,
+// reached from host.zig and mainnet_builder.zig) have no error to propagate. It
+// therefore falls back to an empty jump table, which makes every JUMPDEST in the
+// contract read as invalid. These pin the fallback's two obligations: it must
+// still be reported, and it must not be reported when nothing failed.
+
+test "a failed jump-table allocation is recorded on the OOM channel" {
+    const saved = alloc_mod.get();
+    defer alloc_mod.set(saved);
+    alloc_mod.resetOom();
+    defer alloc_mod.resetOom();
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    alloc_mod.set(failing.allocator());
+
+    // JUMPDEST at index 0: a correctly analysed table would mark this position
+    // valid, so an empty table is a behavioural change, not merely a missing hint.
+    const code = [_]u8{ JUMPDEST, STOP };
+    var bc = Bytecode.newLegacy(&code);
+    defer bc.deinit();
+
+    try std.testing.expect(alloc_mod.oomSeen());
+
+    // The degraded value is still returned — the contract is that the block is
+    // rejected later, not that this call fails.
+    const jt = bc.legacyJumpTable() orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 0), jt.bit_len);
+}
+
+test "a successful analysis leaves the OOM channel clear" {
+    alloc_mod.resetOom();
+    defer alloc_mod.resetOom();
+
+    const code = [_]u8{ JUMPDEST, STOP };
+    var bc = Bytecode.newLegacy(&code);
+    defer bc.deinit();
+
+    try std.testing.expect(!alloc_mod.oomSeen());
+    const jt = bc.legacyJumpTable() orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 2), jt.bit_len);
+}
+
+test "resetOom clears a recorded failure so one block cannot condemn the next" {
+    alloc_mod.resetOom();
+    defer alloc_mod.resetOom();
+
+    alloc_mod.recordOom();
+    try std.testing.expect(alloc_mod.oomSeen());
+    alloc_mod.resetOom();
+    try std.testing.expect(!alloc_mod.oomSeen());
+}
