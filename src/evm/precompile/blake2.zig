@@ -43,7 +43,10 @@ pub fn blake2fRun(input: []const u8, gas_limit: u64) main.PrecompileResult {
     if (!accel.blake2f(rounds, &h_bytes, &m_bytes, &t_bytes, f_flag))
         return .{ .err = main.PrecompileError.Blake2WrongFinalIndicatorFlag };
 
-    const heap_out = alloc_mod.get().dupe(u8, &h_bytes) catch
+    const heap_out = alloc_mod.get().dupe(u8, &h_bytes) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = main.PrecompileError.OutOfGas };
+    };
     return .{ .success = main.PrecompileOutput.new(gas_used, heap_out) };
 }
