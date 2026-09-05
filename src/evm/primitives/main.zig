@@ -37,11 +37,25 @@ pub inline fn mix64(x: u64) u64 {
 }
 
 /// Hash context for HashMap keyed on Address ([20]u8).
-/// Addresses are already uniformly distributed — truncate the first 8 bytes
-/// instead of running Wyhash over the whole key.
+///
+/// Addresses are NOT uniformly distributed: only keccak-derived ones are. CREATE2
+/// salts, synthetic test addresses and precompiles all share leading bytes, and an
+/// address prefix is attacker-influenceable. Truncating `key[0..8]` mapped every
+/// address agreeing on its first eight bytes to one identical u64, which collides in
+/// both the bucket index (`hash & mask`) and the 7-bit fingerprint (`hash >> 57`), so
+/// every probe fell through to the 20-byte `eql` — quadratic in the size of the
+/// colliding group, across all ~38 maps built on this context at once.
+///
+/// So mix all 20 bytes: three loads and a multiply-xor chain, ending in a fold that
+/// carries the high half's entropy down into the bucket bits.
 pub const AddressContext = struct {
     pub fn hash(_: @This(), key: Address) u64 {
-        return std.mem.readInt(u64, key[0..8], .little);
+        const lo = std.mem.readInt(u64, key[0..8], .little);
+        const mid = std.mem.readInt(u64, key[8..16], .little);
+        const hi: u64 = std.mem.readInt(u32, key[16..20], .little);
+        // Fold all 20 bytes with odd, mutually non-aligned rotations so no two
+        // chunks can cancel on a byte boundary, then avalanche.
+        return mix64(lo ^ std.math.rotl(u64, mid, 27) ^ std.math.rotl(u64, hi, 13));
     }
     pub fn eql(_: @This(), a: Address, b: Address) bool {
         return std.mem.eql(u8, &a, &b);
@@ -367,6 +381,59 @@ pub const testing = struct {
         const address3: Address = [20]u8{ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100 };
         const result3 = shortAddress(address3);
         try std.testing.expectEqual(@as(?usize, null), result3);
+    }
+
+    /// Guards the property `AddressContext` exists for: addresses that share a
+    /// long prefix must still spread across buckets. The previous `key[0..8]`
+    /// truncation mapped every address below to the *same* u64, collapsing both
+    /// the bucket index and the fingerprint and making each probe a 20-byte
+    /// `eql` — quadratic in the group size. These are the shapes that actually
+    /// occur: sequential deployments, a ground-out CREATE2 prefix, and the
+    /// low-precompile range.
+    pub fn testAddressHashSpread() !void {
+        const ctx = AddressContext{};
+        const n = 4096;
+        // Zig's HashMap takes the bucket from `hash & mask` and the fingerprint
+        // from `hash >> 57`, so check the low bits specifically, not just that
+        // the full u64s differ.
+        const mask: u64 = n - 1;
+
+        // Each shape varies a different region of the address, because a mixer can
+        // be blind to one region while handling the others. `tail` is the fixture
+        // shape that first exposed this; `mid_only` is the shape that broke every
+        // cheaper single-multiply mixer tried.
+        const Shape = enum { tail, prefixed_tail, mid_only, head_only };
+        for (std.enums.values(Shape)) |shape| {
+            var seen = [_]bool{false} ** n;
+            var distinct_buckets: usize = 0;
+
+            for (0..n) |i| {
+                var addr: Address = [_]u8{0} ** 20;
+                switch (shape) {
+                    // 0x00..00_0001_00000000_00000000_000000XX
+                    .tail => {
+                        addr[9] = 1;
+                        std.mem.writeInt(u32, addr[16..20], @intCast(i), .big);
+                    },
+                    // a ground-out CREATE2 prefix over a sequential tail
+                    .prefixed_tail => {
+                        @memset(addr[0..16], 0xAB);
+                        std.mem.writeInt(u32, addr[16..20], @intCast(i), .big);
+                    },
+                    .mid_only => std.mem.writeInt(u64, addr[6..14], @intCast(i), .little),
+                    .head_only => std.mem.writeInt(u32, addr[0..4], @intCast(i), .big),
+                }
+                const bucket = ctx.hash(addr) & mask;
+                if (!seen[bucket]) {
+                    seen[bucket] = true;
+                    distinct_buckets += 1;
+                }
+            }
+
+            // A random hash fills ~63% of n buckets by the coupon-collector bound.
+            // The old truncation filled exactly 1.
+            try std.testing.expect(distinct_buckets > n / 2);
+        }
     }
 
     pub fn testSpecId() !void {
