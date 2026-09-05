@@ -754,7 +754,14 @@ fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
     // Allocate bit vector on heap (one bit per bytecode position) to avoid dangling pointer
     const bit_vec_len = (bytecode.len + 7) / 8;
     const bit_vec = alloc_mod.get().alloc(u8, bit_vec_len) catch {
-        // Allocation failed: return bytecode with empty jump table
+        // An empty jump table makes every JUMPDEST in this contract read as
+        // invalid, so the first JUMP halts with invalid_jump — the code runs, it
+        // just runs wrongly. Observed turning a post-block EIP-7002 system call
+        // into SystemContractCallFailed and a wrong state root, with nothing in
+        // the output naming memory as the cause. Record it so the block is
+        // rejected; the degraded value below only keeps this infallible
+        // signature honest until that happens.
+        alloc_mod.recordOom();
         return LegacyAnalyzedBytecode{
             .bytecode = bytecode,
             .original_len = bytecode.len,

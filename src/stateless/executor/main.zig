@@ -23,6 +23,7 @@ const fork_mod = @import("hardfork");
 const tx_decode = @import("./tx_decode.zig");
 const types = @import("executor_types");
 const db_mod = @import("db");
+const alloc_mod = @import("zesu_allocator");
 const context_mod = @import("context");
 const block_validation = @import("./block_validation.zig");
 const block_rlp_size = @import("./block_rlp_size.zig");
@@ -397,7 +398,11 @@ pub fn executeBlockStateless(
     ctx.cfg.disable_base_fee = (env.base_fee == null);
 
     const empty_pre_alloc = std.AutoHashMapUnmanaged(types.Address, types.AllocAccount).empty;
-    const result = try transition_mod.transitionWithContext(
+    // The OOM channel is process-global and sticky, so clear it per block: the
+    // spec-test runners execute thousands of blocks in one process and one
+    // failure must not condemn every block after it.
+    alloc_mod.resetOom();
+    const result = transition_mod.transitionWithContext(
         alloc,
         &ctx,
         empty_pre_alloc,
@@ -407,8 +412,19 @@ pub fn executeBlockStateless(
         chain_id,
         fork_mod.blockReward(spec),
         public_keys,
-    );
+    ) catch |err| {
+        // A swallowed allocation failure is the more truthful cause: the errors
+        // it produces downstream (a system call that "reverted", a root that
+        // "disagreed") describe the symptom, not what happened.
+        if (alloc_mod.oomSeen()) return error.OutOfMemory;
+        return err;
+    };
     if (ctx.ctx_error != .ok) return error.InvalidWitness;
+    // A swallowed allocation failure means some infallible path carried on with a
+    // degraded value, so anything computed after it is untrustworthy. Reject the
+    // block naming memory as the cause rather than emitting a root that looks
+    // like a consensus disagreement. See zesu_allocator's OOM channel.
+    if (alloc_mod.oomSeen()) return error.OutOfMemory;
     // EIP-7928 (Amsterdam+): the block access list is only validated on Amsterdam+
     // (validatePostExecution gates the comparison). Pre-Amsterdam, skip draining the
     // access log and building the accessed entries entirely; validatePostExecution
