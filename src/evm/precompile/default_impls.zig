@@ -309,7 +309,11 @@ fn kzgPointEvalRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
         return .{ .err = T.PrecompileError.BlobVerifyKzgProofFailed };
     if (!verified) return .{ .err = T.PrecompileError.BlobVerifyKzgProofFailed };
 
-    return .{ .success = T.PrecompileOutput.new(GAS, &KZG_RETURN_VALUE) };
+    // Heap-allocated like every other non-empty output, so the caller can free
+    // unconditionally. 64 bytes once per call.
+    const heap_out = alloc_mod.get().dupe(u8, &KZG_RETURN_VALUE) catch
+        return .{ .err = T.PrecompileError.OutOfGas };
+    return .{ .success = T.PrecompileOutput.new(GAS, heap_out) };
 }
 
 // ── Prague / BLS12-381 ────────────────────────────────────────────────────────

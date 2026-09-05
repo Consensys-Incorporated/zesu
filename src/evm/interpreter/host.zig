@@ -246,6 +246,24 @@ pub const Host = struct {
     /// Precompile set for the current spec. Null disables precompile dispatch (benchmarks/unit tests).
     precompiles: ?*const precompile_mod.Precompiles = null,
 
+    /// The most recent precompile output, held only until the next precompile
+    /// call. Every non-empty output is heap-allocated (see PrecompileOutput's
+    /// ownership rule), so this is freed unconditionally.
+    ///
+    /// Freeing the previous output when producing the next is sound because a
+    /// frame can only read its return data between its own calls, and any
+    /// subsequent call — precompile or sub-frame — overwrites it. At most one
+    /// output is outstanding at a time.
+    last_output: []const u8 = &.{},
+
+    /// Free the retained precompile output. Safe to call repeatedly.
+    pub fn releaseOutput(self: *Host) void {
+        if (self.last_output.len > 0) {
+            alloc_mod.get().free(@constCast(self.last_output));
+            self.last_output = &.{};
+        }
+    }
+
     /// Create a Host from any Context(DB). DB is resolved at comptime.
     pub fn init(comptime DB: type, ctx: *context_mod.Context(DB), prec: ?*const precompile_mod.Precompiles) Host {
         return .{
@@ -707,8 +725,12 @@ fn setupCallCore(js: anytype, host: *Host, inputs: CallInputs, frame_depth: usiz
                 }
             }
             const pc_result = pc.execute(inputs.data, inputs.gas_limit);
+            // The previous output can no longer be observed: this call is about
+            // to overwrite the frame's return data.
+            host.releaseOutput();
             switch (pc_result) {
                 .success => |out| {
+                    host.last_output = out.bytes;
                     if (out.reverted) {
                         js.checkpointRevert(cp);
                         return .{ .precompile = .{ .success = false, .return_data = out.bytes, .gas_used = inputs.gas_limit, .gas_remaining = 0, .gas_refunded = 0, .delegation_gas = 0, .state_gas_used = 0, .state_gas_remaining = inputs.reservoir } };
