@@ -514,6 +514,11 @@ pub fn makeLogFn(comptime n: u8) *const fn (ctx: *InstructionContext) void {
                 &[_]primitives.Hash{}
             else blk: {
                 const t = alloc_mod.get().alloc(primitives.Hash, n) catch {
+                    // Reporting OOM as out-of-gas is a consensus-visible lie: a
+                    // transaction the reference completes would appear to OOG.
+                    // Halting is still the only local option, so record it and
+                    // let the block be rejected.
+                    alloc_mod.recordOom();
                     ctx.interpreter.halt(.out_of_gas);
                     return;
                 };

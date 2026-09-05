@@ -754,7 +754,14 @@ fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
     // Allocate bit vector on heap (one bit per bytecode position) to avoid dangling pointer
     const bit_vec_len = (bytecode.len + 7) / 8;
     const bit_vec = alloc_mod.get().alloc(u8, bit_vec_len) catch {
-        // Allocation failed: return bytecode with empty jump table
+        // An empty jump table makes every JUMPDEST in this contract read as
+        // invalid, so the first JUMP halts with invalid_jump — the code runs, it
+        // just runs wrongly. Observed turning a post-block EIP-7002 system call
+        // into SystemContractCallFailed and a wrong state root, with nothing in
+        // the output naming memory as the cause. Record it so the block is
+        // rejected; the degraded value below only keeps this infallible
+        // signature honest until that happens.
+        alloc_mod.recordOom();
         return LegacyAnalyzedBytecode{
             .bytecode = bytecode,
             .original_len = bytecode.len,
@@ -818,3 +825,57 @@ pub const testing = struct {
         try std.testing.expectEqual(@as(usize, 1), bytecode.len());
     }
 };
+
+// ─── Swallowed-allocation-failure channel ─────────────────────────────────────
+//
+// analyzeLegacy cannot return an error: its callers (Bytecode.newLegacy/newRaw,
+// reached from host.zig and mainnet_builder.zig) have no error to propagate. It
+// therefore falls back to an empty jump table, which makes every JUMPDEST in the
+// contract read as invalid. These pin the fallback's two obligations: it must
+// still be reported, and it must not be reported when nothing failed.
+
+test "a failed jump-table allocation is recorded on the OOM channel" {
+    const saved = alloc_mod.get();
+    defer alloc_mod.set(saved);
+    alloc_mod.resetOom();
+    defer alloc_mod.resetOom();
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    alloc_mod.set(failing.allocator());
+
+    // JUMPDEST at index 0: a correctly analysed table would mark this position
+    // valid, so an empty table is a behavioural change, not merely a missing hint.
+    const code = [_]u8{ JUMPDEST, STOP };
+    var bc = Bytecode.newLegacy(&code);
+    defer bc.deinit();
+
+    try std.testing.expect(alloc_mod.oomSeen());
+
+    // The degraded value is still returned — the contract is that the block is
+    // rejected later, not that this call fails.
+    const jt = bc.legacyJumpTable() orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 0), jt.bit_len);
+}
+
+test "a successful analysis leaves the OOM channel clear" {
+    alloc_mod.resetOom();
+    defer alloc_mod.resetOom();
+
+    const code = [_]u8{ JUMPDEST, STOP };
+    var bc = Bytecode.newLegacy(&code);
+    defer bc.deinit();
+
+    try std.testing.expect(!alloc_mod.oomSeen());
+    const jt = bc.legacyJumpTable() orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 2), jt.bit_len);
+}
+
+test "resetOom clears a recorded failure so one block cannot condemn the next" {
+    alloc_mod.resetOom();
+    defer alloc_mod.resetOom();
+
+    alloc_mod.recordOom();
+    try std.testing.expect(alloc_mod.oomSeen());
+    alloc_mod.resetOom();
+    try std.testing.expect(!alloc_mod.oomSeen());
+}

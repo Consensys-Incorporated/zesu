@@ -145,8 +145,11 @@ fn ecRecoverPadded(input: *const [128]u8, gas_cost: u64) T.PrecompileResult {
     var result: [32]u8 = [_]u8{0} ** 32;
     @memcpy(result[12..], hash[12..]);
 
-    const output = alloc_mod.get().dupe(u8, &result) catch
+    const output = alloc_mod.get().dupe(u8, &result) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     return .{ .success = T.PrecompileOutput.new(gas_cost, output) };
 }
 
@@ -175,8 +178,11 @@ fn bn254AddImpl(input: []const u8, gas_cost: u64) T.PrecompileResult {
     var result: [64]u8 = undefined;
     if (!accel.bn254_g1_add(p1, p2, &result))
         return .{ .err = T.PrecompileError.Bn254FieldPointNotAMember };
-    const output = alloc_mod.get().dupe(u8, &result) catch
+    const output = alloc_mod.get().dupe(u8, &result) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     return .{ .success = T.PrecompileOutput.new(gas_cost, output) };
 }
 
@@ -198,8 +204,11 @@ fn bn254MulImpl(input: []const u8, gas_cost: u64) T.PrecompileResult {
     var result: [64]u8 = undefined;
     if (!accel.bn254_g1_mul(point, scalar, &result))
         return .{ .err = T.PrecompileError.Bn254FieldPointNotAMember };
-    const output = alloc_mod.get().dupe(u8, &result) catch
+    const output = alloc_mod.get().dupe(u8, &result) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     return .{ .success = T.PrecompileOutput.new(gas_cost, output) };
 }
 
@@ -227,8 +236,11 @@ fn bn254PairingImpl(input: []const u8, gas_cost: u64) T.PrecompileResult {
         return .{ .err = T.PrecompileError.Bn254FieldPointNotAMember };
     var result: [32]u8 = [_]u8{0} ** 32;
     if (verified) result[31] = 1;
-    const output = alloc_mod.get().dupe(u8, &result) catch
+    const output = alloc_mod.get().dupe(u8, &result) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     return .{ .success = T.PrecompileOutput.new(gas_cost, output) };
 }
 
@@ -345,8 +357,11 @@ fn bls12G1AddRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
         return .{ .err = T.PrecompileError.Bls12381G1NotOnCurve };
 
     const padded = padG1Point(&raw);
-    const heap_out = alloc_mod.get().dupe(u8, &padded) catch
+    const heap_out = alloc_mod.get().dupe(u8, &padded) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     return .{ .success = T.PrecompileOutput.new(GAS, heap_out) };
 }
 
@@ -364,8 +379,11 @@ fn bls12G1MsmRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
     const gas_used = (@as(u64, k) * 12000 * @as(u64, discount)) / 1000;
     if (gas_used > gas_limit) return .{ .err = T.PrecompileError.OutOfGas };
 
-    const pairs = alloc_mod.get().alloc(accel.Bls12G1MsmPair, k) catch
+    const pairs = alloc_mod.get().alloc(accel.Bls12G1MsmPair, k) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     defer alloc_mod.get().free(pairs);
 
     var i: usize = 0;
@@ -383,8 +401,11 @@ fn bls12G1MsmRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
         return .{ .err = T.PrecompileError.Bls12381G1NotOnCurve };
 
     const padded = padG1Point(&raw);
-    const heap_out = alloc_mod.get().dupe(u8, &padded) catch
+    const heap_out = alloc_mod.get().dupe(u8, &padded) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     return .{ .success = T.PrecompileOutput.new(gas_used, heap_out) };
 }
 
@@ -415,8 +436,11 @@ fn bls12G2AddRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
         return .{ .err = T.PrecompileError.Bls12381G2NotOnCurve };
 
     const padded = padG2Point(&raw);
-    const heap_out = alloc_mod.get().dupe(u8, &padded) catch
+    const heap_out = alloc_mod.get().dupe(u8, &padded) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     return .{ .success = T.PrecompileOutput.new(GAS, heap_out) };
 }
 
@@ -434,8 +458,11 @@ fn bls12G2MsmRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
     const gas_used = (@as(u64, k) * 22500 * @as(u64, discount)) / 1000;
     if (gas_used > gas_limit) return .{ .err = T.PrecompileError.OutOfGas };
 
-    const pairs = alloc_mod.get().alloc(accel.Bls12G2MsmPair, k) catch
+    const pairs = alloc_mod.get().alloc(accel.Bls12G2MsmPair, k) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     defer alloc_mod.get().free(pairs);
 
     var i: usize = 0;
@@ -455,8 +482,11 @@ fn bls12G2MsmRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
         return .{ .err = T.PrecompileError.Bls12381G2NotOnCurve };
 
     const padded = padG2Point(&raw);
-    const heap_out = alloc_mod.get().dupe(u8, &padded) catch
+    const heap_out = alloc_mod.get().dupe(u8, &padded) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     return .{ .success = T.PrecompileOutput.new(gas_used, heap_out) };
 }
 
@@ -471,8 +501,11 @@ fn bls12PairingRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
     const gas_used: u64 = @as(u64, n) * 32600 + 37700;
     if (gas_used > gas_limit) return .{ .err = T.PrecompileError.OutOfGas };
 
-    const pairs = alloc_mod.get().alloc(accel.Bls12PairingPair, n) catch
+    const pairs = alloc_mod.get().alloc(accel.Bls12PairingPair, n) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     defer alloc_mod.get().free(pairs);
 
     var i: usize = 0;
@@ -496,8 +529,11 @@ fn bls12PairingRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
         return .{ .err = T.PrecompileError.Bls12381G1NotOnCurve };
     var result: [32]u8 = [_]u8{0} ** 32;
     if (verified) result[31] = 1;
-    const heap_out = alloc_mod.get().dupe(u8, &result) catch
+    const heap_out = alloc_mod.get().dupe(u8, &result) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     return .{ .success = T.PrecompileOutput.new(gas_used, heap_out) };
 }
 
@@ -518,8 +554,11 @@ fn bls12MapFpToG1Run(input: []const u8, gas_limit: u64) T.PrecompileResult {
         return .{ .err = T.PrecompileError.NonCanonicalFp };
 
     const padded = padG1Point(&raw);
-    const heap_out = alloc_mod.get().dupe(u8, &padded) catch
+    const heap_out = alloc_mod.get().dupe(u8, &padded) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     return .{ .success = T.PrecompileOutput.new(GAS, heap_out) };
 }
 
@@ -544,8 +583,11 @@ fn bls12MapFp2ToG2Run(input: []const u8, gas_limit: u64) T.PrecompileResult {
         return .{ .err = T.PrecompileError.NonCanonicalFp };
 
     const padded = padG2Point(&raw);
-    const heap_out = alloc_mod.get().dupe(u8, &padded) catch
+    const heap_out = alloc_mod.get().dupe(u8, &padded) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     return .{ .success = T.PrecompileOutput.new(GAS, heap_out) };
 }
 
@@ -573,8 +615,11 @@ fn p256VerifyImpl(input: []const u8, gas_cost: u64) T.PrecompileResult {
     if (!verified) return .{ .success = T.PrecompileOutput.new(gas_cost, &[_]u8{}) };
     var result: [32]u8 = [_]u8{0} ** 32;
     result[31] = 1;
-    const output = alloc_mod.get().dupe(u8, &result) catch
+    const output = alloc_mod.get().dupe(u8, &result) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return .{ .err = T.PrecompileError.OutOfGas };
+    };
     return .{ .success = T.PrecompileOutput.new(gas_cost, output) };
 }
 

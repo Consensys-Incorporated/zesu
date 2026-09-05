@@ -439,3 +439,54 @@ pub const testing = struct {
         }
     }
 };
+
+// ─── Swallowed-allocation-failure channel ─────────────────────────────────────
+//
+// Every precompile that allocates reports failure as `PrecompileError.OutOfGas`,
+// because that is the only failure a precompile can express. That is a
+// consensus-visible lie — the reference completes the call — so the failure is
+// also recorded on the allocator's OOM channel and the block driver rejects the
+// block for the real reason. These pin that recording, since the OutOfGas return
+// itself is indistinguishable from a genuine gas failure.
+
+test "a precompile that cannot allocate records the failure" {
+    const saved = alloc_mod.get();
+    defer alloc_mod.set(saved);
+    alloc_mod.resetOom();
+    defer alloc_mod.resetOom();
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    alloc_mod.set(failing.allocator());
+
+    // identity's output is a copy of its input, so any non-empty input allocates.
+    const result = identity.identityRun(&[_]u8{ 1, 2, 3, 4 }, 1_000_000);
+
+    // The local return is still OutOfGas — the block-level rejection is what
+    // distinguishes it from a real gas failure.
+    try std.testing.expect(result == .err);
+    try std.testing.expectEqual(PrecompileError.OutOfGas, result.err);
+    try std.testing.expect(alloc_mod.oomSeen());
+}
+
+test "a precompile that allocates successfully leaves the channel clear" {
+    alloc_mod.resetOom();
+    defer alloc_mod.resetOom();
+
+    const result = identity.identityRun(&[_]u8{ 1, 2, 3, 4 }, 1_000_000);
+    try std.testing.expect(result == .success);
+    defer alloc_mod.get().free(@constCast(result.success.bytes));
+
+    try std.testing.expect(!alloc_mod.oomSeen());
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4 }, result.success.bytes);
+}
+
+test "a genuine gas failure does not touch the OOM channel" {
+    alloc_mod.resetOom();
+    defer alloc_mod.resetOom();
+
+    // gas_limit below the base cost: fails before any allocation is attempted.
+    const result = identity.identityRun(&[_]u8{ 1, 2, 3, 4 }, 1);
+    try std.testing.expect(result == .err);
+    try std.testing.expectEqual(PrecompileError.OutOfGas, result.err);
+    try std.testing.expect(!alloc_mod.oomSeen());
+}

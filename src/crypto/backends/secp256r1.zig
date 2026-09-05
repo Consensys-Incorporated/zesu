@@ -33,8 +33,11 @@ fn p256VerifyInner(input: []const u8, gas_limit: u64, gas_cost: u64) T.Precompil
     if (verifyImpl(input)) {
         var result: [32]u8 = [_]u8{0} ** 32;
         result[31] = 1;
-        const heap_out = alloc_mod.get().dupe(u8, &result) catch
+        const heap_out = alloc_mod.get().dupe(u8, &result) catch {
+            // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+            alloc_mod.recordOom();
             return T.PrecompileResult{ .err = T.PrecompileError.OutOfGas };
+        };
         return T.PrecompileResult{ .success = T.PrecompileOutput.new(gas_cost, heap_out) };
     } else {
         return T.PrecompileResult{ .success = T.PrecompileOutput.new(gas_cost, &[_]u8{}) };
