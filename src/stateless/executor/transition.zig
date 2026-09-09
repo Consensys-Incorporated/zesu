@@ -14,6 +14,13 @@ const handler_mod = @import("handler");
 
 const input = @import("executor_types");
 const bloom = @import("bloom.zig");
+
+/// Address-keyed map using the tuned AddressContext rather than Zig's auto-derived hash and
+/// equality for [20]u8. BaTracker keys almost everything by address and touches these maps on
+/// every state access, so the generic context showed up as a large share of BAL tracking.
+fn AddrMap(comptime V: type) type {
+    return std.HashMapUnmanaged(input.Address, V, primitives.AddressContext, 80);
+}
 const rlp = @import("./rlp_encode.zig");
 const precompile_mod = @import("precompile");
 const accel = @import("accelerators");
@@ -73,15 +80,15 @@ const KnownAcct = struct {
 const BaTracker = struct {
     alloc: std.mem.Allocator,
     // Last committed account state (updated after each phase)
-    committed: std.AutoHashMapUnmanaged(input.Address, KnownAcct),
-    committed_storage: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, u256)),
+    committed: AddrMap(KnownAcct),
+    committed_storage: AddrMap(std.AutoHashMapUnmanaged(u256, u256)),
     // Accumulated per-BAI changes
-    bal_chg: std.AutoHashMapUnmanaged(input.Address, std.ArrayListUnmanaged(bal_mod.BaiU256)),
-    nonce_chg: std.AutoHashMapUnmanaged(input.Address, std.ArrayListUnmanaged(bal_mod.BaiU64)),
-    code_chg: std.AutoHashMapUnmanaged(input.Address, std.ArrayListUnmanaged(bal_mod.BaiCode)),
-    slot_chg: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, std.ArrayListUnmanaged(bal_mod.SlotBaiValue))),
+    bal_chg: AddrMap(std.ArrayListUnmanaged(bal_mod.BaiU256)),
+    nonce_chg: AddrMap(std.ArrayListUnmanaged(bal_mod.BaiU64)),
+    code_chg: AddrMap(std.ArrayListUnmanaged(bal_mod.BaiCode)),
+    slot_chg: AddrMap(std.AutoHashMapUnmanaged(u256, std.ArrayListUnmanaged(bal_mod.SlotBaiValue))),
     // Storage slots written then wiped by same-tx SELFDESTRUCT → appear as storage_reads, no changes.
-    selfdestruct_reads: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, void)),
+    selfdestruct_reads: AddrMap(std.AutoHashMapUnmanaged(u256, void)),
     // bal-devnet-7: SYSTEM_ADDRESS is included in BAL iff it was touched by USER tx code
     // (BALANCE/EXTCODE*/CALL etc.). Touches solely from pre/post-block system calls must
     // not pull it into the BAL. Set in detectAndRecord(bai) when bai is in user-tx range.
@@ -307,19 +314,34 @@ const BaTracker = struct {
         // Collect storage reads: all accessed slots NOT in slot_chg.
         // Includes pure reads (was_written=false) AND net-zero writes (was_written=true
         // but value returned to original, so absent from slot_chg).
-        var storage_reads = std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, void)){};
+        // Per-address slot lists, not sets: the slots come from maps and so are already
+        // unique within each source. Only the two sources can overlap, and that is resolved
+        // by an adjacent-dedup after the sort these lists get anyway -- which is cheaper than
+        // hashing every slot into a set to discover it was already unique.
+        var storage_reads = AddrMap(std.ArrayListUnmanaged(u256)){};
         {
             var it = ctx.journaled_state.inner.evm_state.iterator();
             while (it.next()) |e| {
                 const addr = e.key_ptr.*;
+                // Hoisted: the changed-slot map for this address is loop-invariant, so look it
+                // up once per account rather than once per slot.
+                const chg_for_addr = self.slot_chg.get(addr);
+                // The destination list depends only on `addr`, so resolve it once per account
+                // instead of once per slot. Lazy so an account with no read slots adds no
+                // entry. Safe to hold across this account's slots: the only insert that could
+                // rehash the map is this account's own, made before the pointer is used.
+                var dst: ?*std.ArrayListUnmanaged(u256) = null;
                 var stor_it = e.value_ptr.*.storage.iterator();
                 while (stor_it.next()) |se| {
                     const slot = se.key_ptr.*;
-                    const in_slot_chg = if (self.slot_chg.get(addr)) |sm| sm.contains(slot) else false;
+                    const in_slot_chg = if (chg_for_addr) |sm| sm.contains(slot) else false;
                     if (in_slot_chg) continue;
-                    const sm = storage_reads.getOrPut(a, addr) catch continue;
-                    if (!sm.found_existing) sm.value_ptr.* = .{};
-                    sm.value_ptr.*.put(a, slot, {}) catch {};
+                    if (dst == null) {
+                        const sm = storage_reads.getOrPut(a, addr) catch continue;
+                        if (!sm.found_existing) sm.value_ptr.* = .empty;
+                        dst = sm.value_ptr;
+                    }
+                    dst.?.append(a, slot) catch {};
                 }
             }
         }
@@ -328,14 +350,21 @@ const BaTracker = struct {
             var it = self.selfdestruct_reads.iterator();
             while (it.next()) |e| {
                 const addr = e.key_ptr.*;
+                // Hoisted -- see above.
+                const chg_for_addr = self.slot_chg.get(addr);
+                // Resolved once per account -- see above.
+                var dst: ?*std.ArrayListUnmanaged(u256) = null;
                 var sit = e.value_ptr.*.keyIterator();
                 while (sit.next()) |slot_ptr| {
                     const slot = slot_ptr.*;
-                    const in_slot_chg = if (self.slot_chg.get(addr)) |sm| sm.contains(slot) else false;
+                    const in_slot_chg = if (chg_for_addr) |sm| sm.contains(slot) else false;
                     if (in_slot_chg) continue;
-                    const sm = storage_reads.getOrPut(a, addr) catch continue;
-                    if (!sm.found_existing) sm.value_ptr.* = .{};
-                    sm.value_ptr.*.put(a, slot, {}) catch {};
+                    if (dst == null) {
+                        const sm = storage_reads.getOrPut(a, addr) catch continue;
+                        if (!sm.found_existing) sm.value_ptr.* = .empty;
+                        dst = sm.value_ptr;
+                    }
+                    dst.?.append(a, slot) catch {};
                 }
             }
         }
@@ -346,7 +375,7 @@ const BaTracker = struct {
         // (balance/nonce/code) only ever occur on accounts that were also read, so we do
         // NOT seed from the change maps — doing so would resurrect created-only accounts
         // (same-tx create+selfdestruct ephemerals) that the reference never reads or writes.
-        var all_addrs = std.AutoHashMapUnmanaged(input.Address, void).empty;
+        var all_addrs = AddrMap(void).empty;
         {
             var it = ctx.journaled_state.inner.bal_account_reads.keyIterator();
             while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
@@ -400,20 +429,27 @@ const BaTracker = struct {
                 }.lessThan);
             }
 
-            // Build storage_reads (not-changed slots), sorted, excluding those in slot_chg
+            // Build storage_reads (not-changed slots), sorted and deduplicated
             var sr_list = std.ArrayListUnmanaged(u256).empty;
-            if (storage_reads.get(addr)) |sr_map| {
-                var sit = sr_map.keyIterator();
-                while (sit.next()) |slot_ptr| {
-                    const slot = slot_ptr.*;
-                    const in_chg = if (self.slot_chg.get(addr)) |sm| sm.contains(slot) else false;
-                    if (!in_chg) try sr_list.append(a, slot);
-                }
+            if (storage_reads.get(addr)) |sr_slots| {
+                // No slot_chg filter here: collection above already skipped changed slots and
+                // slot_chg is not touched in between, so re-testing every slot cannot drop one.
+                try sr_list.appendSlice(a, sr_slots.items);
                 std.mem.sort(u256, sr_list.items, {}, struct {
                     pub fn lessThan(_: void, x: u256, y: u256) bool {
                         return x < y;
                     }
                 }.lessThan);
+                // Drop adjacent duplicates -- the only possible source is a slot reported by
+                // both evm_state and selfdestruct_reads.
+                var w: usize = 0;
+                for (sr_list.items) |slot| {
+                    if (w == 0 or sr_list.items[w - 1] != slot) {
+                        sr_list.items[w] = slot;
+                        w += 1;
+                    }
+                }
+                sr_list.shrinkRetainingCapacity(w);
             }
 
             // Ephemeral accounts (selfdestruct_reads only) have no balance/nonce/code changes.
@@ -447,10 +483,9 @@ const BaTracker = struct {
         var bal_items: u64 = 0;
         for (entries.items) |entry| {
             bal_items += 1; // address
-            var unique_slots = std.AutoHashMapUnmanaged(u256, void).empty;
-            for (entry.storage_changes) |sc| unique_slots.put(a, sc.slot, {}) catch {};
-            for (entry.storage_reads) |sr| unique_slots.put(a, sr, {}) catch {};
-            bal_items += unique_slots.count();
+            // storage_changes comes from slot_chg and storage_reads excludes it, so the two
+            // are disjoint; each is already unique. The count is their sum -- no set needed.
+            bal_items += entry.storage_changes.len + entry.storage_reads.len;
         }
         if (bal_items > gas_limit / GAS_BLOCK_ACCESS_LIST_ITEM) {
             return error.BalGasLimitExceeded;
