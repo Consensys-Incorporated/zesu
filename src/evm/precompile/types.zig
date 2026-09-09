@@ -46,10 +46,6 @@ pub const PrecompileError = error{
 /// One rule for the module rather than a per-precompile ownership flag: a
 /// precompile should not have to know who frees its output. Any new precompile
 /// returning a non-empty static must duplicate it (see the KZG return value).
-///
-/// Before this rule existed nothing freed these buffers at all: a 30M-gas
-/// identity block retained 1,773 outputs totalling 300 MiB and exhausted the
-/// guest heap at 60M.
 pub const PrecompileOutput = struct {
     /// Gas used by the precompile
     gas_used: u64,
