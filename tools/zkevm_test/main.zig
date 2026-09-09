@@ -1,6 +1,6 @@
 /// zkevm-blockchain-test-runner — runner for zkevm execution-specs fixtures.
 ///
-/// Fixture format (zkevm@v0.8.0 — under `blockchain_tests/`):
+/// Fixture format (zkevm@v0.8.2 — under `blockchain_tests/`):
 ///   { "test_name": { "network": "Amsterdam", "blocks": [
 ///       { "statelessInputBytes": "0x...", "statelessOutputBytes": "0x...", ... }
 ///   ] } }
@@ -103,7 +103,7 @@ fn processFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, passe
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // 2 GiB: zkevm@v0.8.0 ships a 276 MiB fixture (invalid_negative_excess_blob_gas,
+    // 2 GiB: zkevm@v0.8.2 ships a 276 MiB fixture (invalid_negative_excess_blob_gas,
     // 2744 test cases) that a 256 MiB cap silently dropped from the run.
     const json_text = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(2 * 1024 * 1024 * 1024)) catch |err| {
         std.debug.print("error: cannot read '{s}': {}\n", .{ path, err });
@@ -211,7 +211,7 @@ fn runBlock(
         return false;
     };
 
-    // zkevm@v0.8.0: SszStatelessValidationResult is a flat 43-byte container
+    // zkevm@v0.8.2: SszStatelessValidationResult is a flat 43-byte container
     // (root + successful_validation + chain_id + schema_id) → 86 hex chars.
     if (out_stripped.len != 2 * ssz_output.OUTPUT_SIZE) return error.BadOutputLength;
     var expected: [ssz_output.OUTPUT_SIZE]u8 = undefined;
