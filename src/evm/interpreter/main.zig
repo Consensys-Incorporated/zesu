@@ -52,6 +52,16 @@ test {
     _ = @import("opcodes/arithmetic_tests.zig");
     _ = @import("opcodes/host_ops_tests.zig");
     _ = @import("opcodes/environment_tests.zig");
+    // The remaining opcode suites were unreachable from any test graph: each is imported
+    // only by its sibling source file, and nothing imported those siblings, so
+    // `zig build test` silently skipped all of them.
+    _ = @import("opcodes/bitwise_tests.zig");
+    _ = @import("opcodes/comparison_tests.zig");
+    _ = @import("opcodes/control_tests.zig");
+    _ = @import("opcodes/create_tests.zig");
+    _ = @import("opcodes/keccak_tests.zig");
+    _ = @import("opcodes/memory_tests.zig");
+    _ = @import("opcodes/stack_tests.zig");
 }
 
 /// Main interpreter module for EVM bytecode execution

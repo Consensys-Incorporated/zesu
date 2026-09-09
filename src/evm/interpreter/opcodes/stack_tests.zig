@@ -224,7 +224,7 @@ test "DUPN: valid imm=128 (n=17) duplicates item at depth 17" {
     // Rebuild: depth n=17 means the 17th item from the top (1-indexed).
     // After dupUnsafe(17) the top becomes a copy of item[top-17+1] in dupUnsafe convention.
     // Easier: push target first, then 16 fillers, then call DUPN imm=128.
-    interp.stack = @import("../stack.zig").Stack{};
+    interp.stack.length = 0; // clear; Stack is heap-backed now, so it cannot be re-initialised
     interp.stack.pushUnsafe(@as(U, 0xBEEF)); // will be at depth 17 after 16 more pushes
     var j: usize = 0;
     while (j < 16) : (j += 1) interp.stack.pushUnsafe(@as(U, j + 1));
