@@ -121,6 +121,20 @@ fn finalizeOutput(
     };
 }
 
+/// Lexicographic compare of two 32-byte hashes, four big-endian words at a time.
+///
+/// These comparators run O(n log n) times per account inside the accessed-state sorts below,
+/// and `std.mem.lessThan` walks the 32 bytes one at a time. Byte order and big-endian word
+/// order agree, so the ordering produced is identical.
+inline fn hash32LessThan(a: [32]u8, b: [32]u8) bool {
+    inline for (0..4) |i| {
+        const x = std.mem.readInt(u64, a[i * 8 ..][0..8], .big);
+        const y = std.mem.readInt(u64, b[i * 8 ..][0..8], .big);
+        if (x != y) return x < y;
+    }
+    return false;
+}
+
 fn u256ToHashLocal(value: u256) types.Hash {
     var out: types.Hash = @splat(0);
     var n = value;
@@ -231,12 +245,12 @@ pub fn buildAccessedEntries(
 
         std.mem.sort(types.StorageChange, storage_changes.items, {}, struct {
             pub fn lessThan(_: void, a: types.StorageChange, b: types.StorageChange) bool {
-                return std.mem.lessThan(u8, &a.slot, &b.slot);
+                return hash32LessThan(a.slot, b.slot);
             }
         }.lessThan);
         std.mem.sort(types.Hash, storage_reads.items, {}, struct {
             pub fn lessThan(_: void, a: types.Hash, b: types.Hash) bool {
-                return std.mem.lessThan(u8, &a, &b);
+                return hash32LessThan(a, b);
             }
         }.lessThan);
 
@@ -284,7 +298,7 @@ pub fn buildAccessedEntries(
         }
         std.mem.sort(types.StorageChange, storage_changes2.items, {}, struct {
             pub fn lessThan(_: void, a: types.StorageChange, b: types.StorageChange) bool {
-                return std.mem.lessThan(u8, &a.slot, &b.slot);
+                return hash32LessThan(a.slot, b.slot);
             }
         }.lessThan);
 
