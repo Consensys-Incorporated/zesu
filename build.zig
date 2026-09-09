@@ -615,7 +615,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
-    const spec_test_version = "tests-glamsterdam-devnet@v8.1.1";
+    const spec_test_version = "tests-glamsterdam-devnet@v8.1.4";
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-specs " ++ spec_test_version ++ " fixtures");
     fetch_fixtures_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
@@ -630,7 +630,7 @@ pub fn build(b: *std.Build) void {
             "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
     }).step);
 
-    const zkevm_version = "tests-zkevm@v0.8.2";
+    const zkevm_version = "tests-zkevm@v0.8.4";
     const fetch_zkevm_step = b.step("fetch-zkevm-fixtures", "Download " ++ zkevm_version ++ " execution-specs fixtures");
     fetch_zkevm_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
