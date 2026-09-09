@@ -14,6 +14,13 @@ const handler_mod = @import("handler");
 
 const input = @import("executor_types");
 const bloom = @import("bloom.zig");
+
+/// Address-keyed map using the tuned AddressContext rather than Zig's auto-derived hash and
+/// equality for [20]u8. BaTracker keys almost everything by address and touches these maps on
+/// every state access, so the generic context showed up as a large share of BAL tracking.
+fn AddrMap(comptime V: type) type {
+    return std.HashMapUnmanaged(input.Address, V, primitives.AddressContext, 80);
+}
 const rlp = @import("./rlp_encode.zig");
 const precompile_mod = @import("precompile");
 const accel = @import("accelerators");
@@ -73,15 +80,15 @@ const KnownAcct = struct {
 const BaTracker = struct {
     alloc: std.mem.Allocator,
     // Last committed account state (updated after each phase)
-    committed: std.AutoHashMapUnmanaged(input.Address, KnownAcct),
-    committed_storage: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, u256)),
+    committed: AddrMap(KnownAcct),
+    committed_storage: AddrMap(std.AutoHashMapUnmanaged(u256, u256)),
     // Accumulated per-BAI changes
-    bal_chg: std.AutoHashMapUnmanaged(input.Address, std.ArrayListUnmanaged(bal_mod.BaiU256)),
-    nonce_chg: std.AutoHashMapUnmanaged(input.Address, std.ArrayListUnmanaged(bal_mod.BaiU64)),
-    code_chg: std.AutoHashMapUnmanaged(input.Address, std.ArrayListUnmanaged(bal_mod.BaiCode)),
-    slot_chg: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, std.ArrayListUnmanaged(bal_mod.SlotBaiValue))),
+    bal_chg: AddrMap(std.ArrayListUnmanaged(bal_mod.BaiU256)),
+    nonce_chg: AddrMap(std.ArrayListUnmanaged(bal_mod.BaiU64)),
+    code_chg: AddrMap(std.ArrayListUnmanaged(bal_mod.BaiCode)),
+    slot_chg: AddrMap(std.AutoHashMapUnmanaged(u256, std.ArrayListUnmanaged(bal_mod.SlotBaiValue))),
     // Storage slots written then wiped by same-tx SELFDESTRUCT → appear as storage_reads, no changes.
-    selfdestruct_reads: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, void)),
+    selfdestruct_reads: AddrMap(std.AutoHashMapUnmanaged(u256, void)),
     // bal-devnet-7: SYSTEM_ADDRESS is included in BAL iff it was touched by USER tx code
     // (BALANCE/EXTCODE*/CALL etc.). Touches solely from pre/post-block system calls must
     // not pull it into the BAL. Set in detectAndRecord(bai) when bai is in user-tx range.
@@ -311,7 +318,7 @@ const BaTracker = struct {
         // unique within each source. Only the two sources can overlap, and that is resolved
         // by an adjacent-dedup after the sort these lists get anyway -- which is cheaper than
         // hashing every slot into a set to discover it was already unique.
-        var storage_reads = std.AutoHashMapUnmanaged(input.Address, std.ArrayListUnmanaged(u256)){};
+        var storage_reads = AddrMap(std.ArrayListUnmanaged(u256)){};
         {
             var it = ctx.journaled_state.inner.evm_state.iterator();
             while (it.next()) |e| {
@@ -368,7 +375,7 @@ const BaTracker = struct {
         // (balance/nonce/code) only ever occur on accounts that were also read, so we do
         // NOT seed from the change maps — doing so would resurrect created-only accounts
         // (same-tx create+selfdestruct ephemerals) that the reference never reads or writes.
-        var all_addrs = std.AutoHashMapUnmanaged(input.Address, void).empty;
+        var all_addrs = AddrMap(void).empty;
         {
             var it = ctx.journaled_state.inner.bal_account_reads.keyIterator();
             while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
