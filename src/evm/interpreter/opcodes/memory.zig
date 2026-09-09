@@ -172,13 +172,12 @@ pub fn opMcopy(ctx: *InstructionContext) void {
             return;
         }
 
-        // Use memmove semantics: copyBackwards when dest > src to handle overlap correctly.
+        // MCOPY is defined for overlapping ranges. @memmove has exactly those semantics
+        // and lowers to the target's memmove, which on ZisK is a DMA-accelerated stub
+        // rather than the byte-at-a-time loop std.mem.copyForwards/copyBackwards
+        // compile to.
         const mem = ctx.interpreter.memory.buffer.items;
-        if (dest_usize > src_usize) {
-            std.mem.copyBackwards(u8, mem[dest_usize..][0..length_usize], mem[src_usize..][0..length_usize]);
-        } else {
-            std.mem.copyForwards(u8, mem[dest_usize..][0..length_usize], mem[src_usize..][0..length_usize]);
-        }
+        @memmove(mem[dest_usize..][0..length_usize], mem[src_usize..][0..length_usize]);
     }
 }
 
