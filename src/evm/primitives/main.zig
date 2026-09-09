@@ -53,8 +53,11 @@ pub const AddressContext = struct {
         const lo = std.mem.readInt(u64, key[0..8], .little);
         const mid = std.mem.readInt(u64, key[8..16], .little);
         const hi: u64 = std.mem.readInt(u32, key[16..20], .little);
-        // Fold all 20 bytes with odd, mutually non-aligned rotations so no two
-        // chunks can cancel on a byte boundary, then avalanche.
+        // Fold all 20 bytes, then avalanche. The rotations are odd and unequal so
+        // chunks holding the same bytes don't cancel (without them lo == mid folds
+        // to just `hi`). They don't make the fold injective — it's linear over
+        // GF(2) — which is fine: addresses come from keccak, so a caller can't
+        // supply a chosen preimage.
         return mix64(lo ^ std.math.rotl(u64, mid, 27) ^ std.math.rotl(u64, hi, 13));
     }
     pub fn eql(_: @This(), a: Address, b: Address) bool {
@@ -387,9 +390,7 @@ pub const testing = struct {
     /// long prefix must still spread across buckets. The previous `key[0..8]`
     /// truncation mapped every address below to the *same* u64, collapsing both
     /// the bucket index and the fingerprint and making each probe a 20-byte
-    /// `eql` — quadratic in the group size. These are the shapes that actually
-    /// occur: sequential deployments, a ground-out CREATE2 prefix, and the
-    /// low-precompile range.
+    /// `eql` — quadratic in the group size.
     pub fn testAddressHashSpread() !void {
         const ctx = AddressContext{};
         const n = 4096;
@@ -398,11 +399,19 @@ pub const testing = struct {
         // the full u64s differ.
         const mask: u64 = n - 1;
 
-        // Each shape varies a different region of the address, because a mixer can
-        // be blind to one region while handling the others. `tail` is the fixture
-        // shape that first exposed this; `mid_only` is the shape that broke every
-        // cheaper single-multiply mixer tried.
-        const Shape = enum { tail, prefixed_tail, mid_only, head_only };
+        // Bytes each shape varies, for i < 4096 — a mixer can be blind to one
+        // chunk while handling the others:
+        //
+        //   tail, prefixed_tail   18-19  -> hi (the latter over a 0xAB background)
+        //   lo_high_bits           6-7   -> top of lo, low 48 bits zero
+        //   mid_word               8-9   -> mid
+        //   head_only              2-3   -> low half of lo
+        //
+        // `lo_high_bits` earns the second multiply in `mix64`: a lone multiply
+        // can't carry entropy downwards, so it puts all 4096 keys in one bucket.
+        // Don't move it to addr[8..16] — that drops the entropy into bits 0-15 and
+        // the shape stops discriminating. `mid_word` is what covers `mid`.
+        const Shape = enum { tail, prefixed_tail, lo_high_bits, mid_word, head_only };
         for (std.enums.values(Shape)) |shape| {
             var seen = [_]bool{false} ** n;
             var distinct_buckets: usize = 0;
@@ -420,7 +429,8 @@ pub const testing = struct {
                         @memset(addr[0..16], 0xAB);
                         std.mem.writeInt(u32, addr[16..20], @intCast(i), .big);
                     },
-                    .mid_only => std.mem.writeInt(u64, addr[6..14], @intCast(i), .little),
+                    .lo_high_bits => std.mem.writeInt(u64, addr[6..14], @intCast(i), .little),
+                    .mid_word => std.mem.writeInt(u64, addr[8..16], @intCast(i), .little),
                     .head_only => std.mem.writeInt(u32, addr[0..4], @intCast(i), .big),
                 }
                 const bucket = ctx.hash(addr) & mask;
