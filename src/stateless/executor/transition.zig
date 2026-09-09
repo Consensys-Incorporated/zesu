@@ -319,14 +319,22 @@ const BaTracker = struct {
                 // Hoisted: the changed-slot map for this address is loop-invariant, so look it
                 // up once per account rather than once per slot.
                 const chg_for_addr = self.slot_chg.get(addr);
+                // The destination list depends only on `addr`, so resolve it once per account
+                // instead of once per slot. Lazy so an account with no read slots adds no
+                // entry. Safe to hold across this account's slots: the only insert that could
+                // rehash the map is this account's own, made before the pointer is used.
+                var dst: ?*std.ArrayListUnmanaged(u256) = null;
                 var stor_it = e.value_ptr.*.storage.iterator();
                 while (stor_it.next()) |se| {
                     const slot = se.key_ptr.*;
                     const in_slot_chg = if (chg_for_addr) |sm| sm.contains(slot) else false;
                     if (in_slot_chg) continue;
-                    const sm = storage_reads.getOrPut(a, addr) catch continue;
-                    if (!sm.found_existing) sm.value_ptr.* = .empty;
-                    sm.value_ptr.*.append(a, slot) catch {};
+                    if (dst == null) {
+                        const sm = storage_reads.getOrPut(a, addr) catch continue;
+                        if (!sm.found_existing) sm.value_ptr.* = .empty;
+                        dst = sm.value_ptr;
+                    }
+                    dst.?.append(a, slot) catch {};
                 }
             }
         }
@@ -337,14 +345,19 @@ const BaTracker = struct {
                 const addr = e.key_ptr.*;
                 // Hoisted -- see above.
                 const chg_for_addr = self.slot_chg.get(addr);
+                // Resolved once per account -- see above.
+                var dst: ?*std.ArrayListUnmanaged(u256) = null;
                 var sit = e.value_ptr.*.keyIterator();
                 while (sit.next()) |slot_ptr| {
                     const slot = slot_ptr.*;
                     const in_slot_chg = if (chg_for_addr) |sm| sm.contains(slot) else false;
                     if (in_slot_chg) continue;
-                    const sm = storage_reads.getOrPut(a, addr) catch continue;
-                    if (!sm.found_existing) sm.value_ptr.* = .empty;
-                    sm.value_ptr.*.append(a, slot) catch {};
+                    if (dst == null) {
+                        const sm = storage_reads.getOrPut(a, addr) catch continue;
+                        if (!sm.found_existing) sm.value_ptr.* = .empty;
+                        dst = sm.value_ptr;
+                    }
+                    dst.?.append(a, slot) catch {};
                 }
             }
         }
