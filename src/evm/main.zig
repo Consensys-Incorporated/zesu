@@ -49,5 +49,6 @@ pub fn executeTransaction(ctx: *context.DefaultContext, tx: context.Transaction)
 /// Test the primitives module
 pub fn testPrimitives() !void {
     try primitives.testing.testShortAddress();
+    try primitives.testing.testAddressHashSpread();
     try primitives.testing.testSpecId();
 }

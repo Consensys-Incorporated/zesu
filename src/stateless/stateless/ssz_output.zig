@@ -1,4 +1,4 @@
-//! SSZ serialization for SszStatelessValidationResult (glamsterdam-devnet-8 / zkevm@v0.8.0).
+//! SSZ serialization for SszStatelessValidationResult (glamsterdam-devnet-8 / zkevm@v0.8.4).
 //!
 //! Output layout (43 bytes, all fields fixed-size):
 //!   [0..32]  new_payload_request_root  Bytes32  SSZ hash_tree_root of SszNewPayloadRequest
@@ -476,7 +476,7 @@ pub const OUTPUT_SIZE: usize = 43;
 /// reference output.
 pub const DEFAULT_FAILED_OUTPUT: [OUTPUT_SIZE]u8 = .{0} ** OUTPUT_SIZE;
 
-/// Serialize SszStatelessValidationResult (glamsterdam-devnet-8 / zkevm@v0.8.0):
+/// Serialize SszStatelessValidationResult (glamsterdam-devnet-8 / zkevm@v0.8.4):
 ///   [0..32]  new_payload_request_root  Bytes32
 ///   [32]     successful_validation     boolean (0x01 = valid, 0x00 = invalid)
 ///   [33..41] chain_id                  uint64

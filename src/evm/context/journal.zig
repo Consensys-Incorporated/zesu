@@ -164,6 +164,13 @@ pub const JournalEntry = union(enum) {
             },
             .CodeChanged => |data| {
                 if (evm_state.getPtr(data.address)) |account| {
+                    // The code being reverted away (set by the setCodeWithHash call this
+                    // entry recorded) is uniquely owned by this account — codeByHash/
+                    // analyzeLegacy allocates a fresh jump-table per load, and code changes
+                    // only ever happen at frame boundaries (CREATE finalization, EIP-7702
+                    // dispatch prep), never while another frame holds a live reference to
+                    // it — so it's safe to free before restoring the pre-change value.
+                    if (account.info.code) |*code| code.deinit();
                     // Restore the pre-change code so reverting an EIP-7702 delegation
                     // clear/re-set (or any code overwrite) puts back the original code,
                     // not an empty account. For a freshly created contract the old code
@@ -655,6 +662,19 @@ pub const JournalInner = struct {
                 e.value_ptr.deinit();
             }
             self.bal_pending_storage.clearRetainingCapacity();
+        }
+
+        // Free superseded code from committed CodeChanged entries: since this tx's
+        // changes are being kept (not reverted), old_code is never restored into any
+        // account.info.code and is otherwise unreachable once the journal is cleared.
+        // Uniquely owned per the same reasoning as CodeChanged's revert case above.
+        for (self.journal.items) |entry| {
+            if (entry == .CodeChanged) {
+                if (entry.CodeChanged.old_code) |old| {
+                    var old_code = old;
+                    old_code.deinit();
+                }
+            }
         }
 
         self.transient_storage.clearRetainingCapacity();

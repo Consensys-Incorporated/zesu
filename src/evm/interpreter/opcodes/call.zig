@@ -343,6 +343,10 @@ pub fn resumeCall(interp: *Interpreter, result: host_module.CallResult, ret_off:
     // Routing to regular gas matters: if this frame later halts, that gas is burned (whereas
     // reservoir gas is returned), matching the reference.
     if (!result.success) refundNewAccountLifo(interp, new_account_state_gas);
+    // EIP-8037: a successful merge ends with the reservoir repaying any spill still
+    // outstanding (incorporate_child → repay_state_gas_spill). A failed child repays
+    // nothing — its rollback restored the state whose removal any refund credited.
+    if (result.success) interp.gas.repayStateGasSpill();
 
     const actual = @min(result.return_data.len, ret_size);
     if (actual > 0) {
@@ -375,6 +379,9 @@ pub fn resumeCreate(interp: *Interpreter, result: host_module.CreateResult) void
     // EIP-8037: restore the reservoir from the child (on success: child's remaining reservoir;
     // on failure: all child state gas + reservoir returned as state_gas_remaining).
     interp.gas.reservoir += result.state_gas_remaining;
+    // EIP-8037: see resumeCall — repay the outstanding spill from the reservoir once a
+    // successful child's meter has been absorbed.
+    if (result.success) interp.gas.repayStateGasSpill();
     interp.return_data.data = @constCast(result.return_data);
 
     if (!interp.stack.hasSpace(1)) {

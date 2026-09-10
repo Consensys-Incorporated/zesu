@@ -131,6 +131,22 @@ pub const Gas = struct {
         self.state_gas_refunded += amount;
     }
 
+    /// EIP-8037 (Amsterdam+): repay outstanding spill out of the reservoir once a
+    /// successful child has been merged in (reference `repay_state_gas_spill`).
+    ///
+    /// A refund can land in a different frame than the charge it undoes: the refunding
+    /// frame's spill may be smaller than the refund, so the excess credits the reservoir
+    /// even though the charge drew from regular gas. The merge is the first point where
+    /// the claim and the credit share one meter, so the reservoir pays regular gas back
+    /// up to the spill still outstanding. No state creation is undone, so the used/spent
+    /// counters do not move — gas only crosses back between the two pools.
+    pub fn repayStateGasSpill(self: *Gas) void {
+        const repayment = @min(self.reservoir, self.state_gas_spilled);
+        self.remaining += repayment;
+        self.reservoir -= repayment;
+        self.state_gas_spilled -= repayment;
+    }
+
     /// EIP-8037: Add state gas from a successful sub-frame.
     pub fn addStateGasFromChild(self: *Gas, child_state_gas: u64) void {
         self.state_gas_used += child_state_gas;

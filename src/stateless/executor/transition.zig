@@ -554,6 +554,9 @@ fn effectiveGasPrice(tx: *const input.TxInput, base_fee: u64) u128 {
 
 /// Backward-compatible entry point: builds InMemoryDB from pre_alloc, then runs transition.
 /// Used by blockchain-test runner, t8n, and the stateful executor path.
+/// The journal (evm_state, BAL maps, etc.) is allocated from alloc_mod.get() internally and
+/// freed before this function returns — callers receive a TransitionResult whose code slices
+/// are owned by `arena`, not the journal.
 pub fn transition(
     arena: std.mem.Allocator,
     pre_alloc_in: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
@@ -569,8 +572,10 @@ pub fn transition(
 
 /// Entry point for stateless execution: accepts any DB type (InMemoryDB for the stateful
 /// path, WitnessDatabase for the stateless path), plus optional pre-recovered public keys.
-/// Builds the EVM context internally. Use transitionWithContext when you need access to the
-/// context (and its DB) after execution — e.g., to call witness_db.takeAccessLog().
+/// Builds the EVM context internally and owns its full lifecycle: the journal is freed before
+/// this function returns and the returned TransitionResult's code slices are arena-owned.
+/// Use transitionWithContext when you need access to the context (and its DB or journal)
+/// after execution — e.g., to call witness_db.takeAccessLog() or ctx.journaled_state.takeAccessLog().
 pub fn transitionWithDb(
     arena: std.mem.Allocator,
     db: anytype,
@@ -588,6 +593,8 @@ pub fn transitionWithDb(
 ) !TransitionResult {
     const DB = @TypeOf(db);
     var ctx = context_mod.Context(DB).new(db, spec);
+    defer ctx.journaled_state.database.deinit();
+    defer ctx.journaled_state.deinit();
     ctx.block = buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
     ctx.cfg.disable_base_fee = (env.base_fee == null);
@@ -595,7 +602,9 @@ pub fn transitionWithDb(
 }
 
 /// Low-level entry point: executes block transition on a pre-built context.
-/// The caller owns the context and can access its DB (e.g., for takeAccessLog) after return.
+/// The caller owns the context — including its journal (alloc_mod.get() allocations) — and
+/// must call ctx.journaled_state.deinit() when done. The context and its DB remain accessible
+/// after return (e.g., for ctx.journaled_state.takeAccessLog() or ctx.getDb()).
 pub fn transitionWithContext(
     arena: std.mem.Allocator,
     ctx: anytype,
@@ -624,8 +633,13 @@ pub fn transitionWithContext(
         try ctx.journaled_state.inner.bal_pre_accounts.ensureTotalCapacity(account_hint);
         try ctx.journaled_state.inner.bal_pending_accounts.ensureTotalCapacity(account_hint);
     }
-    // ~64 journal entries per tx on average (account touches, balance changes, warms, etc.)
-    try ctx.journaled_state.inner.journal.ensureTotalCapacity(alloc_mod.get(), txs.len * 64);
+    // commitTx and discardTx both clear the journal, so it only ever holds one transaction's
+    // entries and is sized for the heaviest transaction rather than for the whole block. At the ~64
+    // entries an average transaction produces, 4096 absorbs all but a negligible amount of regrowth
+    // and reserves 768 KiB after ArrayList growth overshoot, which the guest free-list allocator
+    // rounds up to a 1 MiB block. Sizing by the block costs 19 MiB of peak heap for the same result.
+    // Reserving nothing instead costs 0.19% more proving cost, again for the same peak heap.
+    try ctx.journaled_state.inner.journal.ensureTotalCapacity(alloc_mod.get(), 4096);
 
     // ── EIP-7928 BAL tracker (Amsterdam+) ────────────────────────────────────
     var tracker: ?BaTracker = if (primitives.isEnabledIn(spec, .amsterdam))
@@ -1444,7 +1458,7 @@ fn extractPostState(
                     acct.code = buf;
                 } else {
                     const raw = bc.originalBytes();
-                    acct.code = if (raw.len > 0) raw else &.{};
+                    acct.code = if (raw.len > 0) try arena.dupe(u8, raw) else &.{};
                 }
             } else {
                 if (ctx.journaled_state.database.codeByHash(account.info.code_hash)) |db_bc| {
@@ -1457,7 +1471,7 @@ fn extractPostState(
                         acct.code = buf;
                     } else {
                         const raw = db_bc.originalBytes();
-                        acct.code = if (raw.len > 0) raw else &.{};
+                        acct.code = if (raw.len > 0) try arena.dupe(u8, raw) else &.{};
                     }
                 } else |_| {}
             }
