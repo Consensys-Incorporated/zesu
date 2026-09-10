@@ -74,14 +74,14 @@ const BaTracker = struct {
     alloc: std.mem.Allocator,
     // Last committed account state (updated after each phase)
     committed: std.AutoHashMapUnmanaged(input.Address, KnownAcct),
-    committed_storage: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, u256)),
+    committed_storage: std.AutoHashMapUnmanaged(input.Address, primitives.SlotMapUnmanaged(u256)),
     // Accumulated per-BAI changes
     bal_chg: std.AutoHashMapUnmanaged(input.Address, std.ArrayListUnmanaged(bal_mod.BaiU256)),
     nonce_chg: std.AutoHashMapUnmanaged(input.Address, std.ArrayListUnmanaged(bal_mod.BaiU64)),
     code_chg: std.AutoHashMapUnmanaged(input.Address, std.ArrayListUnmanaged(bal_mod.BaiCode)),
-    slot_chg: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, std.ArrayListUnmanaged(bal_mod.SlotBaiValue))),
+    slot_chg: std.AutoHashMapUnmanaged(input.Address, primitives.SlotMapUnmanaged(std.ArrayListUnmanaged(bal_mod.SlotBaiValue))),
     // Storage slots written then wiped by same-tx SELFDESTRUCT → appear as storage_reads, no changes.
-    selfdestruct_reads: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, void)),
+    selfdestruct_reads: std.AutoHashMapUnmanaged(input.Address, primitives.SlotMapUnmanaged(void)),
     // bal-devnet-7: SYSTEM_ADDRESS is included in BAL iff it was touched by USER tx code
     // (BALANCE/EXTCODE*/CALL etc.). Touches solely from pre/post-block system calls must
     // not pull it into the BAL. Set in detectAndRecord(bai) when bai is in user-tx range.
@@ -110,7 +110,7 @@ const BaTracker = struct {
                 .code_hash = code_hash,
             }) catch {};
             if (acct.storage.count() > 0) {
-                var sm = std.AutoHashMapUnmanaged(u256, u256).empty;
+                var sm = primitives.SlotMapUnmanaged(u256).empty;
                 var sit = acct.storage.iterator();
                 while (sit.next()) |se| {
                     if (se.value_ptr.* != 0) sm.put(a, se.key_ptr.*, se.value_ptr.*) catch {};
@@ -307,7 +307,7 @@ const BaTracker = struct {
         // Collect storage reads: all accessed slots NOT in slot_chg.
         // Includes pure reads (was_written=false) AND net-zero writes (was_written=true
         // but value returned to original, so absent from slot_chg).
-        var storage_reads = std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, void)){};
+        var storage_reads = std.AutoHashMapUnmanaged(input.Address, primitives.SlotMapUnmanaged(void)){};
         {
             var it = ctx.journaled_state.inner.evm_state.iterator();
             while (it.next()) |e| {
@@ -447,7 +447,7 @@ const BaTracker = struct {
         var bal_items: u64 = 0;
         for (entries.items) |entry| {
             bal_items += 1; // address
-            var unique_slots = std.AutoHashMapUnmanaged(u256, void).empty;
+            var unique_slots = primitives.SlotMapUnmanaged(void).empty;
             for (entry.storage_changes) |sc| unique_slots.put(a, sc.slot, {}) catch {};
             for (entry.storage_reads) |sr| unique_slots.put(a, sr, {}) catch {};
             bal_items += unique_slots.count();

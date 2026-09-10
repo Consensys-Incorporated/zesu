@@ -405,7 +405,7 @@ pub const Account = struct {
     /// Transaction id, used to track when account was touched/loaded into journal.
     transaction_id: usize,
     /// Storage cache
-    storage: std.AutoHashMap(primitives.StorageKey, EvmStorageSlot),
+    storage: primitives.SlotMap(EvmStorageSlot),
     /// Account status flags
     status: AccountStatus,
 
@@ -415,7 +415,7 @@ pub const Account = struct {
         return Self{
             .info = AccountInfo.default(),
             .transaction_id = 0,
-            .storage = std.AutoHashMap(primitives.StorageKey, EvmStorageSlot).init(alloc_mod.get()),
+            .storage = primitives.SlotMap(EvmStorageSlot).init(alloc_mod.get()),
             .status = AccountStatus.empty(),
         };
     }
@@ -424,7 +424,7 @@ pub const Account = struct {
     pub fn newNotExisting(transaction_id: usize) Self {
         return Self{
             .info = AccountInfo.default(),
-            .storage = std.AutoHashMap(primitives.StorageKey, EvmStorageSlot).init(alloc_mod.get()),
+            .storage = primitives.SlotMap(EvmStorageSlot).init(alloc_mod.get()),
             .transaction_id = transaction_id,
             .status = AccountStatus{ .loaded_as_not_existing = true },
         };
@@ -647,7 +647,7 @@ pub const EvmState = std.HashMap(primitives.Address, Account, primitives.Address
 pub const TransientStorage = std.AutoHashMap(struct { primitives.Address, primitives.StorageKey }, primitives.StorageValue);
 
 /// An account's Storage is a mapping from 256-bit integer keys to EvmStorageSlots.
-pub const EvmStorage = std.AutoHashMap(primitives.StorageKey, EvmStorageSlot);
+pub const EvmStorage = primitives.SlotMap(EvmStorageSlot);
 
 /// Test module for state
 pub const testing = struct {
