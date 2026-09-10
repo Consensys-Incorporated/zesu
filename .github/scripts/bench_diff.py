@@ -21,6 +21,26 @@ CHIPS = ("total", "main", "opcodes", "precompiles", "memory", "base")
 # GitHub's hard limit on issue-comment bodies.
 LIMIT = 65536
 
+# Moves smaller than this are treated as flat.
+FLAT = 0.005
+
+
+def mark(delta):
+    """Colour cue for a delta, where negative is an improvement.
+
+    Emoji rather than a ```diff fence: in diff syntax `-` renders red and `+`
+    green, which is inverted for cost deltas and would colour every speedup as
+    if it were a regression. The sign is always shown alongside, so the meaning
+    does not rest on hue alone.
+    """
+    if delta is None:
+        return "⚪"
+    if delta <= -FLAT:
+        return "🟢"
+    if delta >= FLAT:
+        return "🔴"
+    return "⚪"
+
 FUNC_ROW = re.compile(r"\s*([\d,]+)\s+[\d.]+%\s+([\d,]+)\s+([\d,]+)\s+(\S+)")
 
 
@@ -140,9 +160,9 @@ def main():
     headline = pct(total_b, total_h)
 
     verdict = "no change"
-    if headline is not None and abs(headline) >= 0.005:
+    if headline is not None and abs(headline) >= FLAT:
         verdict = f"{headline:+.3f}% total"
-    out.append(f"### Benchmark — {verdict}")
+    out.append(f"### Benchmark {mark(headline)} {verdict}")
     out.append("")
     out.append(f"`{args.head_sha[:12]}` vs merge-base `{args.base_sha[:12]}` over "
                f"{len(keys)} block(s){f' of {args.corpus}' if args.corpus else ''}.")
@@ -159,8 +179,8 @@ def main():
         out.append(f"> {len(failed)} block(s) did not execute successfully in one or both builds.")
         out.append("")
 
-    out.append("| component | merge-base | this PR | delta |")
-    out.append("|---|---:|---:|---:|")
+    out.append("| | component | merge-base | this PR | delta |")
+    out.append("|:--:|---|---:|---:|---:|")
     for c in CHIPS:
         sb = sum(num(base[k], c) or 0 for k in keys)
         sh = sum(num(head[k], c) or 0 for k in keys)
@@ -168,14 +188,17 @@ def main():
             continue
         d = pct(sb, sh)
         cell = "—" if d is None else (f"**{d:+.3f}%**" if c == "total" else f"{d:+.3f}%")
-        out.append(f"| {'**' + c + '**' if c == 'total' else c} | {sb:,} | {sh:,} | {cell} |")
+        out.append(
+            f"| {mark(d)} | {'**' + c + '**' if c == 'total' else c} "
+            f"| {sb:,} | {sh:,} | {cell} |"
+        )
     out.append("")
 
     if deltas:
         improved = sum(1 for d, _ in deltas if d < 0)
         regressed = sum(1 for d, _ in deltas if d > 0)
-        out.append(f"{improved} improved, {regressed} regressed, "
-                   f"{len(deltas) - improved - regressed} unchanged "
+        out.append(f"🟢 {improved} improved · 🔴 {regressed} regressed · "
+                   f"⚪ {len(deltas) - improved - regressed} unchanged "
                    f"(best {deltas[0][0]:+.3f}%, worst {deltas[-1][0]:+.3f}%).")
         out.append("")
 
@@ -185,7 +208,10 @@ def main():
     out.append("|---|---:|---:|---:|")
     for d, k in sorted(deltas, key=lambda x: x[1]):
         label = k.split("|")[-1] or k
-        out.append(f"| {label} | {num(base[k], 'total'):,} | {num(head[k], 'total'):,} | {d:+.3f}% |")
+        out.append(
+            f"| {mark(d)} {label} | {num(base[k], 'total'):,} "
+            f"| {num(head[k], 'total'):,} | {d:+.3f}% |"
+        )
     out.append("")
     out.append("</details>")
     out.append("")
