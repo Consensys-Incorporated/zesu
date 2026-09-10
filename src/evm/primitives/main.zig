@@ -23,6 +23,9 @@ pub const StorageKey = U256;
 /// Used to store data values in smart contract storage slots.
 pub const StorageValue = U256;
 
+/// Fixed-size block moves through the zkVM DMA chip.
+pub const dma = @import("dma.zig");
+
 /// murmur3's fmix64 avalanche — distributes entropy across the full space of
 /// the u64. Keep both multiply/shift rounds: a single-multiply variant cannot
 /// carry entropy downwards, so inputs whose low bits are all zero stay
