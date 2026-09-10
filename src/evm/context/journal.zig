@@ -421,6 +421,22 @@ pub const JournalInner = struct {
     logs: std.ArrayList(primitives.Log),
     /// The journal of evm_state changes, one for each transaction
     journal: std.ArrayList(JournalEntry),
+    /// Addresses whose `transaction_id` has been set to the current transaction
+    /// since this list was last consumed, in first-touch order.
+    ///
+    /// EIP-7928 BAL detection needs the accounts touched by the just-committed
+    /// transaction. Scanning `evm_state` and filtering on `transaction_id` made
+    /// that O(accounts) per transaction, so the whole block was quadratic. This
+    /// records the candidates as they are touched instead.
+    ///
+    /// It is appended at exactly the two sites that set an account's
+    /// `transaction_id` to the current one, so it is a superset of
+    /// `{a : a.transaction_id >= from_tx_id}` — consumers still apply that
+    /// predicate. May contain duplicates across transaction boundaries.
+    ///
+    /// Only maintained from Amsterdam: nothing consumes it on earlier forks, so
+    /// it would otherwise grow for a whole block and never be drained.
+    tx_touched: std.ArrayList(primitives.Address),
     /// Global transaction id that represent number of transactions executed (Including reverted ones).
     /// It can be different from number of `journal_history` as some transaction could be
     /// reverted or had a error on execution.
@@ -466,6 +482,7 @@ pub const JournalInner = struct {
             .transient_storage = state.TransientStorage.init(alloc_mod.get()),
             .logs = std.ArrayList(primitives.Log).empty,
             .journal = std.ArrayList(JournalEntry).empty,
+            .tx_touched = std.ArrayList(primitives.Address).empty,
             .transaction_id = 0,
             .spec = primitives.SpecId.prague,
             .warm_addresses = WarmAddresses.new(),
@@ -727,6 +744,7 @@ pub const JournalInner = struct {
         self.pending_burns.clearRetainingCapacity();
         self.transient_storage.clearRetainingCapacity();
         self.journal.clearRetainingCapacity();
+        self.tx_touched.clearRetainingCapacity();
         self.transaction_id = 0;
 
         return evm_state;
@@ -1236,7 +1254,12 @@ pub const JournalInner = struct {
                     return JournalLoadError.ColdLoadSkipped;
                 }
                 acct_is_cold = should_be_cold;
+                // transaction_id transitions to the current tx here, so this is
+                // the account's first touch in it.
                 _ = existing.markWarmWithTransactionId(self.transaction_id);
+                if (primitives.isEnabledIn(self.spec, .amsterdam)) {
+                    self.tx_touched.append(alloc_mod.get(), address) catch {};
+                }
                 if (existing.isSelfdestructedLocally()) {
                     // EIP-8246 (Amsterdam+): SELFDESTRUCT no longer burns. A selfdestructed
                     // account that retains a non-zero balance is NOT deleted, so re-accessing
@@ -1282,6 +1305,10 @@ pub const JournalInner = struct {
                 state.Account.newNotExisting(self.transaction_id);
             const gop = try self.evm_state.getOrPut(address);
             gop.value_ptr.* = new_account;
+            // Inserted with transaction_id = current, so also a first touch.
+            if (primitives.isEnabledIn(self.spec, .amsterdam)) {
+                self.tx_touched.append(alloc_mod.get(), address) catch {};
+            }
             is_cold = acct_is_cold;
             account_ptr = gop.value_ptr;
             // EIP-7928: record pre-block account state at first load (using already-fetched info).
