@@ -535,6 +535,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all unit tests");
 
     for ([_]struct { m: *std.Build.Module, name: []const u8 }{
+        .{ .m = mods.bytecode, .name = "bytecode" },
         .{ .m = mods.precompile, .name = "precompile" },
         .{ .m = mods.interpreter, .name = "interpreter" },
         .{ .m = mods.handler, .name = "handler" },
