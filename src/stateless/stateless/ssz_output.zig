@@ -178,12 +178,13 @@ fn htProgressiveByteList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
     const nchunks = (data.len + 31) / 32;
     const chunks = try alloc.alloc([32]u8, nchunks);
     defer alloc.free(chunks);
-    for (0..nchunks) |i| {
-        chunks[i] = [_]u8{0} ** 32;
-        const start = i * 32;
-        const end = @min(start + 32, data.len);
-        @memcpy(chunks[i][0 .. end - start], data[start..end]);
-    }
+    // Chunks are contiguous, so this is one bulk copy plus padding for the tail
+    // — rather than zeroing all 32 bytes of every chunk and then overwriting
+    // them, which wrote the whole buffer twice and kept the copy too small to
+    // lower to a block move.
+    const bytes = std.mem.sliceAsBytes(chunks);
+    @memcpy(bytes[0..data.len], data);
+    @memset(bytes[data.len..], 0);
     return mixInLength(progressiveRoot(chunks), data.len);
 }
 
