@@ -81,14 +81,14 @@ const BaTracker = struct {
     alloc: std.mem.Allocator,
     // Last committed account state (updated after each phase)
     committed: AddrMap(KnownAcct),
-    committed_storage: AddrMap(std.AutoHashMapUnmanaged(u256, u256)),
+    committed_storage: AddrMap(primitives.SlotMapUnmanaged(u256)),
     // Accumulated per-BAI changes
     bal_chg: AddrMap(std.ArrayListUnmanaged(bal_mod.BaiU256)),
     nonce_chg: AddrMap(std.ArrayListUnmanaged(bal_mod.BaiU64)),
     code_chg: AddrMap(std.ArrayListUnmanaged(bal_mod.BaiCode)),
-    slot_chg: AddrMap(std.AutoHashMapUnmanaged(u256, std.ArrayListUnmanaged(bal_mod.SlotBaiValue))),
+    slot_chg: AddrMap(primitives.SlotMapUnmanaged(std.ArrayListUnmanaged(bal_mod.SlotBaiValue))),
     // Storage slots written then wiped by same-tx SELFDESTRUCT → appear as storage_reads, no changes.
-    selfdestruct_reads: AddrMap(std.AutoHashMapUnmanaged(u256, void)),
+    selfdestruct_reads: AddrMap(primitives.SlotMapUnmanaged(void)),
     // bal-devnet-7: SYSTEM_ADDRESS is included in BAL iff it was touched by USER tx code
     // (BALANCE/EXTCODE*/CALL etc.). Touches solely from pre/post-block system calls must
     // not pull it into the BAL. Set in detectAndRecord(bai) when bai is in user-tx range.
@@ -117,7 +117,7 @@ const BaTracker = struct {
                 .code_hash = code_hash,
             }) catch {};
             if (acct.storage.count() > 0) {
-                var sm = std.AutoHashMapUnmanaged(u256, u256).empty;
+                var sm = primitives.SlotMapUnmanaged(u256).empty;
                 var sit = acct.storage.iterator();
                 while (sit.next()) |se| {
                     if (se.value_ptr.* != 0) sm.put(a, se.key_ptr.*, se.value_ptr.*) catch {};

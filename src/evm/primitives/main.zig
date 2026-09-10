@@ -98,6 +98,11 @@ pub fn SlotMap(comptime V: type) type {
     return std.HashMap(StorageKey, V, SlotContext, 80);
 }
 
+/// Unmanaged counterpart of `SlotMap`.
+pub fn SlotMapUnmanaged(comptime V: type) type {
+    return std.HashMapUnmanaged(StorageKey, V, SlotContext, 80);
+}
+
 /// Hash context for HashMap keyed on Hash ([32]u8).
 /// Keccak-256 output is uniformly distributed — truncate first 8 bytes.
 pub const HashContext = struct {
