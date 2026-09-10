@@ -125,6 +125,9 @@ def main():
     ap.add_argument("--head-report")
     ap.add_argument("--opcode-diff")
     ap.add_argument("--detail-label", default="the guest vector")
+    # The PR head as of rendering. A run takes minutes, so the branch can move
+    # under it; when it has, say so rather than implying the numbers are current.
+    ap.add_argument("--current-head", default="")
     args = ap.parse_args()
 
     base, head = load(args.base), load(args.head)
@@ -159,14 +162,26 @@ def main():
     total_h = sum(num(head[k], "total") or 0 for k in keys)
     headline = pct(total_b, total_h)
 
+    stale = bool(args.current_head and args.head_sha
+                 and args.current_head != args.head_sha)
+
     verdict = "no change"
     if headline is not None and abs(headline) >= FLAT:
         verdict = f"{headline:+.3f}% total"
-    out.append(f"### Benchmark {mark(headline)} {verdict}")
+    # Flag staleness in the heading as well as the note below: the heading is
+    # what shows in the PR timeline without expanding anything.
+    out.append(f"### Benchmark {mark(headline)} {verdict}{' — ⚠️ stale' if stale else ''}")
     out.append("")
     out.append(f"`{args.head_sha[:12]}` vs merge-base `{args.base_sha[:12]}` over "
                f"{len(keys)} block(s){f' of {args.corpus}' if args.corpus else ''}.")
     out.append("")
+
+    if stale:
+        out.append("> [!NOTE]")
+        out.append(f"> These numbers describe `{args.head_sha[:12]}`, but the PR head is now "
+                   f"`{args.current_head[:12]}` — new commits landed while the benchmark was "
+                   f"running. Re-run `/benchmark` for the current head.")
+        out.append("")
 
     if mismatched:
         out.append(f"> [!CAUTION]")
