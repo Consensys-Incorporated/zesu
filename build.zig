@@ -595,7 +595,11 @@ pub fn build(b: *std.Build) void {
         const rv64im_target = b.resolveTargetQuery(.{
             .cpu_arch = .riscv64,
             .cpu_model = .{ .explicit = &std.Target.riscv.cpu.baseline_rv64 },
-            .cpu_features_add = std.Target.riscv.featureSet(&.{ .m, .zicclsm, .unaligned_scalar_mem }),
+            // .zbs: ZisK implements the Zbs single-bit ops natively (bset/bclr/bext/binv and
+            // their immediate forms) and its RISC-V transpiler accepts them unconditionally
+            // (transpilers/riscv/src/riscv2zisk_context.rs). Without it LLVM open-codes each
+            // one as a shift plus a mask plus an or/and.
+            .cpu_features_add = std.Target.riscv.featureSet(&.{ .m, .zicclsm, .unaligned_scalar_mem, .zbs }),
             .cpu_features_sub = std.Target.riscv.featureSet(&.{ .a, .c, .zca, .zcb, .d, .f, .zicsr, .zaamo, .zalrsc }),
             .os_tag = .freestanding,
             .abi = .none,
