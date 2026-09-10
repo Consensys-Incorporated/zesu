@@ -68,24 +68,39 @@ jobs:
         if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
         run: |
           gh api -X POST \
-            "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
             -f content=eyes --silent || true
 
+      # Every value below reaches bash through `env`, never through `${{ }}`
+      # interpolation: the comment body is attacker-controlled text, and
+      # substituting it into the script would let a quote or `$()` in a routine
+      # `/benchmark` note execute as shell.
       - name: Resolve request
         id: req
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PR: ${{ inputs.pr }}
+          INPUT_BLOCKS: ${{ inputs.blocks }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            pr="${{ inputs.pr }}"; blocks="${{ inputs.blocks }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            pr="$INPUT_PR"; blocks="$INPUT_BLOCKS"
           else
-            pr="${{ github.event.issue.number }}"
+            pr="$ISSUE_NUMBER"
             # `/benchmark 20` -> 20; bare `/benchmark` -> default.
-            blocks=$(printf '%s' "${{ github.event.comment.body }}" \
+            blocks=$(printf '%s' "$COMMENT_BODY" \
               | head -1 | grep -oE '[0-9]+' | head -1 || true)
           fi
+          # Both paths are user-supplied, so accept digits only before the
+          # arithmetic comparisons below, which would otherwise error out.
+          case "$pr" in ''|*[!0-9]*) echo "bad PR number"; exit 1 ;; esac
+          case "$blocks" in *[!0-9]*) blocks="" ;; esac
           blocks="${blocks:-10}"
           # Clamp: each block is ~7.5G trace cells and runs twice.
           if [ "$blocks" -gt 50 ]; then blocks=50; fi
@@ -105,15 +120,23 @@ jobs:
         working-directory: head
         env:
           GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.req.outputs.pr }}
         run: |
-          gh pr checkout "${{ steps.req.outputs.pr }}"
+          gh pr checkout "$PR"
           head_sha=$(git rev-parse HEAD)
-          git fetch -q origin main
-          base_sha=$(git merge-base origin/main HEAD)
+          # Against the PR's own base branch, not main: CI accepts PRs onto
+          # `develop`, and stacked PRs target another perf branch. Using main
+          # there would fold the whole base branch into the delta and could
+          # raise a spurious payload-root caution.
+          base_ref=$(gh pr view "$PR" --json baseRefName --jq .baseRefName)
+          test -n "$base_ref"
+          git fetch -q origin "$base_ref"
+          base_sha=$(git merge-base "origin/$base_ref" HEAD)
           echo "head=$head_sha" >> "$GITHUB_OUTPUT"
           echo "base=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$base_ref" >> "$GITHUB_OUTPUT"
           echo "head $head_sha"
-          echo "base $base_sha"
+          echo "base $base_sha (merge-base with $base_ref)"
           # Read the zesu-zkvm pin from the PR's own CI config, so the guest is
           # linked exactly the way CI links it.
           ref=$(grep -m1 'ZKVM_REF:' .github/workflows/ci.yml | sed 's/.*"\(.*\)".*/\1/')
@@ -177,6 +200,8 @@ jobs:
         run: sudo apt-get install -y libomp5 libopenmpi3t64
 
       - name: Install cargo-zisk
+        env:
+          ZISK_VERSION: ${{ steps.zisk.outputs.version }}
         run: |
           ZISK_BIN_DIR="${HOME}/.config/.zisk/bin"
           mkdir -p "$ZISK_BIN_DIR"
@@ -185,7 +210,7 @@ jobs:
           chmod +x "$ZISK_BIN_DIR/ziskup"
           # Pin the emulator to the same ZisK as the staticlib and linker script;
           # bare `ziskup` resolves "latest" and can silently outrun them.
-          "$ZISK_BIN_DIR/ziskup" -v "${{ steps.zisk.outputs.version }}" --cpu --nokey
+          "$ZISK_BIN_DIR/ziskup" -v "$ZISK_VERSION" --cpu --nokey
           echo "$ZISK_BIN_DIR" >> $GITHUB_PATH
           "$ZISK_BIN_DIR/ziskemu" --version
 
@@ -239,9 +264,11 @@ jobs:
           ls -l elf-base elf-head
 
       - name: Fetch corpus blocks
+        env:
+          BLOCKS: ${{ steps.req.outputs.blocks }}
         run: |
           set -euo pipefail
-          blocks="${{ steps.req.outputs.blocks }}"
+          blocks="$BLOCKS"
           batches=$(( (blocks + 9) / 10 ))
           curl -fsSL "$CORPUS_URL/batches.jsonl" -o batches.jsonl
           mkdir -p corpus
@@ -304,18 +331,22 @@ jobs:
 
       - name: Render comparison
         id: diff
+        env:
+          DETAIL_LABEL: ${{ steps.detail.outputs.label }}
+          BASE_SHA: ${{ steps.shas.outputs.base }}
+          HEAD_SHA: ${{ steps.shas.outputs.head }}
         run: |
           set +e
           detail=""
           if [ -s report-base.txt ] && [ -s report-head.txt ]; then
             detail="--base-report report-base.txt --head-report report-head.txt"
-            detail="$detail --detail-label ${{ steps.detail.outputs.label }}"
+            detail="$detail --detail-label $DETAIL_LABEL"
             [ -s opcode-diff.txt ] && detail="$detail --opcode-diff opcode-diff.txt"
           fi
           python3 trusted/.github/scripts/bench_diff.py \
             --base base.csv --head head.csv \
-            --base-sha "${{ steps.shas.outputs.base }}" \
-            --head-sha "${{ steps.shas.outputs.head }}" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
             --corpus "$CORPUS" $detail > comment.md
           echo "status=$?" >> "$GITHUB_OUTPUT"
 
@@ -335,20 +366,22 @@ jobs:
       - name: Post result
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.req.outputs.pr }}
         run: |
           set -euo pipefail
           marker='<!-- zesu-benchmark -->'
           printf '%s\n' "$marker" >> comment.md
           # Update in place so repeated runs don't bury the PR in comments.
           existing=$(gh api --paginate \
-            "repos/${{ github.repository }}/issues/${{ steps.req.outputs.pr }}/comments" \
+            "repos/$REPO/issues/$PR/comments" \
             --jq "[.[] | select(.body | contains(\"$marker\"))] | last | .id // empty")
           if [ -n "$existing" ]; then
-            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$existing" \
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" \
               -F body=@comment.md --silent
           else
             gh api -X POST \
-              "repos/${{ github.repository }}/issues/${{ steps.req.outputs.pr }}/comments" \
+              "repos/$REPO/issues/$PR/comments" \
               -F body=@comment.md --silent
           fi
 
