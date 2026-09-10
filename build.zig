@@ -595,7 +595,11 @@ pub fn build(b: *std.Build) void {
         const rv64im_target = b.resolveTargetQuery(.{
             .cpu_arch = .riscv64,
             .cpu_model = .{ .explicit = &std.Target.riscv.cpu.baseline_rv64 },
-            .cpu_features_add = std.Target.riscv.featureSet(&.{ .m, .zicclsm, .unaligned_scalar_mem }),
+            // .zbb: ZisK implements the Zbb bitmanip ops natively (rev8, brev8, andn, orn,
+            // min/max, clz/ctz/cpop, rori — see zisk/core/src/zisk_ops.rs), each a single
+            // operation. Without it LLVM open-codes every 64-bit byteswap as a shift/mask/or
+            // chain, which dominates the big-endian <-> U256 conversions in MLOAD/MSTORE/PUSH.
+            .cpu_features_add = std.Target.riscv.featureSet(&.{ .m, .zicclsm, .unaligned_scalar_mem, .zbb }),
             .cpu_features_sub = std.Target.riscv.featureSet(&.{ .a, .c, .zca, .zcb, .d, .f, .zicsr, .zaamo, .zalrsc }),
             .os_tag = .freestanding,
             .abi = .none,
