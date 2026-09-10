@@ -695,7 +695,7 @@ fn runDispatch(
                     return;
                 }
                 opcodes.opShl(ctx);
-            } else if (!coldStep(self, table, ctx, 0x1B)) return;
+            } else if (!coldStep(self, table, ctx, 0x1B, &pc)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw opcodeAt(code, pc);
         },
@@ -707,7 +707,7 @@ fn runDispatch(
                     return;
                 }
                 opcodes.opShr(ctx);
-            } else if (!coldStep(self, table, ctx, 0x1C)) return;
+            } else if (!coldStep(self, table, ctx, 0x1C, &pc)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw opcodeAt(code, pc);
         },
@@ -719,7 +719,7 @@ fn runDispatch(
                     return;
                 }
                 opcodes.opSar(ctx);
-            } else if (!coldStep(self, table, ctx, 0x1D)) return;
+            } else if (!coldStep(self, table, ctx, 0x1D, &pc)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw opcodeAt(code, pc);
         },
@@ -844,12 +844,7 @@ fn runDispatch(
         // forks. SHL/SHR/SAR reach it too whenever `has_shifts` is false.
         else => |op| {
             pc += 1;
-            // The cold path reaches every remaining opcode through the table,
-            // including PC and the calls that suspend the frame.
-            self.bytecode.pc = pc;
-            const cold_ok = coldStep(self, table, ctx, op);
-            pc = self.bytecode.pc;
-            if (!cold_ok) return;
+            if (!coldStep(self, table, ctx, op, &pc)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw opcodeAt(code, pc);
         },
@@ -864,7 +859,14 @@ inline fn coldStep(
     table: *const InstructionTable,
     ctx: *InstructionContext,
     op: u8,
+    pc: *usize,
 ) bool {
+    // The table can reach any handler, including PC and the calls that suspend
+    // the frame, so the register-held counter is published for the duration and
+    // read back afterwards. Taking it by pointer keeps every caller honest --
+    // the pre-Constantinople shift fallbacks reach this too.
+    self.bytecode.pc = pc.*;
+    defer pc.* = self.bytecode.pc;
     const entry = table[op];
     if (!self.gas.spend(entry.static_gas)) {
         self.halt(.out_of_gas);
