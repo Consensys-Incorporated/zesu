@@ -209,3 +209,25 @@ test "classBytes round-trips through sizeClass for every class" {
         try std.testing.expectEqual(c, sizeClass(bytes, 0));
     }
 }
+
+// ─── Swallowed-allocation-failure channel ─────────────────────────────────────
+//
+// Part of the zesu_allocator module interface: every implementation must provide
+// it, because the swallow sites import the module, not a specific allocator.
+// See src/evm/allocator.zig for why the channel exists.
+var oom: bool = false;
+
+/// Record that an allocation failed on a path that could not propagate it.
+pub fn recordOom() void {
+    oom = true;
+}
+
+/// Whether any allocation failure has been swallowed since `resetOom()`.
+pub fn oomSeen() bool {
+    return oom;
+}
+
+/// Clear the channel. Call once per block, before execution.
+pub fn resetOom() void {
+    oom = false;
+}

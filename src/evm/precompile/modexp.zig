@@ -231,8 +231,11 @@ fn runInner(
         if (data_after_header.len >= total_data_len) {
             break :blk data_after_header[0..total_data_len];
         } else {
-            const buf = alloc_mod.get().alloc(u8, total_data_len) catch
+            const buf = alloc_mod.get().alloc(u8, total_data_len) catch {
+                // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+                alloc_mod.recordOom();
                 return main.PrecompileResult{ .err = main.PrecompileError.OutOfGas };
+            };
             @memset(buf, 0);
             @memcpy(buf[0..data_after_header.len], data_after_header);
             data_buf = buf;
@@ -247,8 +250,11 @@ fn runInner(
 
     // Allocate output buffer (left-padded with zeros to mod_len bytes) via c_allocator.
     // This buffer is owned by the caller and must NOT be freed here.
-    const heap_out = alloc_mod.get().alloc(u8, mod_len) catch
+    const heap_out = alloc_mod.get().alloc(u8, mod_len) catch {
+        // OOM must not masquerade as a gas failure; see zesu_allocator's OOM channel.
+        alloc_mod.recordOom();
         return main.PrecompileResult{ .err = main.PrecompileError.OutOfGas };
+    };
     @memset(heap_out, 0);
     _ = accel.modexp(base, exp, modulus, heap_out);
 

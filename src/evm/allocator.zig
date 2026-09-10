@@ -40,3 +40,39 @@ fn defaultAllocator() std.mem.Allocator {
         return std.heap.c_allocator;
     }
 }
+
+// ─── Swallowed-allocation-failure channel ─────────────────────────────────────
+//
+// A few call sites cannot return an error: they are on infallible paths whose
+// signatures are fixed by callers that have no error to propagate. Historically
+// they absorbed an allocation failure and carried on with a degraded value —
+// an unanalysed jump table, a dropped log — which turns "out of memory" into
+// "this block computed a different answer". A stateless prover must never make
+// that trade: a wrong state root is indistinguishable from a consensus failure
+// and is far harder to diagnose than an explicit OOM.
+//
+// Those sites now call `recordOom()` and the block driver rejects the block, in
+// the same shape as the swallowed-database-error channel (`Context.ctx_error`).
+// Recording rather than wrapping the allocator keeps the success path free of
+// any extra indirection — this costs nothing unless an allocation actually
+// fails.
+//
+// Sticky and process-global, so `resetOom()` must run at the start of each
+// block; otherwise one failure would poison every later block in a long-lived
+// process such as the spec-test runners.
+var oom: bool = false;
+
+/// Record that an allocation failed on a path that could not propagate it.
+pub fn recordOom() void {
+    oom = true;
+}
+
+/// Whether any allocation failure has been swallowed since `resetOom()`.
+pub fn oomSeen() bool {
+    return oom;
+}
+
+/// Clear the channel. Call once per block, before execution.
+pub fn resetOom() void {
+    oom = false;
+}

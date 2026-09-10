@@ -538,6 +538,11 @@ pub fn build(b: *std.Build) void {
         .{ .m = mods.precompile, .name = "precompile" },
         .{ .m = mods.interpreter, .name = "interpreter" },
         .{ .m = mods.handler, .name = "handler" },
+        // `bytecode` owns analyzeLegacy and so the swallowed-allocation-failure
+        // tests. Tests only run for the module passed to addTest, not for its
+        // imported modules, so without this entry nothing in src/evm/bytecode/
+        // is covered by `zig build test`.
+        .{ .m = mods.bytecode, .name = "bytecode" },
         .{ .m = mods.mpt, .name = "mpt" },
         .{ .m = mods.rlp_decode, .name = "rlp_decode" },
         .{ .m = mods.executor, .name = "executor" },

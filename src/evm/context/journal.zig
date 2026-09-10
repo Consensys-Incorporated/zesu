@@ -998,6 +998,10 @@ pub const JournalInner = struct {
         topics[2] = std.mem.zeroes([32]u8);
         @memcpy(topics[2][12..], &to);
         const data = alloc.alloc(u8, 32) catch {
+            // Dropping the log silently would change logsHash and so the block
+            // result, with no error anywhere. Record it and let the block be
+            // rejected instead.
+            alloc_mod.recordOom();
             alloc.free(topics);
             return;
         };
@@ -1018,6 +1022,10 @@ pub const JournalInner = struct {
         topics[1] = std.mem.zeroes([32]u8);
         @memcpy(topics[1][12..], &addr);
         const data = alloc.alloc(u8, 32) catch {
+            // Dropping the log silently would change logsHash and so the block
+            // result, with no error anywhere. Record it and let the block be
+            // rejected instead.
+            alloc_mod.recordOom();
             alloc.free(topics);
             return;
         };
