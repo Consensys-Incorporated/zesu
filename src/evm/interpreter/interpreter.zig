@@ -811,6 +811,15 @@ fn runDispatch(
         // Fork-gated opcodes (PUSH0, TLOAD/TSTORE etc.) land here and are handled
         // correctly via the table — opUnknown on old forks, real handler on new
         // forks. SHL/SHR/SAR reach it too whenever `has_shifts` is false.
+        // Everything at or above 0xa0 is cold, but naming the range explicitly keeps the
+        // jump table dense over the whole u8 domain, so the dispatch does not need an
+        // upper-bound compare against 0x9f before indexing it.
+        0xa0...0xff => |op| {
+            self.bytecode.relativeJump(1);
+            if (!coldStep(self, table, ctx, op)) return;
+            if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
+                continue :sw self.bytecode.opcode();
+        },
         else => |op| {
             self.bytecode.relativeJump(1);
             if (!coldStep(self, table, ctx, op)) return;
