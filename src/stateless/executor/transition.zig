@@ -135,6 +135,13 @@ const BaTracker = struct {
         }
     }
 
+    /// An account under consideration by `detectAndRecord`, resolved once so
+    /// both of its passes share the lookup.
+    const Candidate = struct {
+        addr: input.Address,
+        acct: *state_mod.Account,
+    };
+
     fn detectAndRecord(self: *BaTracker, bai: u64, ctx: anytype, from_tx_id: usize) void {
         const a = self.alloc;
         // For bai > 0, skip accounts not touched since from_tx_id: their state hasn't
@@ -143,10 +150,46 @@ const BaTracker = struct {
         // The post-block call passes txs.len to capture mining reward + withdrawals +
         // all post-block system calls, which each do their own commitTx().
         const filter_by_tx = bai > 0;
-        var it = ctx.journaled_state.inner.evm_state.iterator();
-        while (it.next()) |e| {
-            const addr = e.key_ptr.*;
-            const acct = e.value_ptr.*;
+
+        // Candidates to consider. For a per-tx call these come from the
+        // journal's first-touch list, which is a superset of the accounts this
+        // call can record; scanning all of `evm_state` and filtering made the
+        // block quadratic in (transactions x accounts). The pre-block call has
+        // no such list and runs once, so it still walks the map.
+        //
+        // The `transaction_id` predicate below is unchanged and still decides:
+        // narrowing the candidates cannot change which accounts are recorded.
+        var cands = std.ArrayListUnmanaged(Candidate).empty;
+        defer cands.deinit(a);
+        if (filter_by_tx) {
+            // The list may repeat an address across transaction boundaries, and
+            // the first pass appends to change lists, so a duplicate would
+            // record the same change twice. A set, not a linear scan: a single
+            // transaction can touch thousands of distinct accounts (an
+            // EXTCODEHASH or BALANCE sweep), where a scan is quadratic.
+            const touched = ctx.journaled_state.inner.tx_touched.items;
+            var seen = std.HashMapUnmanaged(input.Address, void, primitives.AddressContext, 80){};
+            defer seen.deinit(a);
+            seen.ensureTotalCapacity(a, @intCast(touched.len)) catch {};
+            cands.ensureTotalCapacity(a, touched.len) catch {};
+            for (touched) |addr| {
+                const gop = seen.getOrPut(a, addr) catch continue;
+                if (gop.found_existing) continue;
+                const ptr = ctx.journaled_state.inner.evm_state.getPtr(addr) orelse continue;
+                cands.append(a, .{ .addr = addr, .acct = ptr }) catch {};
+            }
+        } else {
+            var map_it = ctx.journaled_state.inner.evm_state.iterator();
+            while (map_it.next()) |e| {
+                cands.append(a, .{ .addr = e.key_ptr.*, .acct = e.value_ptr }) catch {};
+            }
+        }
+
+        for (cands.items) |cand| {
+            const addr = cand.addr;
+            // By pointer: copying the whole struct — balance, code hash, the
+            // storage map header — happened before the filter rejected it.
+            const acct = cand.acct;
             if (filter_by_tx and acct.transaction_id < from_tx_id) continue;
             if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
 
@@ -273,10 +316,9 @@ const BaTracker = struct {
         }
 
         // Update committed state to current evm_state (only accounts touched this tx).
-        var it2 = ctx.journaled_state.inner.evm_state.iterator();
-        while (it2.next()) |e| {
-            const addr = e.key_ptr.*;
-            const acct = e.value_ptr.*;
+        for (cands.items) |cand| {
+            const addr = cand.addr;
+            const acct = cand.acct;
             if (filter_by_tx and acct.transaction_id < from_tx_id) continue;
             if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
             // Selfdestructed accounts: nonce/code/storage are gone. Commit the live balance
@@ -301,6 +343,11 @@ const BaTracker = struct {
                 sm.value_ptr.*.put(a, se.key_ptr.*, se.value_ptr.*.present_value) catch {};
             }
         }
+
+        // Consumed: anything touched after this point belongs to the next call.
+        // Cleared for the pre-block call too, so the list cannot accumulate the
+        // whole block's first touches.
+        ctx.journaled_state.inner.tx_touched.clearRetainingCapacity();
     }
 
     fn computeHash(self: *BaTracker, a: std.mem.Allocator, ctx: anytype, gas_limit: u64) ![32]u8 {
