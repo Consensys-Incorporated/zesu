@@ -535,6 +535,18 @@ pub const Interpreter = struct {
 // against a median of 1,962 with ~80% of it in dispatch rather than the shift.
 // PUSH0 and the rest stay cold.
 
+/// Fetch the opcode at `pc` from an already-resolved code slice.
+///
+/// `ExtBytecode.opcode()` goes through `Bytecode.bytecode()`, which switches on the
+/// Bytecode union tag and reloads ptr/len from the payload — on every single opcode
+/// fetch. The bytecode of a frame cannot change while its dispatch loop runs (CALL and
+/// CREATE build new frames; JUMP only moves pc), so runDispatch resolves the slice once
+/// and fetches through this instead.
+inline fn opcodeAt(code: []const u8, pc: usize) u8 {
+    if (pc >= code.len) return 0x00;
+    return code[pc];
+}
+
 fn runDispatch(
     self: *Interpreter,
     table: *const InstructionTable,
@@ -542,280 +554,299 @@ fn runDispatch(
     comptime check_pending: bool,
 ) void {
     if (!self.bytecode.isNotEnd()) return;
+    // Hoisted once per frame — see opcodeAt.
+    const code = self.bytecode.bytecode.bytecode();
     // EIP-145. Loop-invariant: spec_id is fixed for the frame.
     const has_shifts = primitives.isEnabledIn(self.runtime_flags.spec_id, .constantinople);
-    sw: switch (self.bytecode.opcode()) {
+
+    // PC in a register for the length of the frame. It was in memory, so every
+    // opcode paid a load, an add and a store to advance it, plus another load
+    // to fetch the next one. The `defer` publishes it on every exit path,
+    // including the out-of-gas returns and a CALL/CREATE suspend.
+    //
+    // Handlers that read or write it — PUSH, PC, JUMP, JUMPI, and anything on
+    // the cold path — get it synced around the call; the rest never touch it.
+    var pc = self.bytecode.pc;
+    defer self.bytecode.pc = pc;
+
+    sw: switch (opcodeAt(code, pc)) {
         0x00 => { // STOP
-            self.bytecode.relativeJump(1);
+            pc += 1;
             opcodes.opStop(ctx);
         },
         0x01 => { // ADD
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opAdd(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x02 => { // MUL
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_LOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opMul(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x03 => { // SUB
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opSub(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x10 => { // LT
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opLt(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x11 => { // GT
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opGt(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x14 => { // EQ
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opEq(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x15 => { // ISZERO
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opIsZero(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x16 => { // AND
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opAnd(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x17 => { // OR
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opOr(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x18 => { // XOR
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opXor(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x19 => { // NOT
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opNot(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         // SHL/SHR/SAR — fork-gated on Constantinople (EIP-145), see the note above.
         // When the gate is closed `coldStep` reads the table, which holds
         // opUnknown for these on older forks.
         0x1B => { // SHL
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (has_shifts) {
                 if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                     self.halt(.out_of_gas);
                     return;
                 }
                 opcodes.opShl(ctx);
-            } else if (!coldStep(self, table, ctx, 0x1B)) return;
+            } else if (!coldStep(self, table, ctx, 0x1B, &pc)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x1C => { // SHR
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (has_shifts) {
                 if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                     self.halt(.out_of_gas);
                     return;
                 }
                 opcodes.opShr(ctx);
-            } else if (!coldStep(self, table, ctx, 0x1C)) return;
+            } else if (!coldStep(self, table, ctx, 0x1C, &pc)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x1D => { // SAR
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (has_shifts) {
                 if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                     self.halt(.out_of_gas);
                     return;
                 }
                 opcodes.opSar(ctx);
-            } else if (!coldStep(self, table, ctx, 0x1D)) return;
+            } else if (!coldStep(self, table, ctx, 0x1D, &pc)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x50 => { // POP
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_BASE)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opPop(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         // MLOAD/MSTORE/MSTORE8 — Frontier, behaviour-stable, and all three charge
         // G_VERYLOW statically with memory expansion billed inside the handler,
         // so they meet the invariant unconditionally.
         0x51 => { // MLOAD
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opMload(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x52 => { // MSTORE
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opMstore(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x53 => { // MSTORE8
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opMstore8(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x56 => { // JUMP
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_MID)) {
                 self.halt(.out_of_gas);
                 return;
             }
+            self.bytecode.pc = pc;
             opcodes.opJump(ctx);
+            pc = self.bytecode.pc;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x57 => { // JUMPI
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_HIGH)) {
                 self.halt(.out_of_gas);
                 return;
             }
+            self.bytecode.pc = pc;
             opcodes.opJumpi(ctx);
+            pc = self.bytecode.pc;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         0x5B => { // JUMPDEST
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_JUMPDEST)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opJumpdest(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         // PUSH1..PUSH32: inlined opPushNImpl reads directly from the bytecode slice
         inline 0x60...0x7F => |push_op| {
             const n = push_op - 0x60 + 1;
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
+            self.bytecode.pc = pc;
             opcodes.opPushNImpl(ctx, n);
+            pc = self.bytecode.pc;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         // DUP1..DUP16: comptime N enables constant-folded depth checks
         inline 0x80...0x8F => |dup_op| {
             const n = dup_op - 0x80 + 1;
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opDupNImpl(ctx, n);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         // SWAP1..SWAP16: comptime N enables constant-folded depth checks
         inline 0x90...0x9F => |swap_op| {
             const n = swap_op - 0x90 + 1;
-            self.bytecode.relativeJump(1);
+            pc += 1;
             if (!self.gas.spend(gas_costs.G_VERYLOW)) {
                 self.halt(.out_of_gas);
                 return;
             }
             opcodes.opSwapNImpl(ctx, n);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
         // Cold path: table lookup + indirect call.
         // Fork-gated opcodes (PUSH0, TLOAD/TSTORE etc.) land here and are handled
         // correctly via the table — opUnknown on old forks, real handler on new
         // forks. SHL/SHR/SAR reach it too whenever `has_shifts` is false.
         else => |op| {
-            self.bytecode.relativeJump(1);
-            if (!coldStep(self, table, ctx, op)) return;
+            pc += 1;
+            if (!coldStep(self, table, ctx, op, &pc)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, pc);
         },
     }
 }
@@ -828,7 +859,14 @@ inline fn coldStep(
     table: *const InstructionTable,
     ctx: *InstructionContext,
     op: u8,
+    pc: *usize,
 ) bool {
+    // The table can reach any handler, including PC and the calls that suspend
+    // the frame, so the register-held counter is published for the duration and
+    // read back afterwards. Taking it by pointer keeps every caller honest --
+    // the pre-Constantinople shift fallbacks reach this too.
+    self.bytecode.pc = pc.*;
+    defer pc.* = self.bytecode.pc;
     const entry = table[op];
     if (!self.gas.spend(entry.static_gas)) {
         self.halt(.out_of_gas);
