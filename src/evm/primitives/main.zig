@@ -65,6 +65,39 @@ pub const AddressContext = struct {
     }
 };
 
+/// Hash context for HashMap keyed on a storage slot (u256).
+///
+/// Slot keys come in two shapes: small sequential integers for plain fields, and
+/// keccak-derived values for mapping and array entries. The auto-derived context
+/// Wyhashes all 32 bytes, which is far more work than either shape needs.
+///
+/// So fold the four limbs and avalanche. Keccak-derived keys are already uniform;
+/// small keys get their entropy spread into both the bucket index and the 7-bit
+/// fingerprint (`hash >> 57`), which a plain truncation would leave constant across
+/// every low-numbered slot. Rotations are odd and unequal so limbs holding equal
+/// bytes don't cancel.
+pub const SlotContext = struct {
+    pub fn hash(_: @This(), key: StorageKey) u64 {
+        const l0: u64 = @truncate(key);
+        const l1: u64 = @truncate(key >> 64);
+        const l2: u64 = @truncate(key >> 128);
+        const l3: u64 = @truncate(key >> 192);
+        return mix64(l0 ^
+            std.math.rotl(u64, l1, 27) ^
+            std.math.rotl(u64, l2, 13) ^
+            std.math.rotl(u64, l3, 41));
+    }
+    pub fn eql(_: @This(), a: StorageKey, b: StorageKey) bool {
+        return a == b;
+    }
+};
+
+/// A managed map keyed on a storage slot. Storage-keyed maps are declared in
+/// enough places that spelling the context out at each one invites drift.
+pub fn SlotMap(comptime V: type) type {
+    return std.HashMap(StorageKey, V, SlotContext, 80);
+}
+
 /// Hash context for HashMap keyed on Hash ([32]u8).
 /// Keccak-256 output is uniformly distributed — truncate first 8 bytes.
 pub const HashContext = struct {
