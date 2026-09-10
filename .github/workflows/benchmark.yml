@@ -1,0 +1,475 @@
+# On-demand guest benchmark. Comment `/benchmark` on a PR (optionally
+# `/benchmark 20` for a block count) and this builds the guest ELF at the PR
+# head and at its merge-base, runs both over the same devnet-8 blocks, and
+# posts the per-chip cost delta.
+#
+# Worth doing here because ZisK trace costs are deterministic: the same ELF on
+# the same input always bills the same cells, so a 0.05% move is real signal
+# rather than runner variance. Most CI perf jobs cannot make that claim.
+#
+# On demand rather than per-push for three reasons: `issue_comment` runs with a
+# write token from the default branch (so posting works from forks with no
+# `pull_request_target` gymnastics), nobody is blocked waiting on it, and
+# numbers posted automatically on every push get ignored within a week.
+name: Benchmark
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to benchmark"
+        required: true
+        type: string
+      blocks:
+        description: "Number of devnet-8 blocks (rounded up to whole 10-block batches)"
+        required: false
+        default: "10"
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: benchmark-${{ github.event.issue.number || inputs.pr }}
+  cancel-in-progress: true
+
+env:
+  CORPUS: glamsterdam-devnet-8
+  CORPUS_URL: https://pub-760ad8b3dd9547539f829c1ea30f18b5.r2.dev/devnets/glamsterdam-devnet-8
+  # Pinned so runs stay comparable over time. The corpus is append-only, but
+  # "the newest N blocks" would silently change what is being measured.
+  CORPUS_START: "93350"
+  # Benchmark harness (public). Its `bench-eest-fixtures` branch walks fixture
+  # trees recursively and reports per-chip costs; `main` misparses these
+  # fixtures as empty blocks.
+  SE_REPO: Gabriel-Trintinalia/stateless-executor
+  SE_REF: "7ce7770c2ce41c9439237e73fc980fed615d7fb1"
+
+jobs:
+  bench:
+    name: Guest benchmark
+    # The author-association gate is required, not optional: this checks out
+    # and runs PR code with a writable token.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request &&
+       startsWith(github.event.comment.body, '/benchmark') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+                github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      # `author_association` describes the commenter's relationship to the
+      # *organisation*, not their access to this repo, so `MEMBER` admits
+      # read-only org members. This job builds PR code — and `zig build` runs
+      # `build.zig` — with a token that can write comments and labels, so the
+      # requester must actually hold write here. The `if:` above stays as a
+      # cheap pre-filter; this is the authority.
+      #
+      # Checked before any checkout, and only for comments: GitHub already
+      # requires write access to start a `workflow_dispatch` run.
+      - name: Verify the requester can write to this repo
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.event.comment.user.login }}
+        run: |
+          perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq .permission)
+          # The API reports the triage role as `read`, so triage is excluded too.
+          case "$perm" in
+            write|admin) echo "$ACTOR has '$perm'" ;;
+            *) echo "::error::$ACTOR has '$perm' on $REPO; /benchmark requires write."
+               exit 1 ;;
+          esac
+
+      - name: Acknowledge the request
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api -X POST \
+            "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -f content=eyes --silent || true
+
+      # Every value below reaches bash through `env`, never through `${{ }}`
+      # interpolation: the comment body is attacker-controlled text, and
+      # substituting it into the script would let a quote or `$()` in a routine
+      # `/benchmark` note execute as shell.
+      - name: Resolve request
+        id: req
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PR: ${{ inputs.pr }}
+          INPUT_BLOCKS: ${{ inputs.blocks }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            pr="$INPUT_PR"; blocks="$INPUT_BLOCKS"
+          else
+            pr="$ISSUE_NUMBER"
+            # `/benchmark 20` -> 20; bare `/benchmark` -> default.
+            blocks=$(printf '%s' "$COMMENT_BODY" \
+              | head -1 | grep -oE '[0-9]+' | head -1 || true)
+          fi
+          # Both paths are user-supplied, so accept digits only before the
+          # arithmetic comparisons below, which would otherwise error out.
+          case "$pr" in ''|*[!0-9]*) echo "bad PR number"; exit 1 ;; esac
+          case "$blocks" in *[!0-9]*) blocks="" ;; esac
+          blocks="${blocks:-10}"
+          # Clamp: each block is ~7.5G trace cells and runs twice.
+          if [ "$blocks" -gt 50 ]; then blocks=50; fi
+          if [ "$blocks" -lt 1 ]; then blocks=10; fi
+          echo "pr=$pr"           >> "$GITHUB_OUTPUT"
+          echo "blocks=$blocks"   >> "$GITHUB_OUTPUT"
+          echo "PR #$pr, $blocks block(s)"
+
+      - name: Checkout zesu (PR head)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: head
+          fetch-depth: 0
+
+      - name: Check out the PR and find its merge-base
+        id: shas
+        working-directory: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.req.outputs.pr }}
+        run: |
+          gh pr checkout "$PR"
+          head_sha=$(git rev-parse HEAD)
+          # Against the PR's own base branch, not main: CI accepts PRs onto
+          # `develop`, and stacked PRs target another perf branch. Using main
+          # there would fold the whole base branch into the delta and could
+          # raise a spurious payload-root caution.
+          base_ref=$(gh pr view "$PR" --json baseRefName --jq .baseRefName)
+          test -n "$base_ref"
+          git fetch -q origin "$base_ref"
+          base_sha=$(git merge-base "origin/$base_ref" HEAD)
+          echo "head=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "base=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$base_ref" >> "$GITHUB_OUTPUT"
+          echo "head $head_sha"
+          echo "base $base_sha (merge-base with $base_ref)"
+          # Read the zesu-zkvm pin from the PR's own CI config, so the guest is
+          # linked exactly the way CI links it.
+          ref=$(grep -m1 'ZKVM_REF:' .github/workflows/ci.yml | sed 's/.*"\(.*\)".*/\1/')
+          test -n "$ref"
+          echo "zkvm=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout zesu (merge-base)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: base
+          ref: ${{ steps.shas.outputs.base }}
+
+      # The reporting script comes from the default branch, never from the PR:
+      # otherwise a PR could rewrite the script that renders its own verdict.
+      - name: Checkout reporting script
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          path: trusted
+
+      - name: Checkout zesu-zkvm
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: Consensys-Incorporated/zesu-zkvm
+          ref: ${{ steps.shas.outputs.zkvm }}
+          path: zesu-zkvm
+
+      - name: Checkout benchmark harness
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ env.SE_REPO }}
+          ref: ${{ env.SE_REF }}
+          path: harness
+
+      - name: Resolve the ZisK version zesu-zkvm builds against
+        id: zisk
+        run: |
+          v=$(grep -m1 'ZISK_VERSION:' zesu-zkvm/.github/workflows/ci.yml | sed 's/.*"\(.*\)".*/\1/')
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "ZisK $v"
+
+      - name: Checkout zisk
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: 0xPolygonHermez/zisk
+          ref: v${{ steps.zisk.outputs.version }}
+          path: zisk
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@abea47f85e598557f500fa1fd2ab7464fcb39406 # v2.2.1
+        with:
+          version: '0.16.0'
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install cargo-zisk runtime deps
+        run: sudo apt-get install -y libomp5 libopenmpi3t64
+
+      - name: Install cargo-zisk
+        env:
+          ZISK_VERSION: ${{ steps.zisk.outputs.version }}
+        run: |
+          ZISK_BIN_DIR="${HOME}/.config/.zisk/bin"
+          mkdir -p "$ZISK_BIN_DIR"
+          curl -fsSL "https://raw.githubusercontent.com/0xPolygonHermez/zisk/main/ziskup/ziskup" \
+            -o "$ZISK_BIN_DIR/ziskup"
+          chmod +x "$ZISK_BIN_DIR/ziskup"
+          # Pin the emulator to the same ZisK as the staticlib and linker script;
+          # bare `ziskup` resolves "latest" and can silently outrun them.
+          "$ZISK_BIN_DIR/ziskup" -v "$ZISK_VERSION" --cpu --nokey
+          echo "$ZISK_BIN_DIR" >> $GITHUB_PATH
+          "$ZISK_BIN_DIR/ziskemu" --version
+
+      - name: Install Zisk Rust toolchain
+        run: cargo +zisk --version 2>/dev/null || cargo-zisk toolchain install
+
+      - name: Cache libziskos_staticlib.a
+        id: cache-libziskos
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: zesu-zkvm/zisk/lib/libziskos_staticlib.a
+          key: libziskos-staticlib-${{ steps.zisk.outputs.version }}-${{ runner.os }}
+
+      - name: Build libziskos_staticlib.a
+        if: steps.cache-libziskos.outputs.cache-hit != 'true'
+        working-directory: zesu-zkvm/zisk
+        run: make lib/libziskos_staticlib.a ZISK_DIR=$GITHUB_WORKSPACE/zisk
+
+      # The merge-base ELF is identical for every PR sharing that base, so it is
+      # usually a cache hit and only the PR head gets built. The key covers
+      # everything that would make the two builds incomparable — base commit,
+      # ZisK version, linker/host pin — so a stale hit cannot skew a comparison.
+      - name: Cache merge-base ELF
+        id: cache-base-elf
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: elf-base
+          key: >-
+            benchelf-${{ steps.shas.outputs.base }}-${{ steps.zisk.outputs.version }}-${{
+            steps.shas.outputs.zkvm }}-${{ runner.os }}
+
+      - name: Build merge-base ELF
+        if: steps.cache-base-elf.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          (cd base && zig build rv64im-object -Doptimize=ReleaseFast)
+          (cd zesu-zkvm/zisk && zig build -Doptimize=ReleaseFast \
+            -Dzesu_obj="$GITHUB_WORKSPACE/base/zig-out/lib/zesu.o")
+          cp zesu-zkvm/zisk/zig-out/bin/zesu-zisk elf-base
+
+      - name: Build PR head ELF
+        run: |
+          set -euo pipefail
+          (cd head && zig build rv64im-object -Doptimize=ReleaseFast)
+          # Remove the previous link output: a failed build otherwise leaves a
+          # stale ELF behind and the benchmark silently measures the old one.
+          rm -f zesu-zkvm/zisk/zig-out/bin/zesu-zisk
+          (cd zesu-zkvm/zisk && zig build -Doptimize=ReleaseFast \
+            -Dzesu_obj="$GITHUB_WORKSPACE/head/zig-out/lib/zesu.o")
+          cp zesu-zkvm/zisk/zig-out/bin/zesu-zisk elf-head
+          ls -l elf-base elf-head
+
+      - name: Fetch corpus blocks
+        env:
+          BLOCKS: ${{ steps.req.outputs.blocks }}
+        run: |
+          set -euo pipefail
+          blocks="$BLOCKS"
+          batches=$(( (blocks + 9) / 10 ))
+          curl -fsSL "$CORPUS_URL/batches.jsonl" -o batches.jsonl
+          mkdir -p corpus
+          python3 - "$batches" <<'PY' > wanted.txt
+          import json, os, sys
+          want, start = int(sys.argv[1]), int(os.environ["CORPUS_START"])
+          rows = [json.loads(l) for l in open("batches.jsonl") if l.strip()]
+          rows = [r for r in rows if r["batchStartBlock"] >= start]
+          rows.sort(key=lambda r: r["batchStartBlock"])
+          for r in rows[:want]:
+              print(r["path"], r["sha256"][2:])
+          PY
+          test -s wanted.txt
+          while read -r path sha; do
+            f="corpus/$(basename "$path")"
+            curl -fsSL "$CORPUS_URL/$path" -o "$f"
+            echo "$sha  $f" | sha256sum -c -
+            tar --zstd -xf "$f" -C corpus
+          done < wanted.txt
+          # Point the harness at blockchain_tests/, not the corpus root: the
+          # archives also carry .meta/manifest.json, which is not a fixture.
+          find corpus/blockchain_tests -name '*.json' | wc -l
+
+      - name: Build the harness
+        working-directory: harness
+        run: go build -o "$GITHUB_WORKSPACE/bench" ./bench
+
+      - name: Run benchmark
+        run: |
+          set -euo pipefail
+          for v in base head; do
+            ./bench \
+              --fixtures corpus/blockchain_tests \
+              --elf "elf-$v" \
+              --zkvmPath ziskemu \
+              --jobs "$(nproc)" \
+              --csv "$v.csv"
+          done
+
+      # Detail pass: one extra execution per variant (~10s each) buys the
+      # per-opcode, FROPS, memory-by-type and per-function tables. `--save-stats`
+      # then lets ziskemu diff the two snapshots itself, with no further run.
+      # Uses the in-repo vector, which needs no SSZ encoding — so it says what
+      # moved, while the corpus above says how much.
+      - name: Detail pass
+        id: detail
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          vector=$(find zesu-zkvm/vectors -name '*.bin' | sort | head -1)
+          test -n "$vector"
+          echo "label=$(basename "$vector" .bin)" >> "$GITHUB_OUTPUT"
+          for v in base head; do
+            ziskemu -e "elf-$v" -i "$vector" -X -S --mem-stats \
+              --save-stats "snap-$v.csv" > "report-$v.txt"
+          done
+          ziskemu --diff-stats snap-base.csv snap-head.csv --color never > opcode-diff.txt
+          ziskemu --diff-stats snap-base.csv snap-head.csv \
+            --html-report bench-detail.html > /dev/null
+
+      # A run takes minutes, so the PR can move under it. Read the head again
+      # here and let the comment say so, rather than silently presenting the
+      # numbers as current.
+      - name: Re-read the PR head
+        id: now
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.req.outputs.pr }}
+        run: |
+          cur=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha || true)
+          echo "head=$cur" >> "$GITHUB_OUTPUT"
+
+      - name: Render comparison
+        id: diff
+        env:
+          DETAIL_LABEL: ${{ steps.detail.outputs.label }}
+          BASE_SHA: ${{ steps.shas.outputs.base }}
+          HEAD_SHA: ${{ steps.shas.outputs.head }}
+          CURRENT_HEAD: ${{ steps.now.outputs.head }}
+        run: |
+          set +e
+          detail=""
+          if [ -s report-base.txt ] && [ -s report-head.txt ]; then
+            detail="--base-report report-base.txt --head-report report-head.txt"
+            detail="$detail --detail-label $DETAIL_LABEL"
+            [ -s opcode-diff.txt ] && detail="$detail --opcode-diff opcode-diff.txt"
+          fi
+          [ -n "$CURRENT_HEAD" ] && detail="$detail --current-head $CURRENT_HEAD"
+          python3 trusted/.github/scripts/bench_diff.py \
+            --base base.csv --head head.csv \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --corpus "$CORPUS" $detail > comment.md
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+
+          # The run summary has a 1 MB budget against the comment's 64 KB, so
+          # the full reports go here in full — rendered on the run page, with
+          # no artifact download.
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+          for v in base head; do
+            [ -s "report-$v.txt" ] || continue
+            {
+              printf '\n<details><summary>Full %s report</summary>\n\n```\n' "$v"
+              cat "report-$v.txt"
+              printf '```\n\n</details>\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Post result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.req.outputs.pr }}
+        run: |
+          set -euo pipefail
+          marker='<!-- zesu-benchmark -->'
+          printf '%s\n' "$marker" >> comment.md
+          # Update in place so repeated runs don't bury the PR in comments.
+          existing=$(gh api --paginate \
+            "repos/$REPO/issues/$PR/comments" \
+            --jq "[.[] | select(.body | contains(\"$marker\"))] | last | .id // empty")
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$existing" \
+              -F body=@comment.md --silent
+          else
+            gh api -X POST \
+              "repos/$REPO/issues/$PR/comments" \
+              -F body=@comment.md --silent
+          fi
+
+      # Marks the PR as having benchmark data, so `label:benchmarked` works as a
+      # filter. Deliberately not a verdict — ten blocks is a smoke signal, and a
+      # durable `improved`/`regressed` label would overstate it. Freshness is
+      # the comment's job, via its stale note.
+      #
+      # Never fails the run: a labelling hiccup should not discard the results.
+      - name: Label the PR
+        if: always() && steps.diff.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.req.outputs.pr }}
+        run: |
+          # Create-then-add, because adding an unknown label is not reliably
+          # self-creating. Both calls are idempotent.
+          gh api -X POST "repos/$REPO/labels" \
+            -f name=benchmarked \
+            -f color=1d76db \
+            -f description="Guest benchmark has been run on this PR" \
+            --silent 2>/dev/null || true
+          gh api -X POST "repos/$REPO/issues/$PR/labels" \
+            -f "labels[]=benchmarked" --silent || true
+
+      # The comment is a summary; these hold the full per-opcode, memory and
+      # per-function tables for anyone digging into a surprising number.
+      - name: Upload full reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchmark-${{ steps.req.outputs.pr }}-${{ steps.shas.outputs.head }}
+          path: |
+            base.csv
+            head.csv
+            report-base.txt
+            report-head.txt
+            snap-base.csv
+            snap-head.csv
+            opcode-diff.txt
+            bench-detail.html
+          if-no-files-found: warn
+
+      # Perf movement never fails the run; a wrong payload root or a block that
+      # did not execute does, so a broken PR cannot read as a clean benchmark.
+      - name: Fail on correctness divergence
+        if: steps.diff.outputs.status != '0'
+        run: |
+          echo "Benchmark found a correctness divergence — see the PR comment."
+          exit 1
