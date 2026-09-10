@@ -382,3 +382,260 @@ test "blockHash returns InvalidWitness for missing hash" {
     defer wdb.deinit();
     try std.testing.expectError(error.InvalidWitness, wdb.blockHash(12345678));
 }
+
+// ─── Regression: storage-root cache must not be silently dropped ──────────────
+
+// `storageRootFor()` is a bare `storage_root_cache.get()`, so a missing entry is
+// indistinguishable from "this account was never loaded". The post-execution
+// batch trie update relies on that distinction: for a null pre-state root,
+// computeStorageRootBatch (src/stateless/executor/output.zig:188) rebuilds the
+// storage trie from only the slots execution touched, as if the account had no
+// pre-state storage. For an account that *does* have pre-state storage, that
+// silently drops every untouched slot and yields a WRONG state root, reported as
+// success.
+//
+// So an allocation failure while caching the root must never be swallowed: the
+// three `storage_root_cache.put(...)` sites in db/main.zig must propagate, not
+// `catch {}`. This test asserts the invariant that makes the downstream
+// assumption safe:
+//
+//     basic() succeeded  =>  storageRootFor() knows the account's storage root
+//
+// It drives every allocation index in turn, so it does not depend on how many
+// allocations basic() happens to make. A wrong state root returned as success is
+// the worst failure mode for a proving system, hence pinning it here.
+test "basic must not succeed while silently dropping the storage-root cache entry" {
+    var address: primitives.Address = @splat(0x00);
+    address[19] = 0x33;
+    const key_hash = mpt.keccak256(&address);
+
+    // A non-empty storage root: this is what must not be lost.
+    const storage_root: primitives.Hash = @splat(0x5a);
+
+    var account_rlp: [200]u8 = undefined;
+    const account_len = buildAccountRlp(&account_rlp, 1, 500, storage_root, KECCAK_EMPTY);
+    var leaf_node: [512]u8 = undefined;
+    const leaf_len = buildLeafNode(&leaf_node, key_hash, account_rlp[0..account_len]);
+    const leaf_bytes = leaf_node[0..leaf_len];
+    const state_root = mpt.keccak256(leaf_bytes);
+
+    const w = input.StateWitness{
+        .state_root = state_root,
+        .nodes = &[_][]const u8{leaf_bytes},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
+    };
+
+    // The node index is built with the real allocator; only the database's own
+    // allocations (which include the storage-root cache) are made to fail.
+    var idx = try mpt.buildNodeIndex(ALLOC, w.nodes);
+    defer idx.deinit();
+
+    var fail_index: usize = 0;
+    while (fail_index < 16) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(ALLOC, .{ .fail_index = fail_index });
+        var wdb = db_mod.WitnessDatabase.init(
+            failing.allocator(),
+            &idx,
+            w.state_root,
+            w.codes,
+            &.{},
+        ) catch continue; // init itself ran out of memory: nothing to check
+        defer wdb.deinit();
+
+        const info = wdb.basic(address) catch continue; // propagated: correct
+        if (info == null) continue; // account absent: no root to cache
+
+        // basic() reported success, so the cached root must be present and right.
+        const cached = wdb.storageRootFor(address);
+        if (cached == null) {
+            std.debug.print(
+                "\nfail_index={d}: basic() succeeded but storageRootFor() is null;\n" ++
+                    "the batch trie update will rebuild storage from scratch and\n" ++
+                    "produce a wrong state root with no error raised.\n",
+                .{fail_index},
+            );
+            return error.StorageRootSilentlyDropped;
+        }
+        try std.testing.expectEqualSlices(u8, &storage_root, &cached.?);
+    }
+}
+
+// ─── Regression: an unprovable slot must not read as zero ─────────────────────
+
+// The MPT layer distinguishes two outcomes precisely (src/stateless/mpt/main.zig):
+// `null` means *proved absent* — the comments there read "valid non-inclusion" —
+// whereas `error.InvalidProof` is returned by
+// `findNodeInIndex(...) orelse return error.InvalidProof`, i.e. the witness does
+// not contain the node needed to prove anything at all.
+//
+// So InvalidProof means "cannot verify", not "absent". basic() already treats it
+// that way (it maps InvalidProof to InvalidWitness, with a documented
+// SYSTEM_ADDRESS carve-out), but storage() maps it to `return 0`
+// (db/main.zig:186) and the storage-root lookup maps it to EMPTY_TRIE_HASH
+// (:175). An incomplete witness therefore reads as "slot is zero" instead of
+// failing, which lets a wrong state transition be executed and proved.
+//
+// Here slot 3 genuinely holds 0xabcd, but its storage leaf is withheld from the
+// witness, so a zero result is demonstrably wrong rather than merely unproven.
+test "storage must fail, not return 0, when the witness cannot prove the slot" {
+    var address: primitives.Address = @splat(0x00);
+    address[19] = 0x77;
+    const slot_key: u256 = 3;
+
+    var slot_hash: primitives.Hash = @splat(0);
+    {
+        var n = slot_key;
+        var si: usize = 32;
+        while (si > 0) {
+            si -= 1;
+            slot_hash[si] = @intCast(n & 0xff);
+            n >>= 8;
+        }
+    }
+    const storage_key_hash = mpt.keccak256(&slot_hash);
+    const rlp_value = &[_]u8{ 0x82, 0xab, 0xcd }; // slot 3 = 0xabcd
+    var storage_leaf: [256]u8 = undefined;
+    const storage_leaf_len = buildLeafNode(&storage_leaf, storage_key_hash, rlp_value);
+    const storage_root = mpt.keccak256(storage_leaf[0..storage_leaf_len]);
+
+    const acc_key_hash = mpt.keccak256(&address);
+    var account_rlp: [200]u8 = undefined;
+    const account_len = buildAccountRlp(&account_rlp, 0, 0, storage_root, KECCAK_EMPTY);
+    var acc_leaf: [512]u8 = undefined;
+    const acc_leaf_len = buildLeafNode(&acc_leaf, acc_key_hash, account_rlp[0..account_len]);
+    const acc_leaf_bytes = acc_leaf[0..acc_leaf_len];
+    const state_root = mpt.keccak256(acc_leaf_bytes);
+
+    // The account leaf is present; the storage leaf is deliberately withheld, so
+    // the storage trie cannot be walked at all.
+    const w = input.StateWitness{
+        .state_root = state_root,
+        .nodes = &[_][]const u8{acc_leaf_bytes},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
+    };
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
+
+    const result = wdb.storage(address, slot_key);
+    if (result) |value| {
+        std.debug.print(
+            "\nstorage() returned {d} for an unprovable slot whose true value is 0xabcd;\n" ++
+                "an incomplete witness reads as 'slot is zero' instead of failing.\n",
+            .{value},
+        );
+        return error.UnprovableSlotReadAsZero;
+    } else |_| {
+        // Any error is acceptable here; the point is that it must not succeed.
+    }
+}
+
+// ─── Regression: CREATE collision check must not guess ────────────────────────
+
+// hasNonZeroStorageForAddress feeds the CREATE collision check
+// (src/evm/interpreter/host.zig, setupCreateCore). It used to `catch return
+// false`, so a witness that cannot prove the target account read as "no storage
+// here" and allowed a CREATE that the reference rejects — a consensus-level wrong
+// result. It is now fallible; the journal wrapper records the error so the block
+// is rejected after execution, and fails the CREATE closed in the meantime.
+//
+// Note a genuinely absent account is NOT an error: it resolves via valid
+// non-inclusion to false, which the second half of this test pins so the fix
+// cannot be "just always return an error".
+test "hasNonZeroStorageForAddress must fail when the account cannot be proven" {
+    var address: primitives.Address = @splat(0x00);
+    address[19] = 0x88;
+
+    // A state root whose account node is absent from the witness: nothing can be
+    // proven about this address one way or the other.
+    const unprovable_root: primitives.Hash = @splat(0x9e);
+    const w = input.StateWitness{
+        .state_root = unprovable_root,
+        .nodes = &.{},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
+    };
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
+
+    if (wdb.hasNonZeroStorageForAddress(address)) |answer| {
+        std.debug.print(
+            "\nhasNonZeroStorageForAddress returned {} for an unprovable account;\n" ++
+                "the CREATE collision check would proceed on a fabricated answer.\n",
+            .{answer},
+        );
+        return error.UnprovableAccountAnsweredAnyway;
+    } else |_| {
+        // Correct: the caller is told we cannot determine this.
+    }
+}
+
+test "hasNonZeroStorageForAddress reports false for a provably absent account" {
+    var address: primitives.Address = @splat(0x00);
+    address[19] = 0x99;
+
+    // An empty branch root proves non-inclusion for every address, so the answer
+    // is knowable and must be `false`, not an error.
+    var branch: [18]u8 = undefined;
+    const branch_len = buildEmptyBranchNode(&branch);
+    const branch_bytes = branch[0..branch_len];
+    const state_root = mpt.keccak256(branch_bytes);
+
+    const w = input.StateWitness{
+        .state_root = state_root,
+        .nodes = &[_][]const u8{branch_bytes},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
+    };
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
+
+    try std.testing.expect(!(try wdb.hasNonZeroStorageForAddress(address)));
+}
+
+// Covers the OTHER InvalidProof site in storage(): the storage-root lookup
+// (db/main.zig, the verifyAccountIndexed call inside storage()). Here the ACCOUNT
+// node is missing, not the storage node, so the account's storage root cannot be
+// determined. Defaulting to EMPTY_TRIE_HASH would make every slot on this account
+// read as 0. Distinct from the test above, which withholds the storage leaf and
+// exercises the verifyStorageIndexed site.
+test "storage must fail when the account's storage root cannot be proven" {
+    var address: primitives.Address = @splat(0x00);
+    address[19] = 0xaa;
+
+    // Empty node pool: the account node behind this root is absent, so nothing
+    // about the account (including its storage root) can be proven.
+    const unprovable_root: primitives.Hash = @splat(0x7c);
+    const w = input.StateWitness{
+        .state_root = unprovable_root,
+        .nodes = &.{},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
+    };
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
+
+    // Cache is empty, so this goes through the storage-root lookup path.
+    if (wdb.storage(address, 3)) |value| {
+        std.debug.print(
+            "\nstorage() returned {d} for an account whose storage root is unprovable;\n" ++
+                "every slot on this account would read as 0.\n",
+            .{value},
+        );
+        return error.UnprovableAccountStorageReadAsZero;
+    } else |_| {}
+}
