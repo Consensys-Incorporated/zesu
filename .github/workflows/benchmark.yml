@@ -64,6 +64,30 @@ jobs:
     timeout-minutes: 90
 
     steps:
+      # `author_association` describes the commenter's relationship to the
+      # *organisation*, not their access to this repo, so `MEMBER` admits
+      # read-only org members. This job builds PR code — and `zig build` runs
+      # `build.zig` — with a token that can write comments and labels, so the
+      # requester must actually hold write here. The `if:` above stays as a
+      # cheap pre-filter; this is the authority.
+      #
+      # Checked before any checkout, and only for comments: GitHub already
+      # requires write access to start a `workflow_dispatch` run.
+      - name: Verify the requester can write to this repo
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.event.comment.user.login }}
+        run: |
+          perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq .permission)
+          # The API reports the triage role as `read`, so triage is excluded too.
+          case "$perm" in
+            write|admin) echo "$ACTOR has '$perm'" ;;
+            *) echo "::error::$ACTOR has '$perm' on $REPO; /benchmark requires write."
+               exit 1 ;;
+          esac
+
       - name: Acknowledge the request
         if: github.event_name == 'issue_comment'
         env:
@@ -329,12 +353,26 @@ jobs:
           ziskemu --diff-stats snap-base.csv snap-head.csv \
             --html-report bench-detail.html > /dev/null
 
+      # A run takes minutes, so the PR can move under it. Read the head again
+      # here and let the comment say so, rather than silently presenting the
+      # numbers as current.
+      - name: Re-read the PR head
+        id: now
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.req.outputs.pr }}
+        run: |
+          cur=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha || true)
+          echo "head=$cur" >> "$GITHUB_OUTPUT"
+
       - name: Render comparison
         id: diff
         env:
           DETAIL_LABEL: ${{ steps.detail.outputs.label }}
           BASE_SHA: ${{ steps.shas.outputs.base }}
           HEAD_SHA: ${{ steps.shas.outputs.head }}
+          CURRENT_HEAD: ${{ steps.now.outputs.head }}
         run: |
           set +e
           detail=""
@@ -343,6 +381,7 @@ jobs:
             detail="$detail --detail-label $DETAIL_LABEL"
             [ -s opcode-diff.txt ] && detail="$detail --opcode-diff opcode-diff.txt"
           fi
+          [ -n "$CURRENT_HEAD" ] && detail="$detail --current-head $CURRENT_HEAD"
           python3 trusted/.github/scripts/bench_diff.py \
             --base base.csv --head head.csv \
             --base-sha "$BASE_SHA" \
@@ -384,6 +423,30 @@ jobs:
               "repos/$REPO/issues/$PR/comments" \
               -F body=@comment.md --silent
           fi
+
+      # Marks the PR as having benchmark data, so `label:benchmarked` works as a
+      # filter. Deliberately not a verdict — ten blocks is a smoke signal, and a
+      # durable `improved`/`regressed` label would overstate it. Freshness is
+      # the comment's job, via its stale note.
+      #
+      # Never fails the run: a labelling hiccup should not discard the results.
+      - name: Label the PR
+        if: always() && steps.diff.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.req.outputs.pr }}
+        run: |
+          # Create-then-add, because adding an unknown label is not reliably
+          # self-creating. Both calls are idempotent.
+          gh api -X POST "repos/$REPO/labels" \
+            -f name=benchmarked \
+            -f color=1d76db \
+            -f description="Guest benchmark has been run on this PR" \
+            --silent 2>/dev/null || true
+          gh api -X POST "repos/$REPO/issues/$PR/labels" \
+            -f "labels[]=benchmarked" --silent || true
 
       # The comment is a summary; these hold the full per-opcode, memory and
       # per-function tables for anyone digging into a surprising number.
