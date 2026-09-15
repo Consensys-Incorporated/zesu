@@ -41,11 +41,11 @@ const ModuleSet = struct {
 
 /// Create (and optionally expose) zesu's whole module graph for a single target.
 ///
-/// The backend drives both the crypto and IO selections:
+/// The crypto backend selects the accelerator implementation:
 ///   accel_impl = extern ? extern_bridge.zig : default.zig
-///   zkvm_io    = extern ? extern_io.zig     : io/interface.zig
+///
 /// The allocator root is supplied by the caller (`allocator.zig` settable singleton for the
-/// exposed graph; `bump_alloc.zig` for the standalone rv64im object).
+/// exposed graph; `alt_fl_alloc.zig` for the standalone rv64im object).
 fn buildModules(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
