@@ -542,9 +542,9 @@ pub const Bytecode = union(enum) {
                 if (self.isEmpty()) {
                     return primitives.KECCAK_EMPTY;
                 }
-                const bytes = self.originalBytes();
+                const raw = self.originalBytes();
                 var hash: primitives.Hash = undefined;
-                accel.keccak256(bytes, &hash);
+                accel.keccak256(raw, &hash);
                 return hash;
             },
         }
@@ -563,8 +563,8 @@ pub const Bytecode = union(enum) {
         return Self{ .legacy_analyzed = LegacyRawBytecode.init(raw).intoAnalyzed() };
     }
 
-    /// Returns a reference to the bytecode.
-    pub fn bytecode(self: *const Self) []const u8 {
+    /// Returns a reference to the bytecode bytes.
+    pub fn bytes(self: *const Self) []const u8 {
         return switch (self.*) {
             .legacy_analyzed => |*analyzed| analyzed.getBytecode(),
             .eip7702 => |*code| code.raw(),
@@ -573,7 +573,7 @@ pub const Bytecode = union(enum) {
 
     /// Returns raw bytes slice.
     pub fn bytesSlice(self: *const Self) []const u8 {
-        return self.bytecode();
+        return self.bytes();
     }
 
     /// Returns the original bytecode.
