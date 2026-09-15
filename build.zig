@@ -351,20 +351,22 @@ fn buildModules(
     };
 }
 
-/// Link the native crypto C libraries onto a host exe/test.
-/// No-op for freestanding targets (their crypto symbols are externs resolved by the zkVM host).
+/// Link libc and, for the default backend, native crypto C libraries onto a host exe/test.
 fn addCryptoLibraries(
     step: *std.Build.Step.Compile,
+    target: std.Build.ResolvedTarget,
     crypto_backend: CryptoBackend,
     inc: []const u8,
     blst: []const u8,
     mcl: []const u8,
     linux: bool,
 ) void {
+    if (target.result.os.tag != .freestanding) {
+        step.root_module.linkSystemLibrary("c", .{});
+    }
     if (crypto_backend == .@"extern") return;
 
     step.root_module.addIncludePath(.{ .cwd_relative = inc });
-    step.root_module.linkSystemLibrary("c", .{});
     step.root_module.linkSystemLibrary("m", .{});
     step.root_module.linkSystemLibrary("secp256k1", .{});
     step.root_module.linkSystemLibrary("ssl", .{});
@@ -423,7 +425,7 @@ pub fn build(b: *std.Build) void {
     const libblst_path = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
     const libmcl_path = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
 
-    // ── Module graph (exposed via addModule; backends selected by target) ──────
+    // ── Module graph (exposed via addModule; backend selected by option) ──────
     const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend);
 
     // ── zesu binary ───────────────────────────────────────────────────────────
@@ -445,7 +447,7 @@ pub fn build(b: *std.Build) void {
     stateless_exe.root_module.addImport("accelerators", mods.accelerators);
     stateless_exe.root_module.addImport("primitives", mods.primitives);
     stateless_exe.root_module.addImport("hardfork", mods.hardfork);
-    addCryptoLibraries(stateless_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+    addCryptoLibraries(stateless_exe, target, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
     b.installArtifact(stateless_exe);
     addRunStep(b, "run", "Run the zesu app", stateless_exe, &.{});
 
@@ -467,7 +469,7 @@ pub fn build(b: *std.Build) void {
     });
     t8n_exe.root_module.addImport("executor", mods.executor);
     t8n_exe.root_module.addImport("hardfork", mods.hardfork);
-    addCryptoLibraries(t8n_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+    addCryptoLibraries(t8n_exe, target, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
     b.installArtifact(t8n_exe);
     addRunStep(b, "t8n", "Run the t8n state transition tool", t8n_exe, &.{});
 
@@ -483,7 +485,7 @@ pub fn build(b: *std.Build) void {
     spec_test_exe.root_module.addImport("t8n_input", t8n_input_module);
     spec_test_exe.root_module.addImport("executor", mods.executor);
     spec_test_exe.root_module.addImport("hardfork", mods.hardfork);
-    addCryptoLibraries(spec_test_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+    addCryptoLibraries(spec_test_exe, target, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
     b.installArtifact(spec_test_exe);
     addRunStep(b, "state-tests", "Run execution-spec-tests state fixtures", spec_test_exe, &.{});
 
@@ -507,7 +509,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     bc_test_exe.root_module.addImport("runner", blockchain_runner_module);
-    addCryptoLibraries(bc_test_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+    addCryptoLibraries(bc_test_exe, target, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
     b.installArtifact(bc_test_exe);
     addRunStep(b, "blockchain-tests", "Run Ethereum blockchain test fixtures", bc_test_exe, &.{});
 
@@ -523,7 +525,7 @@ pub fn build(b: *std.Build) void {
     zkevm_test_exe.root_module.addImport("ssz_decode", mods.ssz_decode);
     zkevm_test_exe.root_module.addImport("ssz_output", mods.ssz_output);
     zkevm_test_exe.root_module.addImport("executor", mods.executor);
-    addCryptoLibraries(zkevm_test_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+    addCryptoLibraries(zkevm_test_exe, target, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
     b.installArtifact(zkevm_test_exe);
     addRunStep(b, "zkevm-tests", "Run zkevm blockchain test fixtures", zkevm_test_exe, &.{ "--fixtures", "spec-tests/fixtures/zkevm/blockchain_tests" });
 
@@ -540,7 +542,7 @@ pub fn build(b: *std.Build) void {
     hive_exe.root_module.addImport("executor", mods.executor);
     hive_exe.root_module.addImport("hardfork", mods.hardfork);
     hive_exe.root_module.addImport("mpt", mods.mpt);
-    addCryptoLibraries(hive_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+    addCryptoLibraries(hive_exe, target, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
     b.installArtifact(hive_exe);
     b.step("hive-rlp", "Build and install the Hive consume-rlp client").dependOn(b.getInstallStep());
 
@@ -558,7 +560,7 @@ pub fn build(b: *std.Build) void {
     }) |t| {
         const tst = b.addTest(.{ .root_module = t.m });
         _ = t.name;
-        addCryptoLibraries(tst, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        addCryptoLibraries(tst, target, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
         test_step.dependOn(&b.addRunArtifact(tst).step);
     }
 
@@ -573,7 +575,7 @@ pub fn build(b: *std.Build) void {
         m.addImport("mpt", mods.mpt);
         m.addImport("input", mods.input);
         const tst = b.addTest(.{ .root_module = m });
-        addCryptoLibraries(tst, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        addCryptoLibraries(tst, target, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
         test_step.dependOn(&b.addRunArtifact(tst).step);
     }
 
@@ -591,7 +593,7 @@ pub fn build(b: *std.Build) void {
         m.addImport("input", mods.input);
         m.addImport("db", mods.db);
         const tst = b.addTest(.{ .root_module = m });
-        addCryptoLibraries(tst, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        addCryptoLibraries(tst, target, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
         test_step.dependOn(&b.addRunArtifact(tst).step);
     }
 
@@ -675,7 +677,7 @@ pub fn build(b: *std.Build) void {
     r2_exe.root_module.addImport("ssz_output", mods.ssz_output);
     r2_exe.root_module.addImport("executor", mods.executor);
     r2_exe.root_module.addOptions("build_options", r2_options);
-    addCryptoLibraries(r2_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+    addCryptoLibraries(r2_exe, target, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
     b.installArtifact(r2_exe);
     addRunStep(b, "r2-stateless", "Fetch and execute the latest R2 devnet batch", r2_exe, &.{});
 }
