@@ -183,7 +183,7 @@ pub fn opExtcodecopy(ctx: *InstructionContext) void {
     const size_u: usize = @intCast(size);
     const new_size = mem_off_u + size_u; // valid: overflow already checked above
 
-    const code = info.bytecode.bytecode();
+    const code = info.bytecode.bytes();
     const dest = ctx.interpreter.memory.buffer.items[mem_off_u..new_size];
 
     if (code_off > std.math.maxInt(usize)) {

@@ -193,7 +193,7 @@ pub const RuntimeFlags = struct {
 
 /// Extended bytecode functionality
 pub const ExtBytecode = struct {
-    bytecode: bytecode.Bytecode,
+    inner: bytecode.Bytecode,
     pc: usize,
     /// Whether execution is still running (false after halt/stop/return)
     continue_execution: bool,
@@ -205,7 +205,7 @@ pub const ExtBytecode = struct {
     /// Borrow semantics: bytecode is shared with account state, will NOT be freed on deinit.
     pub fn new(bytecode_data: bytecode.Bytecode) ExtBytecode {
         return ExtBytecode{
-            .bytecode = bytecode_data,
+            .inner = bytecode_data,
             .pc = 0,
             .continue_execution = true,
             .owns_bytecode = false,
@@ -216,7 +216,7 @@ pub const ExtBytecode = struct {
     /// Use for CREATE init-code frames and test frames with locally-created bytecodes.
     pub fn newOwned(bytecode_data: bytecode.Bytecode) ExtBytecode {
         return ExtBytecode{
-            .bytecode = bytecode_data,
+            .inner = bytecode_data,
             .pc = 0,
             .continue_execution = true,
             .owns_bytecode = true,
@@ -225,7 +225,7 @@ pub const ExtBytecode = struct {
 
     pub fn default() ExtBytecode {
         return ExtBytecode{
-            .bytecode = bytecode.Bytecode.new(),
+            .inner = bytecode.Bytecode.new(),
             .pc = 0,
             .continue_execution = true,
             .owns_bytecode = false,
@@ -234,15 +234,15 @@ pub const ExtBytecode = struct {
 
     pub fn deinit(self: *ExtBytecode) void {
         if (self.owns_bytecode) {
-            self.bytecode.deinit();
+            self.inner.deinit();
         }
     }
 
     /// Read current opcode byte (returns 0x00/STOP if past end)
     pub fn opcode(self: *const ExtBytecode) u8 {
-        const bytes = self.bytecode.bytecode();
-        if (self.pc >= bytes.len) return 0x00;
-        return bytes[self.pc];
+        const b = self.inner.bytes();
+        if (self.pc >= b.len) return 0x00;
+        return b[self.pc];
     }
 
     /// Advance PC by delta bytes
@@ -257,14 +257,14 @@ pub const ExtBytecode = struct {
 
     /// Check if jump destination is a valid JUMPDEST
     pub fn isValidJump(self: *const ExtBytecode, dest: usize) bool {
-        return self.bytecode.isValidJump(dest);
+        return self.inner.isValidJump(dest);
     }
 
     /// Read a single immediate byte at current PC (returns 0 if past end of code)
     pub fn readImmediate(self: *const ExtBytecode) u8 {
-        const bytes = self.bytecode.bytecode();
-        if (self.pc >= bytes.len) return 0;
-        return bytes[self.pc];
+        const b = self.inner.bytes();
+        if (self.pc >= b.len) return 0;
+        return b[self.pc];
     }
 
     pub fn isNotEnd(self: *const ExtBytecode) bool {
@@ -272,11 +272,15 @@ pub const ExtBytecode = struct {
     }
 
     pub fn getBytecode(self: ExtBytecode) bytecode.Bytecode {
-        return self.bytecode;
+        return self.inner;
     }
 
     pub fn setBytecode(self: *ExtBytecode, bytecode_data: bytecode.Bytecode) void {
-        self.bytecode = bytecode_data;
+        self.inner = bytecode_data;
+    }
+
+    pub fn bytes(self: *const ExtBytecode) []const u8 {
+        return self.inner.bytes();
     }
 };
 
@@ -537,7 +541,7 @@ pub const Interpreter = struct {
 
 /// Fetch the opcode at `pc` from an already-resolved code slice.
 ///
-/// `ExtBytecode.opcode()` goes through `Bytecode.bytecode()`, which switches on the
+/// `ExtBytecode.opcode()` goes through `Bytecode.bytes()`, which switches on the
 /// Bytecode union tag and reloads ptr/len from the payload — on every single opcode
 /// fetch. The bytecode of a frame cannot change while its dispatch loop runs (CALL and
 /// CREATE build new frames; JUMP only moves pc), so runDispatch resolves the slice once
@@ -555,7 +559,7 @@ fn runDispatch(
 ) void {
     if (!self.bytecode.isNotEnd()) return;
     // Hoisted once per frame — see opcodeAt.
-    const code = self.bytecode.bytecode.bytecode();
+    const code = self.bytecode.bytes();
     // EIP-145. Loop-invariant: spec_id is fixed for the frame.
     const has_shifts = primitives.isEnabledIn(self.runtime_flags.spec_id, .constantinople);
     sw: switch (opcodeAt(code, self.bytecode.pc)) {

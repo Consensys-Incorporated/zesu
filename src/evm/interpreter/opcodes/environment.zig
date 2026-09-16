@@ -152,7 +152,7 @@ pub fn opCodesize(ctx: *InstructionContext) void {
         ctx.interpreter.halt(.stack_overflow);
         return;
     }
-    const code_len = ctx.interpreter.bytecode.bytecode.bytecode().len;
+    const code_len = ctx.interpreter.bytecode.bytes().len;
     stack.pushUnsafe(@intCast(code_len));
 }
 
@@ -199,7 +199,7 @@ pub fn opCodecopy(ctx: *InstructionContext) void {
     }
 
     const dest = ctx.interpreter.memory.buffer.items[mem_off_usize..new_size];
-    const code = ctx.interpreter.bytecode.bytecode.bytecode();
+    const code = ctx.interpreter.bytecode.bytes();
 
     if (code_off > std.math.maxInt(usize)) {
         @memset(dest, 0);
