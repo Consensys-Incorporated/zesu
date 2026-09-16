@@ -209,3 +209,4 @@ test "classBytes round-trips through sizeClass for every class" {
         try std.testing.expectEqual(c, sizeClass(bytes, 0));
     }
 }
+

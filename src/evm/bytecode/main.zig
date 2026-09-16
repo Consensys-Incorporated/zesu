@@ -753,14 +753,7 @@ fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
 
     // Allocate bit vector on heap (one bit per bytecode position) to avoid dangling pointer
     const bit_vec_len = (bytecode.len + 7) / 8;
-    const bit_vec = alloc_mod.get().alloc(u8, bit_vec_len) catch {
-        // Allocation failed: return bytecode with empty jump table
-        return LegacyAnalyzedBytecode{
-            .bytecode = bytecode,
-            .original_len = bytecode.len,
-            .jump_table = JumpTable.init(),
-        };
-    };
+    const bit_vec = alloc_mod.get().alloc(u8, bit_vec_len) catch @panic("out of memory");
     @memset(bit_vec, 0);
 
     var i: usize = 0;
@@ -818,3 +811,4 @@ pub const testing = struct {
         try std.testing.expectEqual(@as(usize, 1), bytecode.len());
     }
 };
+

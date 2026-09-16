@@ -26,8 +26,7 @@ pub fn sha256Run(input: []const u8, gas_limit: u64) main.PrecompileResult {
     var output: [32]u8 = undefined;
     accel.sha256(input, &output);
 
-    const heap_out = alloc_mod.get().dupe(u8, &output) catch
-        return .{ .err = main.PrecompileError.OutOfGas };
+    const heap_out = alloc_mod.get().dupe(u8, &output) catch @panic("out of memory");
     return .{ .success = main.PrecompileOutput.new(cost, heap_out) };
 }
 
@@ -39,8 +38,7 @@ pub fn ripemd160Run(input: []const u8, gas_limit: u64) main.PrecompileResult {
     // accel.ripemd160 writes the EVM output layout directly (12 zero bytes +
     // 20-byte digest), so the host result lands straight in the heap buffer —
     // no intermediate copy or re-pad needed.
-    const heap_out = alloc_mod.get().alloc(u8, 32) catch
-        return .{ .err = main.PrecompileError.OutOfGas };
+    const heap_out = alloc_mod.get().alloc(u8, 32) catch @panic("out of memory");
     accel.ripemd160(input, heap_out[0..32]);
     return .{ .success = main.PrecompileOutput.new(gas_used, heap_out) };
 }

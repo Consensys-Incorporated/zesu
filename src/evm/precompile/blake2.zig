@@ -43,7 +43,6 @@ pub fn blake2fRun(input: []const u8, gas_limit: u64) main.PrecompileResult {
     if (!accel.blake2f(rounds, &h_bytes, &m_bytes, &t_bytes, f_flag))
         return .{ .err = main.PrecompileError.Blake2WrongFinalIndicatorFlag };
 
-    const heap_out = alloc_mod.get().dupe(u8, &h_bytes) catch
-        return .{ .err = main.PrecompileError.OutOfGas };
+    const heap_out = alloc_mod.get().dupe(u8, &h_bytes) catch @panic("out of memory");
     return .{ .success = main.PrecompileOutput.new(gas_used, heap_out) };
 }

@@ -69,3 +69,4 @@ fn free(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usiz
 pub fn get() std.mem.Allocator {
     return .{ .ptr = &state, .vtable = &vtable };
 }
+

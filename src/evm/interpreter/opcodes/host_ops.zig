@@ -513,10 +513,7 @@ pub fn makeLogFn(comptime n: u8) *const fn (ctx: *InstructionContext) void {
             const topics: []primitives.Hash = if (comptime n == 0)
                 &[_]primitives.Hash{}
             else blk: {
-                const t = alloc_mod.get().alloc(primitives.Hash, n) catch {
-                    ctx.interpreter.halt(.out_of_gas);
-                    return;
-                };
+                const t = alloc_mod.get().alloc(primitives.Hash, n) catch @panic("out of memory");
                 inline for (0..n) |i| {
                     const topic_val = stack.peekUnsafe(2 + i);
                     t[i] = host_module.u256ToHash(topic_val);
