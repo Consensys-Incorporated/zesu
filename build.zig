@@ -405,6 +405,11 @@ pub fn build(b: *std.Build) void {
         "crypto-backend",
         "Crypto accelerator backend: selects the crypto implementation (default: default)",
     ) orelse CryptoBackend.default;
+    // default.zig @cImports system crypto headers and needs libc; neither exists on a
+    // freestanding target, so this combination can never build. Fail fast with an actionable
+    // message rather than a bare "header not found" three @cImports deep.
+    if (target.result.os.tag == .freestanding and crypto_backend == .default)
+        std.debug.panic("freestanding targets require -Dcrypto-backend=extern (no libc/system crypto headers available)", .{});
 
     // ── Platform detection ────────────────────────────────────────────────────
     const is_linux = b.graph.host.result.os.tag == .linux;
