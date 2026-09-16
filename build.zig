@@ -468,7 +468,9 @@ pub fn build(b: *std.Build) void {
         stateless_obj.root_module.addImport("accelerators", mods.accelerators);
         stateless_obj.root_module.addImport("primitives", mods.primitives);
         stateless_obj.root_module.addImport("hardfork", mods.hardfork);
-        b.getInstallStep().dependOn(&b.addInstallFile(stateless_obj.getEmittedBin(), "lib/zesu.o").step);
+        // Distinct path from rv64im-object's zig-out/lib/zesu.o (the guest ELF) — they must
+        // never collide if both steps are invoked against the same zig-out.
+        b.getInstallStep().dependOn(&b.addInstallFile(stateless_obj.getEmittedBin(), "lib/zesu-host.o").step);
     } else {
         // ── zesu binary ───────────────────────────────────────────────────────
         const stateless_exe = b.addExecutable(.{
