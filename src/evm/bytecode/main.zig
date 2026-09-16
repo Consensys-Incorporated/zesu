@@ -811,4 +811,3 @@ pub const testing = struct {
         try std.testing.expectEqual(@as(usize, 1), bytecode.len());
     }
 };
-
