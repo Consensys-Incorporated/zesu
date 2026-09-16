@@ -830,8 +830,7 @@ fn runDispatch(
         // correctly via the table — opUnknown on old forks, real handler on new forks.
         // Naming every cold value explicitly (rather than using `else`) keeps the jump
         // table dense over the whole u8 domain — no upper-bound compare needed.
-        0x04...0x0f, 0x12, 0x13, 0x1a, 0x1e, 0x1f, 0x20...0x4f,
-        0x54, 0x55, 0x58...0x5a, 0x5c...0x5f, 0xa0...0xff => |op| {
+        0x04...0x0f, 0x12, 0x13, 0x1a, 0x1e, 0x1f, 0x20...0x4f, 0x54, 0x55, 0x58...0x5a, 0x5c...0x5f, 0xa0...0xff => |op| {
             self.bytecode.relativeJump(1);
             if (!coldStep(self, table, ctx, op)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
