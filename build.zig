@@ -41,8 +41,10 @@ const ModuleSet = struct {
 
 /// Create (and optionally expose) zesu's whole module graph for a single target.
 ///
-/// The crypto backend selects the accelerator implementation:
-///   accel_impl = extern ? extern_bridge.zig : default.zig
+/// Two independent axes select implementations, one per caller-supplied parameter:
+///   accel_impl = crypto_backend == extern ? extern_bridge.zig : default.zig
+///   zkvm_io    = guest                    ? extern_io.zig     : io/interface.zig
+/// `guest` is true only for the rv64im-object build
 ///
 /// The allocator root is supplied by the caller (`allocator.zig` settable singleton for the
 /// exposed graph; `alt_fl_alloc.zig` for the standalone rv64im object).
@@ -54,6 +56,7 @@ fn buildModules(
     alloc_root: std.Build.LazyPath,
     crypto_prefix: []const u8,
     crypto_backend: CryptoBackend,
+    guest: bool,
 ) ModuleSet {
     const use_extern = crypto_backend == .@"extern";
 
@@ -289,9 +292,9 @@ fn buildModules(
     executor.addImport("accelerators", accelerators);
 
     // zkvm_io is private: native stdin/env (io/interface.zig) or the extern C-ABI refs
-    // (zkvm/extern_io.zig) the zkVM host resolves at link.
+    // (zkvm/extern_io.zig) the zkVM host resolves at link. Selected by the `guest` parameter
     const zkvm_io = b.createModule(.{
-        .root_source_file = b.path(if (use_extern) "src/zkvm/extern_io.zig" else "src/io/interface.zig"),
+        .root_source_file = b.path(if (guest) "src/zkvm/extern_io.zig" else "src/io/interface.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -307,7 +310,7 @@ fn buildModules(
     runner.addImport("zkvm_io", zkvm_io);
 
     var zkvm_root: ?*std.Build.Module = null;
-    if (use_extern) {
+    if (guest) {
         // zkvm_root stays PRIVATE (never addModule'd). It wires the full turnkey object
         // (runner + extern IO + allocator) and exports main(). It must NOT be exposed: the
         // exposed graph roots `zesu_allocator` on the settable singleton, and a consumer
@@ -430,7 +433,7 @@ pub fn build(b: *std.Build) void {
     const libmcl_path = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
 
     // ── Module graph (exposed via addModule; backend selected by option) ──────
-    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend);
+    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend, false);
 
     // ── Host artifacts ────────────────────────────────────────────────────────
     //
@@ -656,7 +659,7 @@ pub fn build(b: *std.Build) void {
             .abi = .none,
         });
 
-        const obj_mods = buildModules(b, rv64im_target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), crypto_prefix, .@"extern");
+        const obj_mods = buildModules(b, rv64im_target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), crypto_prefix, .@"extern", true);
 
         const rv64_obj = b.addObject(.{
             .name = "zesu",
