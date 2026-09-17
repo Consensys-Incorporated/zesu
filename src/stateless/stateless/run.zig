@@ -13,7 +13,7 @@ const ssz_output = @import("ssz_output");
 const zkvm_io = @import("zkvm_io");
 
 pub const Result = struct {
-    /// zkevm@v0.8.2: SszStatelessValidationResult is a fixed-size 43-byte container,
+    /// zkevm@v0.8.4: SszStatelessValidationResult is a fixed-size 43-byte container,
     /// so the decode-failure sentinel and a real result are the same length.
     out: [ssz_output.OUTPUT_SIZE]u8,
     success: bool,

@@ -78,7 +78,7 @@ pub fn specFromFork(name: []const u8) ?primitives.SpecId {
 /// Map a `ProtocolFork` index to its SpecId.
 ///
 /// `ProtocolFork` is the stable fork enum the stateless schemas are keyed by
-/// (execution-specs `stateless.py`, tests-zkevm@v0.8.2). A stateless input's
+/// (execution-specs `stateless.py`, tests-zkevm@v0.8.4). A stateless input's
 /// schema id is `fork_index << 8 | revision`, so this table is what lets the
 /// guest execute the fork the input names instead of assuming one.
 ///

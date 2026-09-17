@@ -305,7 +305,8 @@ pub fn mulFull(a: primitives.U256, b: primitives.U256) [8]u64 {
 
 /// Generalized M-limb mod 4-limb using Knuth's Algorithm D with div128by64.
 /// M is the number of dividend limbs (4, 5, or 8). Uses only u64 hardware division.
-pub fn limbMod(comptime M: comptime_int, a: [M]u64, b: [4]u64) [4]u64 {
+/// `inline` for the same reason as `limbDivMod` — see the note there.
+pub inline fn limbMod(comptime M: comptime_int, a: [M]u64, b: [4]u64) [4]u64 {
     // Find highest non-zero limb in divisor
     var n: usize = 0;
     for (0..4) |i| {
@@ -469,7 +470,16 @@ pub fn limbMod(comptime M: comptime_int, a: [M]u64, b: [4]u64) [4]u64 {
 /// Compute (a / b, a % b) for 4-limb operands using Knuth's Algorithm D.
 /// Returns .{ .q = quotient, .r = remainder } as [4]u64 limb arrays.
 /// When b == 0 or a < b the fast paths return immediately.
-pub fn limbDivMod(a: [4]u64, b: [4]u64) struct { q: [4]u64, r: [4]u64 } {
+///
+/// `inline` is load-bearing. LLVM leaves this out of line by default, so every
+/// DIV/MOD/SDIV/SMOD hands its operands over as a `[4]u64` in memory and takes the
+/// returned quotient/remainder pair back the same way. Forcing it in place lets the
+/// caller keep the limbs in registers and lets the divisor classification fold
+/// against the caller's operands. Measured on the EEST `for_amsterdam_at_0010M`
+/// arithmetic tier: -10.3% on DIV/SDIV, -4.0% across MOD/SMOD/ADDMOD/MULMOD,
+/// -3.5% on the tier overall, and -0.11% on the 500-block mainnet corpus with all
+/// 500 blocks improved. Do not drop the keyword without re-benchmarking.
+pub inline fn limbDivMod(a: [4]u64, b: [4]u64) struct { q: [4]u64, r: [4]u64 } {
     const zero = [_]u64{0} ** 4;
 
     var n: usize = 0;

@@ -152,7 +152,7 @@ pub fn opCodesize(ctx: *InstructionContext) void {
         ctx.interpreter.halt(.stack_overflow);
         return;
     }
-    const code_len = ctx.interpreter.bytecode.bytecode.bytecode().len;
+    const code_len = ctx.interpreter.bytecode.bytes().len;
     stack.pushUnsafe(@intCast(code_len));
 }
 
@@ -199,7 +199,7 @@ pub fn opCodecopy(ctx: *InstructionContext) void {
     }
 
     const dest = ctx.interpreter.memory.buffer.items[mem_off_usize..new_size];
-    const code = ctx.interpreter.bytecode.bytecode.bytecode();
+    const code = ctx.interpreter.bytecode.bytes();
 
     if (code_off > std.math.maxInt(usize)) {
         @memset(dest, 0);
@@ -290,14 +290,13 @@ pub fn opReturndatacopy(ctx: *InstructionContext) void {
         return;
     }
 
-    // Use direction-safe copy: return_data may alias execution memory (e.g. identity precompile).
+    // return_data may alias execution memory (e.g. identity precompile), so this must
+    // be overlap-safe. @memmove is defined for overlapping ranges and lowers to the
+    // target's memmove, which on ZisK is a DMA-accelerated stub rather than the
+    // byte-at-a-time loop std.mem.copyForwards/copyBackwards compile to.
     const dst = ctx.interpreter.memory.buffer.items[mem_off_usize..new_size];
     const src = return_data[src_off_usize .. src_off_usize + size_usize];
-    if (@intFromPtr(dst.ptr) <= @intFromPtr(src.ptr)) {
-        std.mem.copyForwards(u8, dst, src);
-    } else {
-        std.mem.copyBackwards(u8, dst, src);
-    }
+    @memmove(dst, src);
 }
 
 // ---------------------------------------------------------------------------

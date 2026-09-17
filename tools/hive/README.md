@@ -30,7 +30,7 @@ From the Hive repo root:
   --client.checktimelimit=300s \
   --docker.buildoutput \
   --sim.parallelism=6 \
-  --sim.buildarg fixtures=https://github.com/ethereum/execution-specs/releases/download/tests-glamsterdam-devnet%40v8.1.0/fixtures_glamsterdam-devnet.tar.gz \
+  --sim.buildarg fixtures=https://github.com/ethereum/execution-specs/releases/download/tests-glamsterdam-devnet%40v8.1.4/fixtures_glamsterdam-devnet.tar.gz \
   --sim.buildarg branch=devnets/glamsterdam/8 \
   --sim.loglevel=3
 ```
@@ -44,7 +44,7 @@ To run a subset of tests (e.g. specific EIPs), add `--sim.limit` with a regex:
   --client.checktimelimit=300s \
   --docker.buildoutput \
   --sim.parallelism=6 \
-  --sim.buildarg fixtures=https://github.com/ethereum/execution-specs/releases/download/tests-glamsterdam-devnet%40v8.1.0/fixtures_glamsterdam-devnet.tar.gz \
+  --sim.buildarg fixtures=https://github.com/ethereum/execution-specs/releases/download/tests-glamsterdam-devnet%40v8.1.4/fixtures_glamsterdam-devnet.tar.gz \
   --sim.buildarg branch=devnets/glamsterdam/8 \
   --sim.limit=".*(8024|7708|7778|7843|7928|7954|8037).*" \
   --sim.loglevel=3

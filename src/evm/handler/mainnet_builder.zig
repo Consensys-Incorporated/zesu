@@ -374,6 +374,7 @@ pub const MainnetHandler = struct {
 
         const DB = @TypeOf(ctx.*).DatabaseType;
         var host = interpreter_mod.Host.init(DB, ctx, &evm.precompiles.precompiles);
+        defer host.releaseOutput();
 
         var return_data_buf: std.ArrayList(u8) = .empty;
         defer return_data_buf.deinit(alloc_mod.get());

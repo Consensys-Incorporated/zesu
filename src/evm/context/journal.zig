@@ -991,16 +991,13 @@ pub const JournalInner = struct {
     /// OOM silently skips the log (same policy as addLog).
     fn addEip7708TransferLog(self: *JournalInner, from: primitives.Address, to: primitives.Address, amount: primitives.U256) void {
         const alloc = alloc_mod.get();
-        const topics = alloc.alloc(primitives.Hash, 3) catch return;
+        const topics = alloc.alloc(primitives.Hash, 3) catch @panic("out of memory");
         topics[0] = primitives.EIP7708_TRANSFER_TOPIC;
         topics[1] = std.mem.zeroes([32]u8);
         @memcpy(topics[1][12..], &from);
         topics[2] = std.mem.zeroes([32]u8);
         @memcpy(topics[2][12..], &to);
-        const data = alloc.alloc(u8, 32) catch {
-            alloc.free(topics);
-            return;
-        };
+        const data = alloc.alloc(u8, 32) catch @panic("out of memory");
         const amount_bytes: [32]u8 = @bitCast(@byteSwap(amount));
         @memcpy(data, &amount_bytes);
         self.addLog(.{
@@ -1013,14 +1010,11 @@ pub const JournalInner = struct {
     /// EIP-7708: Build and append a Burn(address, amount) log to the journal log list.
     fn addEip7708BurnLog(self: *JournalInner, addr: primitives.Address, amount: primitives.U256) void {
         const alloc = alloc_mod.get();
-        const topics = alloc.alloc(primitives.Hash, 2) catch return;
+        const topics = alloc.alloc(primitives.Hash, 2) catch @panic("out of memory");
         topics[0] = primitives.EIP7708_BURN_TOPIC;
         topics[1] = std.mem.zeroes([32]u8);
         @memcpy(topics[1][12..], &addr);
-        const data = alloc.alloc(u8, 32) catch {
-            alloc.free(topics);
-            return;
-        };
+        const data = alloc.alloc(u8, 32) catch @panic("out of memory");
         const amount_bytes: [32]u8 = @bitCast(@byteSwap(amount));
         @memcpy(data, &amount_bytes);
         self.addLog(.{

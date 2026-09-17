@@ -4,14 +4,14 @@
 //! All container offsets are relative to the start of each container's byte slice.
 //!
 //! Container layouts (fixed region sizes):
-//!   SszStatelessInput:    20 bytes  [4+4+8+4]  (v0.8.2: chain_config → inline chain_id)
+//!   SszStatelessInput:    20 bytes  [4+4+8+4]  (v0.8.0: chain_config → inline chain_id)
 //!   SszNewPayloadRequest: 44 bytes  [4+4+32+4]
 //!   SszExecutionPayload: 540 bytes  (see EP_FIXED_SIZE)
 //!   SszExecutionWitness:  12 bytes  [4+4+4]
 //!   SszWithdrawal:        44 bytes  fixed (8+8+20+8)
 //!
 //! EIP-7495 `ProgressiveContainer` and EIP-7916 `ProgressiveList` (introduced by
-//! zkevm@v0.8.2) serialize exactly like their stable counterparts, so only
+//! zkevm@v0.8.0) serialize exactly like their stable counterparts, so only
 //! `hash_tree_root` differs — see ssz_output.zig.
 
 const std = @import("std");

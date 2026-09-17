@@ -291,6 +291,7 @@ pub const Frame = struct {
     pub fn execute(self: *Frame, ctx: anytype) !FrameResult {
         const DB = @TypeOf(ctx.*).DatabaseType;
         var host = interpreter.Host.init(DB, ctx, &self.precompiles.precompiles);
+        defer host.releaseOutput();
 
         _ = self.interpreter.runWithHost(&self.instructions.table, &host);
 

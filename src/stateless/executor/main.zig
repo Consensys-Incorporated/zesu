@@ -384,12 +384,11 @@ pub fn executeBlockStateless(
         spec,
     );
     // Both the journal (evm_state, BAL maps, logs, etc.) and the WitnessDatabase
-    // (witness_codes, deployed_codes, storage_root_cache) are allocated from
-    // alloc_mod.get() and must be freed explicitly. Both defers are declared before
-    // the defers below so they run last — after finalizeOutput and validatePostExecution
-    // have consumed all journal- and database-owned memory. Database is declared first
-    // so it runs after the journal (LIFO): evm_state code references into the database
-    // are freed before the database itself.
+    // (witness_codes, deployed_codes, storage_root_cache) must be freed explicitly.
+    // Both defers are declared before the defers below so they run last — after
+    // finalizeOutput and validatePostExecution have consumed all journal- and
+    // database-owned memory. Database is declared first so it runs after the journal
+    // (LIFO): evm_state code references into the database are freed before the database itself.
     defer ctx.journaled_state.database.deinit();
     defer ctx.journaled_state.deinit();
     ctx.block = transition_mod.buildBlockEnv(env, spec);

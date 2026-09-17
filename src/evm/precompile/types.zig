@@ -36,7 +36,16 @@ pub const PrecompileError = error{
     P256VerifyFailed,
 };
 
-/// Precompile execution output
+/// Precompile execution output.
+///
+/// Ownership rule, module-wide: **a non-empty `bytes` is always heap-allocated
+/// from `zesu_allocator`, and the caller frees it** once the frame can no longer
+/// observe it. Empty outputs are the static `&[_]u8{}` and are exempt by their
+/// length, so the caller's check is simply `if (bytes.len > 0) free(bytes)`.
+///
+/// One rule for the module rather than a per-precompile ownership flag: a
+/// precompile should not have to know who frees its output. Any new precompile
+/// returning a non-empty static must duplicate it (see the KZG return value).
 pub const PrecompileOutput = struct {
     /// Gas used by the precompile
     gas_used: u64,
