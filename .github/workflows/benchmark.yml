@@ -262,28 +262,42 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: elf-base
+          # zisk-object: bumped from rv64im-object when the guest ELF switched to the
+          # Zbb/Zbs build. A bare base-sha key would let a merge-base already cached
+          # by the old command silently reuse the wrong-ISA ELF.
           key: >-
-            benchelf-${{ steps.shas.outputs.base }}-${{ steps.zisk.outputs.version }}-${{
+            benchelf-zisk-object-${{ steps.shas.outputs.base }}-${{ steps.zisk.outputs.version }}-${{
             steps.shas.outputs.zkvm }}-${{ runner.os }}
 
       - name: Build merge-base ELF
         if: steps.cache-base-elf.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          (cd base && zig build rv64im-object -Doptimize=ReleaseFast)
+          cd base
+          # The merge-base predates zisk-object (e.g. when benchmarking the PR that
+          # introduces it) — fall back to rv64im-object, what ZisK actually built
+          # against at that commit, rather than erroring on an unknown step.
+          if zig build -l | grep -q '^  zisk-object '; then
+            zig build zisk-object -Doptimize=ReleaseFast
+            base_obj=zig-out/lib/zesu-zisk.o
+          else
+            zig build rv64im-object -Doptimize=ReleaseFast
+            base_obj=zig-out/lib/zesu.o
+          fi
+          cd ..
           (cd zesu-zkvm/zisk && zig build -Doptimize=ReleaseFast \
-            -Dzesu_obj="$GITHUB_WORKSPACE/base/zig-out/lib/zesu.o")
+            -Dzesu_obj="$GITHUB_WORKSPACE/base/$base_obj")
           cp zesu-zkvm/zisk/zig-out/bin/zesu-zisk elf-base
 
       - name: Build PR head ELF
         run: |
           set -euo pipefail
-          (cd head && zig build rv64im-object -Doptimize=ReleaseFast)
+          (cd head && zig build zisk-object -Doptimize=ReleaseFast)
           # Remove the previous link output: a failed build otherwise leaves a
           # stale ELF behind and the benchmark silently measures the old one.
           rm -f zesu-zkvm/zisk/zig-out/bin/zesu-zisk
           (cd zesu-zkvm/zisk && zig build -Doptimize=ReleaseFast \
-            -Dzesu_obj="$GITHUB_WORKSPACE/head/zig-out/lib/zesu.o")
+            -Dzesu_obj="$GITHUB_WORKSPACE/head/zig-out/lib/zesu-zisk.o")
           cp zesu-zkvm/zisk/zig-out/bin/zesu-zisk elf-head
           ls -l elf-base elf-head
 
