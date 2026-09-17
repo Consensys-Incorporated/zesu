@@ -108,14 +108,14 @@ const BaTracker = struct {
                 .balance = acct.balance,
                 .nonce = acct.nonce,
                 .code_hash = code_hash,
-            }) catch {};
+            }) catch @panic("out of memory");
             if (acct.storage.count() > 0) {
                 var sm = std.AutoHashMapUnmanaged(u256, u256).empty;
                 var sit = acct.storage.iterator();
                 while (sit.next()) |se| {
-                    if (se.value_ptr.* != 0) sm.put(a, se.key_ptr.*, se.value_ptr.*) catch {};
+                    if (se.value_ptr.* != 0) sm.put(a, se.key_ptr.*, se.value_ptr.*) catch @panic("out of memory");
                 }
-                self.committed_storage.put(a, addr, sm) catch {};
+                self.committed_storage.put(a, addr, sm) catch @panic("out of memory");
             }
         }
         return self;
@@ -157,9 +157,9 @@ const BaTracker = struct {
                 var stor_it = acct.storage.iterator();
                 while (stor_it.next()) |se| {
                     if (!se.value_ptr.*.was_written) continue;
-                    const sm = self.selfdestruct_reads.getOrPut(a, addr) catch continue;
+                    const sm = self.selfdestruct_reads.getOrPut(a, addr) catch @panic("out of memory");
                     if (!sm.found_existing) sm.value_ptr.* = .{};
-                    sm.value_ptr.*.put(a, se.key_ptr.*, {}) catch {};
+                    sm.value_ptr.*.put(a, se.key_ptr.*, {}) catch @panic("out of memory");
                 }
                 // Record balance change if pre-existing balance was nonzero (ETH transferred out).
                 const known = blk: {
@@ -170,7 +170,7 @@ const BaTracker = struct {
                         .nonce = p.nonce,
                         .code_hash = p.code_hash,
                     } else KnownAcct{};
-                    self.committed.put(self.alloc, addr, k) catch {};
+                    self.committed.put(self.alloc, addr, k) catch @panic("out of memory");
                     break :blk k;
                 };
                 // Record any balance change on a self-destructed account. EIP-8246 (Amsterdam+)
@@ -180,10 +180,8 @@ const BaTracker = struct {
                 // from account_reads and dropped at entry assembly, so recording here is safe and
                 // mirrors the reference's diff of post-tx account state against pre.
                 if (acct.info.balance != known.balance) {
-                    const entry = self.bal_chg.getOrPutValue(a, addr, .empty) catch {
-                        continue;
-                    };
-                    entry.value_ptr.*.append(a, bal_mod.BaiU256{ .bai = bai, .value = acct.info.balance }) catch {};
+                    const entry = self.bal_chg.getOrPutValue(a, addr, .empty) catch @panic("out of memory");
+                    entry.value_ptr.*.append(a, bal_mod.BaiU256{ .bai = bai, .value = acct.info.balance }) catch @panic("out of memory");
                 }
                 continue;
             }
@@ -198,20 +196,20 @@ const BaTracker = struct {
                     .nonce = p.nonce,
                     .code_hash = p.code_hash,
                 } else KnownAcct{};
-                self.committed.put(self.alloc, addr, k) catch {};
+                self.committed.put(self.alloc, addr, k) catch @panic("out of memory");
                 break :blk k;
             };
 
             // Balance
             if (acct.info.balance != known.balance) {
-                const entry = self.bal_chg.getOrPutValue(a, addr, .empty) catch continue;
-                entry.value_ptr.*.append(a, bal_mod.BaiU256{ .bai = bai, .value = acct.info.balance }) catch {};
+                const entry = self.bal_chg.getOrPutValue(a, addr, .empty) catch @panic("out of memory");
+                entry.value_ptr.*.append(a, bal_mod.BaiU256{ .bai = bai, .value = acct.info.balance }) catch @panic("out of memory");
             }
 
             // Nonce
             if (acct.info.nonce != known.nonce) {
-                const entry = self.nonce_chg.getOrPutValue(a, addr, .empty) catch continue;
-                entry.value_ptr.*.append(a, bal_mod.BaiU64{ .bai = bai, .value = acct.info.nonce }) catch {};
+                const entry = self.nonce_chg.getOrPutValue(a, addr, .empty) catch @panic("out of memory");
+                entry.value_ptr.*.append(a, bal_mod.BaiU64{ .bai = bai, .value = acct.info.nonce }) catch @panic("out of memory");
             }
 
             // Code
@@ -220,7 +218,7 @@ const BaTracker = struct {
                     if (std.mem.eql(u8, &acct.info.code_hash, &primitives.KECCAK_EMPTY)) break :blk &.{};
                     if (acct.info.code) |bc| {
                         if (bc == .eip7702) {
-                            const buf = a.alloc(u8, 23) catch break :blk &.{};
+                            const buf = a.alloc(u8, 23) catch @panic("out of memory");
                             buf[0] = 0xEF;
                             buf[1] = 0x01;
                             buf[2] = 0x00;
@@ -231,7 +229,7 @@ const BaTracker = struct {
                     }
                     if (ctx.journaled_state.database.codeByHash(acct.info.code_hash)) |db_bc| {
                         if (db_bc == .eip7702) {
-                            const buf = a.alloc(u8, 23) catch break :blk &.{};
+                            const buf = a.alloc(u8, 23) catch @panic("out of memory");
                             buf[0] = 0xEF;
                             buf[1] = 0x01;
                             buf[2] = 0x00;
@@ -241,8 +239,8 @@ const BaTracker = struct {
                         break :blk db_bc.originalBytes();
                     } else |_| break :blk &.{};
                 };
-                const entry = self.code_chg.getOrPutValue(a, addr, .empty) catch continue;
-                entry.value_ptr.*.append(a, bal_mod.BaiCode{ .bai = bai, .code = code_bytes }) catch {};
+                const entry = self.code_chg.getOrPutValue(a, addr, .empty) catch @panic("out of memory");
+                entry.value_ptr.*.append(a, bal_mod.BaiCode{ .bai = bai, .code = code_bytes }) catch @panic("out of memory");
             }
 
             // Storage changes: slots written in this phase
@@ -258,17 +256,17 @@ const BaTracker = struct {
                     // Lazy init: query DB for the pre-block value (handles stateless path).
                     const db_val = ctx.journaled_state.database.storage(addr, slot) catch 0;
                     if (db_val != 0) {
-                        const sm2 = self.committed_storage.getOrPut(self.alloc, addr) catch break :blk_slot db_val;
+                        const sm2 = self.committed_storage.getOrPut(self.alloc, addr) catch @panic("out of memory");
                         if (!sm2.found_existing) sm2.value_ptr.* = .{};
-                        sm2.value_ptr.*.put(self.alloc, slot, db_val) catch {};
+                        sm2.value_ptr.*.put(self.alloc, slot, db_val) catch @panic("out of memory");
                     }
                     break :blk_slot db_val;
                 };
                 if (present == committed_val) continue;
-                const addr_map = self.slot_chg.getOrPut(a, addr) catch continue;
+                const addr_map = self.slot_chg.getOrPut(a, addr) catch @panic("out of memory");
                 if (!addr_map.found_existing) addr_map.value_ptr.* = .{};
-                const slot_list = addr_map.value_ptr.*.getOrPutValue(a, slot, .empty) catch continue;
-                slot_list.value_ptr.*.append(a, bal_mod.SlotBaiValue{ .bai = bai, .value = present }) catch {};
+                const slot_list = addr_map.value_ptr.*.getOrPutValue(a, slot, .empty) catch @panic("out of memory");
+                slot_list.value_ptr.*.append(a, bal_mod.SlotBaiValue{ .bai = bai, .value = present }) catch @panic("out of memory");
             }
         }
 
@@ -284,7 +282,7 @@ const BaTracker = struct {
             // subsequent BAIs don't spuriously re-record the same balance. Storage is cleared
             // so a re-creation in the next tx is detected via nonce/code changes.
             if (acct.status.self_destructed) {
-                self.committed.put(a, addr, KnownAcct{ .balance = acct.info.balance }) catch {};
+                self.committed.put(a, addr, KnownAcct{ .balance = acct.info.balance }) catch @panic("out of memory");
                 if (self.committed_storage.getPtr(addr)) |sm| sm.clearRetainingCapacity();
                 continue;
             }
@@ -292,13 +290,13 @@ const BaTracker = struct {
                 .balance = acct.info.balance,
                 .nonce = acct.info.nonce,
                 .code_hash = acct.info.code_hash,
-            }) catch {};
+            }) catch @panic("out of memory");
             var stor_it = acct.storage.iterator();
             while (stor_it.next()) |se| {
                 if (!se.value_ptr.*.was_written) continue;
-                const sm = self.committed_storage.getOrPut(a, addr) catch continue;
+                const sm = self.committed_storage.getOrPut(a, addr) catch @panic("out of memory");
                 if (!sm.found_existing) sm.value_ptr.* = .{};
-                sm.value_ptr.*.put(a, se.key_ptr.*, se.value_ptr.*.present_value) catch {};
+                sm.value_ptr.*.put(a, se.key_ptr.*, se.value_ptr.*.present_value) catch @panic("out of memory");
             }
         }
     }
@@ -317,9 +315,9 @@ const BaTracker = struct {
                     const slot = se.key_ptr.*;
                     const in_slot_chg = if (self.slot_chg.get(addr)) |sm| sm.contains(slot) else false;
                     if (in_slot_chg) continue;
-                    const sm = storage_reads.getOrPut(a, addr) catch continue;
+                    const sm = storage_reads.getOrPut(a, addr) catch @panic("out of memory");
                     if (!sm.found_existing) sm.value_ptr.* = .{};
-                    sm.value_ptr.*.put(a, slot, {}) catch {};
+                    sm.value_ptr.*.put(a, slot, {}) catch @panic("out of memory");
                 }
             }
         }
@@ -333,9 +331,9 @@ const BaTracker = struct {
                     const slot = slot_ptr.*;
                     const in_slot_chg = if (self.slot_chg.get(addr)) |sm| sm.contains(slot) else false;
                     if (in_slot_chg) continue;
-                    const sm = storage_reads.getOrPut(a, addr) catch continue;
+                    const sm = storage_reads.getOrPut(a, addr) catch @panic("out of memory");
                     if (!sm.found_existing) sm.value_ptr.* = .{};
-                    sm.value_ptr.*.put(a, slot, {}) catch {};
+                    sm.value_ptr.*.put(a, slot, {}) catch @panic("out of memory");
                 }
             }
         }
@@ -349,20 +347,20 @@ const BaTracker = struct {
         var all_addrs = std.AutoHashMapUnmanaged(input.Address, void).empty;
         {
             var it = ctx.journaled_state.inner.bal_account_reads.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch @panic("out of memory");
         }
         {
             var it = self.slot_chg.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch @panic("out of memory");
         }
         {
             var it = storage_reads.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch @panic("out of memory");
         }
         // Include selfdestruct_reads addresses (ephemeral accounts with storage reads).
         {
             var it = self.selfdestruct_reads.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch @panic("out of memory");
         }
 
         var entries = std.ArrayListUnmanaged(bal_mod.EncodeEntry).empty;
@@ -448,8 +446,8 @@ const BaTracker = struct {
         for (entries.items) |entry| {
             bal_items += 1; // address
             var unique_slots = std.AutoHashMapUnmanaged(u256, void).empty;
-            for (entry.storage_changes) |sc| unique_slots.put(a, sc.slot, {}) catch {};
-            for (entry.storage_reads) |sr| unique_slots.put(a, sr, {}) catch {};
+            for (entry.storage_changes) |sc| unique_slots.put(a, sc.slot, {}) catch @panic("out of memory");
+            for (entry.storage_reads) |sr| unique_slots.put(a, sr, {}) catch @panic("out of memory");
             bal_items += unique_slots.count();
         }
         if (bal_items > gas_limit / GAS_BLOCK_ACCESS_LIST_ITEM) {
@@ -781,7 +779,7 @@ pub fn transitionWithContext(
             // Always create a blob_hashes list for type-3 txs (even if empty), so that
             // validateBlobTx sees an empty list and rejects it with EmptyBlobList.
             var blob_list = std.ArrayList(primitives.Hash).empty;
-            blob_list.appendSlice(alloc_mod.get(), tx.blob_versioned_hashes) catch {};
+            blob_list.appendSlice(alloc_mod.get(), tx.blob_versioned_hashes) catch @panic("out of memory");
             ctx.tx.blob_hashes = blob_list;
             ctx.tx.max_fee_per_blob_gas = tx.max_fee_per_blob_gas orelse 0;
         } else {
@@ -799,7 +797,7 @@ pub fn transitionWithContext(
                     if (ai.y_parity > 1) break :blk context_mod.RecoveredAuthority.Invalid;
                     const SECP256K1N_OVER_2: u256 = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
                     if (ai.s > SECP256K1N_OVER_2) break :blk context_mod.RecoveredAuthority.Invalid;
-                    const auth_hash = tx_signing.authorizationSigningHash(arena, &ai) catch break :blk context_mod.RecoveredAuthority.Invalid;
+                    const auth_hash = tx_signing.authorizationSigningHash(arena, &ai) catch @panic("out of memory");
                     const recid: u8 = if (ai.y_parity == 0) 0 else 1;
                     var auth_sig: [64]u8 = undefined;
                     std.mem.writeInt(u256, auth_sig[0..32], ai.r, .big);
@@ -820,7 +818,7 @@ pub fn transitionWithContext(
                     },
                     authority,
                 );
-                auth_list.append(alloc_mod.get(), context_mod.Either{ .Right = recovered }) catch {};
+                auth_list.append(alloc_mod.get(), context_mod.Either{ .Right = recovered }) catch @panic("out of memory");
             }
             ctx.tx.authorization_list = auth_list;
         } else {
@@ -874,9 +872,9 @@ pub fn transitionWithContext(
                 };
                 for (al_entry.storage_keys) |key| {
                     const sk = std.mem.readInt(u256, &key, .big);
-                    item.storage_keys.append(alloc_mod.get(), sk) catch {};
+                    item.storage_keys.append(alloc_mod.get(), sk) catch @panic("out of memory");
                 }
-                al_items.append(alloc_mod.get(), item) catch {};
+                al_items.append(alloc_mod.get(), item) catch @panic("out of memory");
             }
             ctx.tx.access_list = context_mod.AccessList{ .items = al_items };
         } else {
@@ -1095,6 +1093,14 @@ pub fn transitionWithContext(
         if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
         ctx.tx.authorization_list = null;
 
+        // ctx_error is sticky; once set the block is doomed to rejection. Bail out
+        // now rather than spend proving cycles on transactions whose results will
+        // be discarded anyway.
+        if (ctx.ctx_error != context_mod.ContextError.ok) {
+            exec_result.deinit();
+            return error.InvalidWitness;
+        }
+
         // 5. Build receipt
         cumulative_gas += exec_result.block_gas_used;
         // Amsterdam+: block_gas_used = max(regular, state), which is only known
@@ -1187,24 +1193,38 @@ pub fn transitionWithContext(
     }
 
     // ── Apply mining reward ───────────────────────────────────────────────────
+    // balanceIncr loads the recipient from the database, so with a stateless
+    // witness it can fail with a database error (not just OOM): an unprovable
+    // coinbase must mark the block invalid via ctx_error, like every other
+    // database access, rather than silently skip the reward.
     if (reward >= 0) {
         const reward_wei: primitives.U256 = @intCast(reward);
         ctx.journaled_state.inner.balanceIncr(
             &ctx.journaled_state.database,
             env.coinbase,
             reward_wei,
-        ) catch {};
+        ) catch |err| {
+            if (err == error.OutOfMemory) @panic("out of memory");
+            ctx.ctx_error = context_mod.ContextError.database_error;
+        };
         ctx.journaled_state.commitTx();
     }
 
     // ── Apply withdrawals (Shanghai+) ─────────────────────────────────────────
     for (env.withdrawals) |wd| {
+        // Bail out on the first unprovable recipient (or on the mining reward
+        // above) instead of working through the rest of the withdrawals: the
+        // block is already doomed to rejection once ctx_error is set.
+        if (ctx.ctx_error != context_mod.ContextError.ok) break;
         const amount_wei: primitives.U256 = @as(u256, wd.amount) * 1_000_000_000;
         ctx.journaled_state.inner.balanceIncr(
             &ctx.journaled_state.database,
             wd.address,
             amount_wei,
-        ) catch {};
+        ) catch |err| {
+            if (err == error.OutOfMemory) @panic("out of memory");
+            ctx.ctx_error = context_mod.ContextError.database_error;
+        };
     }
     if (env.withdrawals.len > 0) {
         ctx.journaled_state.commitTx();
@@ -1310,7 +1330,7 @@ fn collectDeposits(arena: std.mem.Allocator, receipts: []const Receipt) error{In
             if (log.topics.len == 0 or !std.mem.eql(u8, &log.topics[0], &DEPOSIT_EVENT_TOPIC)) continue;
             var deposit: [192]u8 = undefined;
             try depositFromLog(log, &deposit);
-            buf.appendSlice(arena, &deposit) catch {};
+            buf.appendSlice(arena, &deposit) catch @panic("out of memory");
         }
     }
     return buf.items;

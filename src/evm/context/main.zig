@@ -117,3 +117,9 @@ pub const testing = struct {
         std.debug.print("Context tests passed.\n", .{});
     }
 };
+
+// `zig build test` only collects tests from a module's root file, so tests living
+// in the other files of this module are invisible unless referenced here.
+test {
+    _ = @import("journal_tests.zig");
+}

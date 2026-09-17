@@ -1615,7 +1615,7 @@ pub fn Journal(comptime DB: type) type {
                             if (self.inner.evm_state.get(data.address)) |acct| {
                                 if (acct.info.code) |code| {
                                     if (!acct.info.isEmptyCodeHash()) {
-                                        self.database.notifyCodeDeployed(acct.info.code_hash, code) catch {};
+                                        self.database.notifyCodeDeployed(acct.info.code_hash, code);
                                     }
                                 }
                             }
@@ -1666,8 +1666,15 @@ pub fn Journal(comptime DB: type) type {
 
         /// Returns true if the address has any non-zero storage in the DB.
         /// Used by CREATE collision check; returns false for DB types without this method.
-        pub fn hasNonZeroStorageForAddress(self: *const @This(), addr: primitives.Address) bool {
-            if (comptime @hasDecl(DB, "hasNonZeroStorageForAddress")) return self.getDb().hasNonZeroStorageForAddress(addr);
+        ///
+        /// Propagates on a database error rather than answering "no storage here":
+        /// that would let a CREATE succeed at an address the reference rejects. The
+        /// caller (which owns ctx_error) marks the block invalid. Infallible
+        /// databases (InMemoryDB) are unaffected.
+        pub fn hasNonZeroStorageForAddress(self: *const @This(), addr: primitives.Address) !bool {
+            if (comptime @hasDecl(DB, "hasNonZeroStorageForAddress")) {
+                return self.getDb().hasNonZeroStorageForAddress(addr);
+            }
             return false;
         }
 
