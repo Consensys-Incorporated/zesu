@@ -119,9 +119,7 @@ pub const testing = struct {
 };
 
 // `zig build test` only collects tests from a module's root file, so tests living
-// in the other files of this module are invisible unless referenced here. Without
-// this block, everything in journal.zig — including the swallowed-database-error
-// channel — is silently untested even when `context` is in build.zig's test list.
+// in the other files of this module are invisible unless referenced here.
 test {
-    _ = @import("journal.zig");
+    _ = @import("journal_tests.zig");
 }
