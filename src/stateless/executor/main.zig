@@ -50,6 +50,9 @@ test {
     // every declaration through semantic analysis, so a signature change that
     // misses a call site fails `zig build test`.
     std.testing.refAllDecls(@This());
+    // transition_tests.zig is a leaf test file nothing else imports, so it must be
+    // referenced explicitly to be pulled into the test graph.
+    _ = @import("./transition_tests.zig");
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
