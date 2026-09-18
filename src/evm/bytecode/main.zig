@@ -768,11 +768,10 @@ fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
     // Analyze bytecode to find JUMPDEST positions.
     //
     // Byte-serial by necessity: a PUSH carries immediates, so the next opcode's
-    // position depends on this one. A SWAR fast path that skipped whole words
-    // holding neither a JUMPDEST nor a PUSH was tried and cost 9.4% on a real
-    // block -- PUSH is roughly a quarter of contract bytes, so an eight-byte
-    // window is clean only ~10% of the time and the probe is pure overhead on
-    // the rest. revm walks this serially too.
+    // position depends on this one. Anecdotally a SWAR fast path that skipped 
+    // whole words cost 9.4% on a real block because PUSH is roughly a quarter 
+    // of contract bytes, so an eight-byte window is clean only ~10% of the time
+    // and the probe is pure overhead on the rest.
     while (i < bytecode.len) {
         const opcode = bytecode[i];
 
