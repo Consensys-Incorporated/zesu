@@ -246,9 +246,9 @@ fn loadFromJson(my_io: std.Io, allocator: std.mem.Allocator, block_path: []const
 fn printUsage() void {
     std.debug.print(
         \\usage:
-        \\  zevm_stateless [--fork F]                              # SSZ from zkvm_io (default / zkVM)
-        \\  zevm_stateless --ssz <file> [--fork F]                 # SSZ binary file
-        \\  zevm_stateless --json <block.json> <witness.json> [--fork F]
+        \\  zesu [--fork F]                              # SSZ from zkvm_io (default / zkVM)
+        \\  zesu --ssz <file> [--fork F]                 # SSZ binary file
+        \\  zesu --json <block.json> <witness.json> [--fork F]
         \\
     , .{});
 }

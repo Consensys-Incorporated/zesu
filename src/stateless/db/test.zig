@@ -276,7 +276,7 @@ test "codeByHash returns contract bytecode from witness.codes" {
     defer wdb.deinit();
     const code = try wdb.codeByHash(code_hash);
     try std.testing.expect(!code.isEmpty());
-    try std.testing.expectEqualSlices(u8, contract_code, code.bytecode());
+    try std.testing.expectEqualSlices(u8, contract_code, code.bytes());
 }
 
 // ─── Test 6: storage — slot value found (flat pool) ───────────────────────────

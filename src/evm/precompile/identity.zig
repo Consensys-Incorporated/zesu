@@ -28,7 +28,6 @@ pub fn identityRun(input: []const u8, gas_limit: u64) main.PrecompileResult {
     // Must return an owned copy: the caller's RETURNDATACOPY would alias their own
     // execution memory if we returned `input` directly (input is a slice of the
     // caller's memory buffer).
-    const output = alloc_mod.get().dupe(u8, input) catch
-        return main.PrecompileResult{ .err = main.PrecompileError.OutOfGas };
+    const output = alloc_mod.get().dupe(u8, input) catch @panic("out of memory");
     return main.PrecompileResult{ .success = main.PrecompileOutput.new(gas_used, output) };
 }
