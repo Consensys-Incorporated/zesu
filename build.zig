@@ -602,6 +602,7 @@ pub fn build(b: *std.Build) void {
             .{ .m = mods.rlp_decode, .name = "rlp_decode" },
             .{ .m = mods.executor, .name = "executor" },
             .{ .m = mods.hardfork, .name = "hardfork" },
+            .{ .m = mods.primitives, .name = "primitives" },
         }) |t| {
             const tst = b.addTest(.{ .root_module = t.m });
             _ = t.name;
