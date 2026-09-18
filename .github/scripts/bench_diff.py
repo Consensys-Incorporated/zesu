@@ -119,6 +119,7 @@ def main():
     ap.add_argument("--base-sha", default="")
     ap.add_argument("--head-sha", default="")
     ap.add_argument("--corpus", default="")
+    ap.add_argument("--label", default="", help="Object/target label, e.g. 'ZisK (rv64im+Zbb+Zbs)'")
     # Detail pass (single vector, `ziskemu -X -S`): optional, so the aggregate
     # comparison still renders if the detail run was skipped or failed.
     ap.add_argument("--base-report")
@@ -170,7 +171,8 @@ def main():
         verdict = f"{headline:+.3f}% total"
     # Flag staleness in the heading as well as the note below: the heading is
     # what shows in the PR timeline without expanding anything.
-    out.append(f"### Benchmark {mark(headline)} {verdict}{' — ⚠️ stale' if stale else ''}")
+    heading = f"### Benchmark{' — ' + args.label if args.label else ''}"
+    out.append(f"{heading} {mark(headline)} {verdict}{' — ⚠️ stale' if stale else ''}")
     out.append("")
     out.append(f"`{args.head_sha[:12]}` vs merge-base `{args.base_sha[:12]}` over "
                f"{len(keys)} block(s){f' of {args.corpus}' if args.corpus else ''}.")
