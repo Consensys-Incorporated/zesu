@@ -376,6 +376,11 @@ pub fn executeBlockStateless(
         fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
 
     const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals), parent_header, spec);
+    // Set the block's random seed from prevRandao before anything that consumes it
+    // runs — currently AddressContext.hash, via any AddressContext-keyed map
+    // (evm_state, warm addresses, the bal_* maps, ...) — see
+    // primitives.setBlockRandomSeed.
+    primitives.setBlockRandomSeed(env.random orelse [_]u8{0} ** 32);
     try block_validation.validateBlock(env, spec);
     const txs = try tx_decode.decodeTxsFromInput(alloc, ep.transactions);
 
