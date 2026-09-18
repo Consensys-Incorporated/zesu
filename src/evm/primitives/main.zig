@@ -1,5 +1,9 @@
 const std = @import("std");
 
+test {
+    _ = @import("address_context_tests.zig");
+}
+
 /// Core primitive types and constants for the Ethereum Virtual Machine (EVM) implementation.
 /// This module provides:
 /// - EVM constants and limits (gas, stack, code size)
@@ -36,6 +40,29 @@ pub inline fn mix64(x: u64) u64 {
     return h ^ (h >> 32);
 }
 
+/// Per-block randomness, set once at the start of block execution from that
+/// block's `prevRandao` (see `setBlockRandomSeed`). `prevRandao` itself isn't
+/// specific to any one consumer — it's the block's general source of
+/// unpredictable-until-proposal entropy — so this is exposed as a plain seed
+/// any in-guest code can read, not a field named after its first user.
+///
+/// `AddressContext.hash` is the current consumer: it needs a seed that isn't
+/// knowable to a transaction author in advance (see there for why), and this
+/// is the block-level value available for that. Defaults to 0 pre-block-setup
+/// (e.g. in unit tests that never call `setBlockRandomSeed`), which degrades
+/// gracefully rather than failing — see `AddressContext.hash`.
+var block_random_seed: u64 = 0;
+
+/// Sets the per-block random seed from that block's `prevRandao`. Call once per
+/// block, before anything that reads `block_random_seed` runs — currently just
+/// `AddressContext.hash`, which every `AddressContext`-keyed map (`EvmState`,
+/// `WarmAddresses`, the `bal_*` maps, `WitnessDatabase.storage_root_cache`,
+/// `Precompiles.inner`, ...) depends on, but that's an implementation detail of
+/// today's only consumer, not a constraint on future ones.
+pub fn setBlockRandomSeed(prev_randao: Hash) void {
+    block_random_seed = std.mem.readInt(u64, prev_randao[0..8], .little);
+}
+
 /// Hash context for HashMap keyed on Address ([20]u8).
 ///
 /// Addresses are NOT uniformly distributed: only keccak-derived ones are. CREATE2
@@ -46,19 +73,26 @@ pub inline fn mix64(x: u64) u64 {
 /// every probe fell through to the 20-byte `eql` — quadratic in the size of the
 /// colliding group, across all ~38 maps built on this context at once.
 ///
-/// So mix all 20 bytes: three loads and a multiply-xor chain, ending in a fold that
-/// carries the high half's entropy down into the bucket bits.
+/// A first fix (mixing all 20 bytes via a fixed XOR-fold of rotations, then a
+/// murmur3-style avalanche) turned out not to close this: the fold is linear over
+/// GF(2), and any caller can supply raw address bytes directly — `BALANCE`,
+/// `EXTCODESIZE`, `EXTCODEHASH`, `EXTCODECOPY` and the `CALL` family all take an
+/// unchecked, unvalidated 20-byte operand off the stack, no keccak preimage needed.
+/// A linear reduction from 160 bits down to 64 lets an attacker solve for a whole
+/// coset of colliding addresses in closed-form linear algebra, not brute force —
+/// reconstructing the same O(n^2) probe blow-up this context exists to prevent.
+///
+/// So: `Wyhash`, seeded from the block's random seed (`block_random_seed`, set via
+/// `setBlockRandomSeed`). Wyhash's internal mixing folds via a full 128-bit multiply
+/// with the high/low halves XORed together, which has no cheap closed-form inverse
+/// the way XOR/rotate does — finding a collision against a *known* seed means
+/// brute-force search at the birthday bound, not algebra. The seed then means that
+/// search has to be redone roughly every epoch (`prevRandao` isn't
+/// attacker-predictable further ahead than that) rather than once, ever, against a
+/// constant baked into the open-source hash.
 pub const AddressContext = struct {
     pub fn hash(_: @This(), key: Address) u64 {
-        const lo = std.mem.readInt(u64, key[0..8], .little);
-        const mid = std.mem.readInt(u64, key[8..16], .little);
-        const hi: u64 = std.mem.readInt(u32, key[16..20], .little);
-        // Fold all 20 bytes, then avalanche. The rotations are odd and unequal so
-        // chunks holding the same bytes don't cancel (without them lo == mid folds
-        // to just `hi`). They don't make the fold injective — it's linear over
-        // GF(2) — which is fine: addresses come from keccak, so a caller can't
-        // supply a chosen preimage.
-        return mix64(lo ^ std.math.rotl(u64, mid, 27) ^ std.math.rotl(u64, hi, 13));
+        return std.hash.Wyhash.hash(block_random_seed, &key);
     }
     pub fn eql(_: @This(), a: Address, b: Address) bool {
         return std.mem.eql(u8, &a, &b);
@@ -438,17 +472,16 @@ pub const testing = struct {
         const mask: u64 = n - 1;
 
         // Bytes each shape varies, for i < 4096 — a mixer can be blind to one
-        // chunk while handling the others:
+        // region of the address while handling the others:
         //
-        //   tail, prefixed_tail   18-19  -> hi (the latter over a 0xAB background)
-        //   lo_high_bits           6-7   -> top of lo, low 48 bits zero
-        //   mid_word               8-9   -> mid
-        //   head_only              2-3   -> low half of lo
+        //   tail, prefixed_tail   18-19  -> low tail (the latter over a 0xAB background)
+        //   lo_high_bits           6-7   -> mid-low region, low 48 bits zero
+        //   mid_word               8-9   -> middle region
+        //   head_only              2-3   -> head region
         //
-        // `lo_high_bits` earns the second multiply in `mix64`: a lone multiply
-        // can't carry entropy downwards, so it puts all 4096 keys in one bucket.
-        // Don't move it to addr[8..16] — that drops the entropy into bits 0-15 and
-        // the shape stops discriminating. `mid_word` is what covers `mid`.
+        // These are regression shapes carried over from the pre-Wyhash mixers that
+        // broke on one of them each; kept so a future swap can't quietly reintroduce
+        // the same blind spot.
         const Shape = enum { tail, prefixed_tail, lo_high_bits, mid_word, head_only };
         for (std.enums.values(Shape)) |shape| {
             var seen = [_]bool{false} ** n;
