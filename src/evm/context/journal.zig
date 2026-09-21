@@ -63,12 +63,12 @@ pub const AccountPreState = struct {
 /// Ownership of the maps is transferred by `JournalInner.takeAccessLog()`.
 pub const AccessLog = struct {
     /// Pre-block account states (nonce, balance, code_hash) for all accessed addresses.
-    accounts: std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80),
+    accounts: primitives.AddressTrieManaged(AccountPreState),
     /// Pre-block storage values for all accessed slots.
-    storage: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80),
+    storage: primitives.AddressTrieManaged(std.AutoHashMap(primitives.StorageKey, primitives.StorageValue)),
     /// Slots that were committed to a value different from the pre-block value at any tx boundary.
     /// Used to distinguish storageChanges from storageReads for cross-tx net-zero writes.
-    committed_changed: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void), primitives.AddressContext, 80),
+    committed_changed: primitives.AddressTrieManaged(std.AutoHashMap(primitives.StorageKey, void)),
 
     pub fn deinit(self: *@This()) void {
         self.accounts.deinit();
@@ -222,13 +222,13 @@ pub const WarmAddresses = struct {
     /// a u64 alone or a max-index scalar would either miss it or falsely warm
     /// the large gap between 0x12 and 0x100.
     precompile_bitset: [5]u64,
-    access_list: std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80),
+    access_list: primitives.AddressTrieManaged(std.ArrayList(primitives.StorageKey)),
 
     pub fn new() WarmAddresses {
         return .{
             .coinbase = null,
             .precompile_bitset = .{0} ** 5,
-            .access_list = std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80).init(alloc_mod.get()),
+            .access_list = primitives.AddressTrieManaged(std.ArrayList(primitives.StorageKey)).init(alloc_mod.get()),
         };
     }
 
@@ -248,7 +248,7 @@ pub const WarmAddresses = struct {
         self.precompile_bitset = bitset;
     }
 
-    pub fn setAccessList(self: *WarmAddresses, access_list: std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80)) !void {
+    pub fn setAccessList(self: *WarmAddresses, access_list: primitives.AddressTrieManaged(std.ArrayList(primitives.StorageKey))) !void {
         // Clear existing access list
         var iterator = self.access_list.iterator();
         while (iterator.next()) |entry| {
@@ -261,7 +261,7 @@ pub const WarmAddresses = struct {
         while (new_iterator.next()) |entry| {
             var storage_keys = std.ArrayList(primitives.StorageKey).empty;
             try storage_keys.appendSlice(alloc_mod.get(), entry.value_ptr.items);
-            try self.access_list.put(entry.key_ptr.*, storage_keys);
+            try self.access_list.put(entry.key, storage_keys);
         }
     }
 
@@ -445,20 +445,20 @@ pub const JournalInner = struct {
 
     // ── EIP-7928 BAL tracking ──────────────────────────────────────────────────
     // Permanently committed account pre-states (survive across txs in a block).
-    bal_pre_accounts: std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80),
+    bal_pre_accounts: primitives.AddressTrieManaged(AccountPreState),
     // Permanently committed storage pre-states.
-    bal_pre_storage: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80),
+    bal_pre_storage: primitives.AddressTrieManaged(std.AutoHashMap(primitives.StorageKey, primitives.StorageValue)),
     // Per-tx staging: flushed on commitTx, cleared on discardTx.
-    bal_pending_accounts: std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80),
-    bal_pending_storage: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80),
+    bal_pending_accounts: primitives.AddressTrieManaged(AccountPreState),
+    bal_pending_storage: primitives.AddressTrieManaged(std.AutoHashMap(primitives.StorageKey, primitives.StorageValue)),
     // Slots committed to a non-pre-block value at any tx boundary.
-    bal_committed_changed: std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void), primitives.AddressContext, 80),
+    bal_committed_changed: primitives.AddressTrieManaged(std.AutoHashMap(primitives.StorageKey, void)),
     // EIP-7928: addresses whose account was loaded via loadAccountMutOptionalCode
     // (the reference's get_account_optional). This is the reference's `account_reads`
     // set, which — unioned with account_writes and storage — determines BAL membership.
     // Crucially it EXCLUDES accounts merely created (never read), so a same-tx
     // create+selfdestruct ephemeral does not appear in the BAL. Block-scoped.
-    bal_account_reads: std.HashMap(primitives.Address, void, primitives.AddressContext, 80),
+    bal_account_reads: primitives.AddressTrieManaged(void),
 
     pub fn new() JournalInner {
         return .{
@@ -470,12 +470,12 @@ pub const JournalInner = struct {
             .spec = primitives.SpecId.prague,
             .warm_addresses = WarmAddresses.new(),
             .pending_burns = std.ArrayList(PendingBurn).empty,
-            .bal_pre_accounts = std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80).init(alloc_mod.get()),
-            .bal_pre_storage = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80).init(alloc_mod.get()),
-            .bal_pending_accounts = std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80).init(alloc_mod.get()),
-            .bal_pending_storage = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80).init(alloc_mod.get()),
-            .bal_committed_changed = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void), primitives.AddressContext, 80).init(alloc_mod.get()),
-            .bal_account_reads = std.HashMap(primitives.Address, void, primitives.AddressContext, 80).init(alloc_mod.get()),
+            .bal_pre_accounts = primitives.AddressTrieManaged(AccountPreState).init(alloc_mod.get()),
+            .bal_pre_storage = primitives.AddressTrieManaged(std.AutoHashMap(primitives.StorageKey, primitives.StorageValue)).init(alloc_mod.get()),
+            .bal_pending_accounts = primitives.AddressTrieManaged(AccountPreState).init(alloc_mod.get()),
+            .bal_pending_storage = primitives.AddressTrieManaged(std.AutoHashMap(primitives.StorageKey, primitives.StorageValue)).init(alloc_mod.get()),
+            .bal_committed_changed = primitives.AddressTrieManaged(std.AutoHashMap(primitives.StorageKey, void)).init(alloc_mod.get()),
+            .bal_account_reads = primitives.AddressTrieManaged(void).init(alloc_mod.get()),
         };
     }
 
@@ -555,15 +555,15 @@ pub const JournalInner = struct {
         // Flush remaining pending (e.g. if called after last tx without commitTx)
         var pa_it = self.bal_pending_accounts.iterator();
         while (pa_it.next()) |e| {
-            if (!self.bal_pre_accounts.contains(e.key_ptr.*)) {
-                self.bal_pre_accounts.put(e.key_ptr.*, e.value_ptr.*) catch {};
+            if (!self.bal_pre_accounts.contains(e.key)) {
+                self.bal_pre_accounts.put(e.key, e.value_ptr.*) catch {};
             }
         }
         self.bal_pending_accounts.clearRetainingCapacity();
 
         var ps_it = self.bal_pending_storage.iterator();
         while (ps_it.next()) |e| {
-            const addr = e.key_ptr.*;
+            const addr = e.key;
             var slot_it = e.value_ptr.iterator();
             while (slot_it.next()) |s| {
                 const pre_gop = self.bal_pre_storage.getOrPut(addr) catch continue;
@@ -581,9 +581,9 @@ pub const JournalInner = struct {
             .storage = self.bal_pre_storage,
             .committed_changed = self.bal_committed_changed,
         };
-        self.bal_pre_accounts = std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80).init(alloc_mod.get());
-        self.bal_pre_storage = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, primitives.StorageValue), primitives.AddressContext, 80).init(alloc_mod.get());
-        self.bal_committed_changed = std.HashMap(primitives.Address, std.AutoHashMap(primitives.StorageKey, void), primitives.AddressContext, 80).init(alloc_mod.get());
+        self.bal_pre_accounts = primitives.AddressTrieManaged(AccountPreState).init(alloc_mod.get());
+        self.bal_pre_storage = primitives.AddressTrieManaged(std.AutoHashMap(primitives.StorageKey, primitives.StorageValue)).init(alloc_mod.get());
+        self.bal_committed_changed = primitives.AddressTrieManaged(std.AutoHashMap(primitives.StorageKey, void)).init(alloc_mod.get());
         return log;
     }
 
@@ -642,15 +642,15 @@ pub const JournalInner = struct {
         {
             var pa_it = self.bal_pending_accounts.iterator();
             while (pa_it.next()) |e| {
-                if (!self.bal_pre_accounts.contains(e.key_ptr.*)) {
-                    self.bal_pre_accounts.put(e.key_ptr.*, e.value_ptr.*) catch {};
+                if (!self.bal_pre_accounts.contains(e.key)) {
+                    self.bal_pre_accounts.put(e.key, e.value_ptr.*) catch {};
                 }
             }
             self.bal_pending_accounts.clearRetainingCapacity();
 
             var ps_it = self.bal_pending_storage.iterator();
             while (ps_it.next()) |e| {
-                const addr = e.key_ptr.*;
+                const addr = e.key;
                 var slot_it = e.value_ptr.iterator();
                 while (slot_it.next()) |s| {
                     const pre_gop = self.bal_pre_storage.getOrPut(addr) catch continue;
@@ -1512,7 +1512,7 @@ pub fn Journal(comptime DB: type) type {
             return self.inner.selfdestruct(self.getDbMut(), address, target);
         }
 
-        pub fn warmAccessList(self: *@This(), access_list: std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80)) !void {
+        pub fn warmAccessList(self: *@This(), access_list: primitives.AddressTrieManaged(std.ArrayList(primitives.StorageKey))) !void {
             try self.inner.warm_addresses.setAccessList(access_list);
         }
 

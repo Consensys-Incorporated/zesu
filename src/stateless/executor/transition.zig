@@ -15,12 +15,14 @@ const handler_mod = @import("handler");
 const input = @import("executor_types");
 const bloom = @import("bloom.zig");
 
-/// Address-keyed map using the tuned AddressContext rather than Zig's auto-derived hash and
-/// equality for [20]u8. BaTracker keys almost everything by address and touches these maps on
-/// every state access, so the generic context showed up as a large share of BAL tracking.
-fn AddrMap(comptime V: type) type {
-    return std.HashMapUnmanaged(input.Address, V, primitives.AddressContext, 80);
-}
+/// Address-keyed structure for BaTracker's per-address bookkeeping. A path-compressed radix
+/// trie (address_trie.zig), not a hashmap: BaTracker keys almost everything by address and
+/// touches these on every state access, and a hashmap's worst-case cost here is bounded by an
+/// attacker's ability to collide whatever hash buckets it -- which, for the realistic capacity
+/// these structures reach in one block, is cheap regardless of hash quality or seeding (see
+/// primitives.AddressContext's docs, and address_trie.zig's). A trie has no hash to collide;
+/// its worst case is bounded by the address length instead.
+const AddrMap = primitives.AddressTrie;
 const rlp = @import("./rlp_encode.zig");
 const precompile_mod = @import("precompile");
 const accel = @import("accelerators");
@@ -152,7 +154,7 @@ const BaTracker = struct {
         const filter_by_tx = bai > 0;
         var it = ctx.journaled_state.inner.evm_state.iterator();
         while (it.next()) |e| {
-            const addr = e.key_ptr.*;
+            const addr = e.key;
             const acct = e.value_ptr.*;
             if (filter_by_tx and acct.transaction_id < from_tx_id) continue;
             if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
@@ -282,7 +284,7 @@ const BaTracker = struct {
         // Update committed state to current evm_state (only accounts touched this tx).
         var it2 = ctx.journaled_state.inner.evm_state.iterator();
         while (it2.next()) |e| {
-            const addr = e.key_ptr.*;
+            const addr = e.key;
             const acct = e.value_ptr.*;
             if (filter_by_tx and acct.transaction_id < from_tx_id) continue;
             if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
@@ -322,7 +324,7 @@ const BaTracker = struct {
         {
             var it = ctx.journaled_state.inner.evm_state.iterator();
             while (it.next()) |e| {
-                const addr = e.key_ptr.*;
+                const addr = e.key;
                 // Hoisted: the changed-slot map for this address is loop-invariant, so look it
                 // up once per account rather than once per slot.
                 const chg_for_addr = self.slot_chg.get(addr);
@@ -349,7 +351,7 @@ const BaTracker = struct {
         {
             var it = self.selfdestruct_reads.iterator();
             while (it.next()) |e| {
-                const addr = e.key_ptr.*;
+                const addr = e.key;
                 // Hoisted -- see above.
                 const chg_for_addr = self.slot_chg.get(addr);
                 // Resolved once per account -- see above.
@@ -378,27 +380,26 @@ const BaTracker = struct {
         var all_addrs = AddrMap(void).empty;
         {
             var it = ctx.journaled_state.inner.bal_account_reads.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+            while (it.next()) |k| all_addrs.put(a, k, {}) catch {};
         }
         {
             var it = self.slot_chg.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+            while (it.next()) |k| all_addrs.put(a, k, {}) catch {};
         }
         {
             var it = storage_reads.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+            while (it.next()) |k| all_addrs.put(a, k, {}) catch {};
         }
         // Include selfdestruct_reads addresses (ephemeral accounts with storage reads).
         {
             var it = self.selfdestruct_reads.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+            while (it.next()) |k| all_addrs.put(a, k, {}) catch {};
         }
 
         var entries = std.ArrayListUnmanaged(bal_mod.EncodeEntry).empty;
 
         var addr_it = all_addrs.keyIterator();
-        while (addr_it.next()) |addr_ptr| {
-            const addr = addr_ptr.*;
+        while (addr_it.next()) |addr| {
 
             // bal-devnet-7: SYSTEM_ADDRESS is included if a user tx touched it
             // (BALANCE/EXTCODE*/CALL etc.) OR if it has real state changes / storage
@@ -1266,7 +1267,7 @@ pub fn transitionWithContext(
         while (del_it.next()) |e| {
             if (e.value_ptr.*.status.self_destructed) {
                 if (amsterdam_no_burn and e.value_ptr.*.info.balance != 0) continue;
-                try deleted.append(arena, e.key_ptr.*);
+                try deleted.append(arena, e.key);
             }
         }
     }
@@ -1406,7 +1407,7 @@ fn extractPostState(
 ) !std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) {
     // Start with a mutable copy of pre_alloc (use arena allocation for storage maps)
     var post = std.AutoHashMapUnmanaged(input.Address, input.AllocAccount).empty;
-    try post.ensureTotalCapacity(arena, pre_alloc.count() + ctx.journaled_state.inner.evm_state.count());
+    try post.ensureTotalCapacity(arena, @intCast(pre_alloc.count() + ctx.journaled_state.inner.evm_state.count()));
 
     // Clone all pre-state accounts
     var pre_it = pre_alloc.iterator();
@@ -1432,7 +1433,7 @@ fn extractPostState(
     // Override with evm_state (all accounts touched during execution)
     var state_it = ctx.journaled_state.inner.evm_state.iterator();
     while (state_it.next()) |state_entry| {
-        const addr = state_entry.key_ptr.*;
+        const addr = state_entry.key;
         const account = state_entry.value_ptr.*;
 
         // Skip accounts that were loaded as non-existent and never touched

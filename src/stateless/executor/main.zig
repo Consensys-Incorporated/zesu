@@ -151,7 +151,7 @@ pub fn buildAccessedEntries(
 
     var addr_iter = access_log.accounts.iterator();
     while (addr_iter.next()) |acc_kv| {
-        const address = acc_kv.key_ptr.*;
+        const address = acc_kv.key;
         // EIP-7928 (bal-devnet-7): SYSTEM_ADDRESS only appears in the BAL if a user
         // tx touched it OR it received ETH (balance change). Pre/post-block system
         // calls warm SYSTEM_ADDRESS (it is the caller) but those touches alone do
@@ -376,11 +376,6 @@ pub fn executeBlockStateless(
         fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
 
     const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals), parent_header, spec);
-    // Set the block's random seed from prevRandao before anything that consumes it
-    // runs — currently AddressContext.hash, via any AddressContext-keyed map
-    // (evm_state, warm addresses, the bal_* maps, ...) — see
-    // primitives.setBlockRandomSeed.
-    primitives.setBlockRandomSeed(env.random orelse [_]u8{0} ** 32);
     try block_validation.validateBlock(env, spec);
     const txs = try tx_decode.decodeTxsFromInput(alloc, ep.transactions);
 
