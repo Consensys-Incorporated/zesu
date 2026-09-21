@@ -2,7 +2,12 @@ const std = @import("std");
 
 test {
     _ = @import("address_context_tests.zig");
+    _ = @import("address_trie_tests.zig");
 }
+
+const address_trie = @import("address_trie.zig");
+pub const AddressTrie = address_trie.AddressTrie;
+pub const AddressTrieManaged = address_trie.AddressTrieManaged;
 
 /// Core primitive types and constants for the Ethereum Virtual Machine (EVM) implementation.
 /// This module provides:
@@ -40,59 +45,29 @@ pub inline fn mix64(x: u64) u64 {
     return h ^ (h >> 32);
 }
 
-/// Per-block randomness, set once at the start of block execution from that
-/// block's `prevRandao` (see `setBlockRandomSeed`). `prevRandao` itself isn't
-/// specific to any one consumer — it's the block's general source of
-/// unpredictable-until-proposal entropy — so this is exposed as a plain seed
-/// any in-guest code can read, not a field named after its first user.
-///
-/// `AddressContext.hash` is the current consumer: it needs a seed that isn't
-/// knowable to a transaction author in advance (see there for why), and this
-/// is the block-level value available for that. Defaults to 0 pre-block-setup
-/// (e.g. in unit tests that never call `setBlockRandomSeed`), which degrades
-/// gracefully rather than failing — see `AddressContext.hash`.
-var block_random_seed: u64 = 0;
-
-/// Sets the per-block random seed from that block's `prevRandao`. Call once per
-/// block, before anything that reads `block_random_seed` runs — currently just
-/// `AddressContext.hash`, which every `AddressContext`-keyed map (`EvmState`,
-/// `WarmAddresses`, the `bal_*` maps, `WitnessDatabase.storage_root_cache`,
-/// `Precompiles.inner`, ...) depends on, but that's an implementation detail of
-/// today's only consumer, not a constraint on future ones.
-pub fn setBlockRandomSeed(prev_randao: Hash) void {
-    block_random_seed = std.mem.readInt(u64, prev_randao[0..8], .little);
-}
-
 /// Hash context for HashMap keyed on Address ([20]u8).
 ///
-/// Addresses are NOT uniformly distributed: only keccak-derived ones are. CREATE2
-/// salts, synthetic test addresses and precompiles all share leading bytes, and an
-/// address prefix is attacker-influenceable. Truncating `key[0..8]` mapped every
-/// address agreeing on its first eight bytes to one identical u64, which collides in
-/// both the bucket index (`hash & mask`) and the 7-bit fingerprint (`hash >> 57`), so
-/// every probe fell through to the 20-byte `eql` — quadratic in the size of the
-/// colliding group, across all ~38 maps built on this context at once.
+/// No longer used by anything in the zkVM guest path: `EvmState`, `WarmAddresses`, the
+/// `bal_*` maps, `WitnessDatabase.storage_root_cache`, `Precompiles`, and `BaTracker`'s own
+/// per-address maps all moved to `AddressTrie`/`AddressTrieManaged` (address_trie.zig) — a
+/// path-compressed radix trie with no hash function to collide at all, so no seed and no
+/// choice of hash function is needed there. See address_trie.zig's docs for why: a
+/// hashmap's worst-case cost here is bounded by an attacker's ability to collide whatever
+/// hash buckets it, and that bound (`log2(capacity) + 7` fingerprint bits — see
+/// `std.HashMapUnmanaged`'s own comments) stayed small regardless of hash quality or
+/// per-block seeding, because it's set by the realistic size these maps reach in one block,
+/// not by the hash's nominal width; worse, a seed drawn from `prevRandao` is, by
+/// construction, known to whoever produces the block before they finalize its contents, so
+/// it doesn't defend against the attacker that actually matters here.
 ///
-/// A first fix (mixing all 20 bytes via a fixed XOR-fold of rotations, then a
-/// murmur3-style avalanche) turned out not to close this: the fold is linear over
-/// GF(2), and any caller can supply raw address bytes directly — `BALANCE`,
-/// `EXTCODESIZE`, `EXTCODEHASH`, `EXTCODECOPY` and the `CALL` family all take an
-/// unchecked, unvalidated 20-byte operand off the stack, no keccak preimage needed.
-/// A linear reduction from 160 bits down to 64 lets an attacker solve for a whole
-/// coset of colliding addresses in closed-form linear algebra, not brute force —
-/// reconstructing the same O(n^2) probe blow-up this context exists to prevent.
-///
-/// So: `Wyhash`, seeded from the block's random seed (`block_random_seed`, set via
-/// `setBlockRandomSeed`). Wyhash's internal mixing folds via a full 128-bit multiply
-/// with the high/low halves XORed together, which has no cheap closed-form inverse
-/// the way XOR/rotate does — finding a collision against a *known* seed means
-/// brute-force search at the birthday bound, not algebra. The seed then means that
-/// search has to be redone roughly every epoch (`prevRandao` isn't
-/// attacker-predictable further ahead than that) rather than once, ever, against a
-/// constant baked into the open-source hash.
+/// The remaining consumer is native-only tooling (`database.InMemoryDB`), which doesn't face
+/// that threat model (no attacker is trying to make a local dev tool's block proving
+/// unprovable), so a plain — not seeded — Wyhash is a perfectly reasonable choice for it:
+/// still real mixing (see address_trie.zig's docs on why a linear fold isn't enough), just
+/// without the now-pointless per-block seed machinery.
 pub const AddressContext = struct {
     pub fn hash(_: @This(), key: Address) u64 {
-        return std.hash.Wyhash.hash(block_random_seed, &key);
+        return std.hash.Wyhash.hash(0, &key);
     }
     pub fn eql(_: @This(), a: Address, b: Address) bool {
         return std.mem.eql(u8, &a, &b);

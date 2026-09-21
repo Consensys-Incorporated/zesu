@@ -56,7 +56,7 @@ pub const WitnessDatabase = struct {
     /// Eliminates redundant account trie walks in storage() and in the post-execution
     /// batch update (storageRootFor). Accounts absent from pre-state are cached as
     /// EMPTY_TRIE_HASH so the batch output phase skips verifyAccountIndexed for them.
-    storage_root_cache: std.HashMap(primitives.Address, primitives.Hash, primitives.AddressContext, 80),
+    storage_root_cache: primitives.AddressTrieManaged(primitives.Hash),
 
     const Self = @This();
 
@@ -79,7 +79,7 @@ pub const WitnessDatabase = struct {
             .witness_codes = witness_codes,
             .block_hashes = block_hashes,
             .deployed_codes = std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80).init(alloc),
-            .storage_root_cache = std.HashMap(primitives.Address, primitives.Hash, primitives.AddressContext, 80).init(alloc),
+            .storage_root_cache = primitives.AddressTrieManaged(primitives.Hash).init(alloc),
         };
     }
 
