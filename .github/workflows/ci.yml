@@ -239,6 +239,18 @@ jobs:
         working-directory: zesu-zkvm/zisk
         run: make test ZESU_OBJ=$GITHUB_WORKSPACE/zesu/zig-out/lib/zesu.o
 
+      # Same guest logic, plus the Zbb/Zbs bitmanip extensions ZisK's
+      # transpiler and cost model support natively (see PRs #117, #119).
+      # Exercised separately from zesu.o above so a Zbb/Zbs-specific
+      # correctness regression can't hide behind the baseline object's pass.
+      - name: Build the zisk guest object (rv64im + Zbb + Zbs)
+        working-directory: zesu
+        run: zig build zisk-object -Doptimize=ReleaseFast
+
+      - name: Run zisk guest vectors (Zbb/Zbs object)
+        working-directory: zesu-zkvm/zisk
+        run: make test ZESU_OBJ=$GITHUB_WORKSPACE/zesu/zig-out/lib/zesu-zisk.o
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
