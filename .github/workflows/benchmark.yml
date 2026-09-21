@@ -284,6 +284,7 @@ jobs:
             steps.shas.outputs.zkvm }}-${{ runner.os }}
 
       - name: Build merge-base ELF
+        id: base-elf
         if: steps.cache-base-elf.outputs.cache-hit != 'true'
         env:
           BUILD_STEP: ${{ matrix.build_step }}
@@ -291,16 +292,20 @@ jobs:
         run: |
           set -euo pipefail
           cd base
-          # The merge-base can predate this build step (e.g. when benchmarking
-          # the PR that introduces it) — fall back to rv64im-object, what ZisK
-          # actually built against at that commit, rather than erroring on an
-          # unknown step.
-          if zig build -l | grep -q "^  $BUILD_STEP "; then
+          # zig build -l writes to stderr; redirect so grep can see it.
+          if zig build -l 2>&1 | grep -q "^  $BUILD_STEP "; then
             zig build "$BUILD_STEP" -Doptimize=ReleaseFast
             base_obj="zig-out/lib/$OBJ_FILE"
-          else
+          elif [ "$BUILD_STEP" = "rv64im-object" ]; then
+            # rv64im-object always exists; this branch shouldn't be reached.
             zig build rv64im-object -Doptimize=ReleaseFast
             base_obj=zig-out/lib/zesu.o
+          else
+            # merge-base predates this build step — no like-for-like baseline.
+            # Linking the rv64im fallback through the HEAD zisk linker fails
+            # because the ABI may have diverged; skip the comparison instead.
+            echo "no_base=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           cd ..
           (cd zesu-zkvm/zisk && zig build -Doptimize=ReleaseFast \
