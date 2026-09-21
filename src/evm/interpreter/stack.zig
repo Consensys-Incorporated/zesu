@@ -191,9 +191,12 @@ pub const Stack = struct {
 
     /// Duplicate a value without bounds checking
     pub fn dupUnsafe(self: *Stack, n: usize) void {
-        // Read `length` once — see pushUnsafe.
         const sp = self.length;
-        self.data[sp] = self.data[sp - n];
+        primitives.dma.copyFixed(
+            32,
+            std.mem.asBytes(&self.data[sp]),
+            std.mem.asBytes(&self.data[sp - n]),
+        );
         self.length = sp + 1;
     }
 
@@ -201,9 +204,12 @@ pub const Stack = struct {
     pub fn swapUnsafe(self: *Stack, n: usize) void {
         const top_idx = self.length - 1;
         const swap_idx = top_idx - n;
-        const temp = self.data[top_idx];
-        self.data[top_idx] = self.data[swap_idx];
-        self.data[swap_idx] = temp;
+        var temp: [32]u8 = undefined;
+        const top = std.mem.asBytes(&self.data[top_idx]);
+        const other = std.mem.asBytes(&self.data[swap_idx]);
+        primitives.dma.copyFixed(32, &temp, top);
+        primitives.dma.copyFixed(32, top, other);
+        primitives.dma.copyFixed(32, other, &temp);
     }
 
     /// Shrink the stack by n elements without bounds checking
