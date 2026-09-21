@@ -313,6 +313,7 @@ jobs:
           cp zesu-zkvm/zisk/zig-out/bin/zesu-zisk elf-base
 
       - name: Build PR head ELF
+        if: steps.base-elf.outputs.no_base != 'true'
         env:
           BUILD_STEP: ${{ matrix.build_step }}
           OBJ_FILE: ${{ matrix.obj_file }}
@@ -328,6 +329,7 @@ jobs:
           ls -l elf-base elf-head
 
       - name: Fetch corpus blocks
+        if: steps.base-elf.outputs.no_base != 'true'
         env:
           BLOCKS: ${{ steps.req.outputs.blocks }}
         run: |
@@ -357,10 +359,12 @@ jobs:
           find corpus/blockchain_tests -name '*.json' | wc -l
 
       - name: Build the harness
+        if: steps.base-elf.outputs.no_base != 'true'
         working-directory: harness
         run: go build -o "$GITHUB_WORKSPACE/bench" ./bench
 
       - name: Run benchmark
+        if: steps.base-elf.outputs.no_base != 'true'
         run: |
           set -euo pipefail
           for v in base head; do
@@ -379,6 +383,7 @@ jobs:
       # moved, while the corpus above says how much.
       - name: Detail pass
         id: detail
+        if: steps.base-elf.outputs.no_base != 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -398,6 +403,7 @@ jobs:
       # numbers as current.
       - name: Re-read the PR head
         id: now
+        if: steps.base-elf.outputs.no_base != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -408,6 +414,7 @@ jobs:
 
       - name: Render comparison
         id: diff
+        if: steps.base-elf.outputs.no_base != 'true'
         env:
           DETAIL_LABEL: ${{ steps.detail.outputs.label }}
           BASE_SHA: ${{ steps.shas.outputs.base }}
@@ -444,7 +451,32 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           done
 
+      - name: Post no-baseline notice
+        if: steps.base-elf.outputs.no_base == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.req.outputs.pr }}
+          MATRIX_KEY: ${{ matrix.key }}
+          MATRIX_LABEL: ${{ matrix.label }}
+        run: |
+          set -euo pipefail
+          marker="<!-- zesu-benchmark:$MATRIX_KEY -->"
+          body="### Benchmark — $MATRIX_LABEL"$'\n\n'
+          body+="No baseline available: the merge-base predates the \`$MATRIX_KEY\` build step, "
+          body+="so a like-for-like comparison cannot be produced."$'\n'
+          body+="$marker"
+          existing=$(gh api --paginate \
+            "repos/$REPO/issues/$PR/comments" \
+            --jq "[.[] | select(.body | contains(\"$marker\"))] | last | .id // empty")
+          if [ -n "$existing" ]; then
+            gh api "repos/$REPO/issues/comments/$existing" -X PATCH -f body="$body"
+          else
+            gh api "repos/$REPO/issues/$PR/comments" -f body="$body"
+          fi
+
       - name: Post result
+        if: steps.base-elf.outputs.no_base != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
