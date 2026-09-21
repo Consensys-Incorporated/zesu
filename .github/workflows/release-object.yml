@@ -1,9 +1,11 @@
-name: Release rv64im Object
+name: Release rv64im Objects
 
-# Builds the relocatable zesu.rv64im.o ELF artifact and opens a draft GitHub
-# Release so it can be consumed by zesu-zkvm targets without a source dependency.
+# Builds the relocatable rv64im guest ELF artifacts — the zkvm-standards
+# baseline (zesu.rv64im.o) and the ZisK variant with Zbb/Zbs added
+# (zesu.zisk.o, see PRs #117, #119) — and opens a draft GitHub Release so
+# either can be consumed by zesu-zkvm targets without a source dependency.
 #
-# Trigger manually from Actions → "Release rv64im Object" → Run workflow.
+# Trigger manually from Actions → "Release rv64im Objects" → Run workflow.
 # Provide the version tag (e.g. v0.2.0); the release is created as a draft so
 # it can be reviewed and published manually.
 
@@ -20,7 +22,7 @@ permissions:
 
 jobs:
   build-and-release:
-    name: Build zesu.rv64im.o and create draft release
+    name: Build guest objects and create draft release
     runs-on: ubuntu-latest
 
     steps:
@@ -35,21 +37,29 @@ jobs:
       - name: Build rv64im relocatable object
         run: zig build rv64im-object -Doptimize=ReleaseFast
 
-      - name: Stage artifact
+      - name: Build zisk relocatable object (rv64im + Zbb + Zbs)
+        run: zig build zisk-object -Doptimize=ReleaseFast
+
+      - name: Stage artifacts
         run: |
           mkdir -p output
           cp zig-out/lib/zesu.o output/zesu.rv64im.o
+          cp zig-out/lib/zesu-zisk.o output/zesu.zisk.o
 
-      - name: Verify artifact
+      - name: Verify artifacts
         run: |
-          file output/zesu.rv64im.o
-          nm output/zesu.rv64im.o | grep " U " | sort || true
+          for f in output/zesu.rv64im.o output/zesu.zisk.o; do
+            file "$f"
+            nm "$f" | grep " U " | sort || true
+          done
 
-      - name: Upload workflow artifact
+      - name: Upload workflow artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: zesu.rv64im.o
-          path: output/zesu.rv64im.o
+          name: rv64im-objects
+          path: |
+            output/zesu.rv64im.o
+            output/zesu.zisk.o
           if-no-files-found: error
 
       - name: Create draft GitHub Release
@@ -64,4 +74,5 @@ jobs:
             --target "$GITHUB_SHA" \
             --generate-notes \
             --draft \
-            output/zesu.rv64im.o
+            output/zesu.rv64im.o \
+            output/zesu.zisk.o

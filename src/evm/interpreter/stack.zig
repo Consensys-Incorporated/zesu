@@ -166,8 +166,11 @@ pub const Stack = struct {
 
     /// Push a value without bounds checking
     pub fn pushUnsafe(self: *Stack, value: primitives.U256) void {
-        self.data[self.length] = value;
-        self.length += 1;
+        // Read `length` once. The 32-byte store through `data` may alias this struct as far
+        // as the compiler can tell, so a second read of the field becomes a reload.
+        const sp = self.length;
+        self.data[sp] = value;
+        self.length = sp + 1;
     }
 
     /// Pop a value without bounds checking
@@ -188,15 +191,16 @@ pub const Stack = struct {
 
     /// Duplicate a value without bounds checking
     pub fn dupUnsafe(self: *Stack, n: usize) void {
-        const value = self.data[self.length - n];
-        self.data[self.length] = value;
-        self.length += 1;
+        // Read `length` once — see pushUnsafe.
+        const sp = self.length;
+        self.data[sp] = self.data[sp - n];
+        self.length = sp + 1;
     }
 
     /// Swap top with nth element without bounds checking
     pub fn swapUnsafe(self: *Stack, n: usize) void {
         const top_idx = self.length - 1;
-        const swap_idx = self.length - 1 - n;
+        const swap_idx = top_idx - n;
         const temp = self.data[top_idx];
         self.data[top_idx] = self.data[swap_idx];
         self.data[swap_idx] = temp;

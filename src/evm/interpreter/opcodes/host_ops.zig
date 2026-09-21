@@ -183,7 +183,7 @@ pub fn opExtcodecopy(ctx: *InstructionContext) void {
     const size_u: usize = @intCast(size);
     const new_size = mem_off_u + size_u; // valid: overflow already checked above
 
-    const code = info.bytecode.bytecode();
+    const code = info.bytecode.bytes();
     const dest = ctx.interpreter.memory.buffer.items[mem_off_u..new_size];
 
     if (code_off > std.math.maxInt(usize)) {
@@ -513,10 +513,7 @@ pub fn makeLogFn(comptime n: u8) *const fn (ctx: *InstructionContext) void {
             const topics: []primitives.Hash = if (comptime n == 0)
                 &[_]primitives.Hash{}
             else blk: {
-                const t = alloc_mod.get().alloc(primitives.Hash, n) catch {
-                    ctx.interpreter.halt(.out_of_gas);
-                    return;
-                };
+                const t = alloc_mod.get().alloc(primitives.Hash, n) catch @panic("out of memory");
                 inline for (0..n) |i| {
                     const topic_val = stack.peekUnsafe(2 + i);
                     t[i] = host_module.u256ToHash(topic_val);
@@ -532,11 +529,7 @@ pub fn makeLogFn(comptime n: u8) *const fn (ctx: *InstructionContext) void {
             const log_end = offset_u + size_u; // won't overflow: expandMemory already checked this
             const log_data: []const u8 = if (size_u > 0) blk: {
                 const src = ctx.interpreter.memory.buffer.items[offset_u..log_end];
-                const copy = alloc_mod.get().dupe(u8, src) catch {
-                    if (comptime n > 0) alloc_mod.get().free(topics);
-                    ctx.interpreter.halt(.out_of_gas);
-                    return;
-                };
+                const copy = alloc_mod.get().dupe(u8, src) catch @panic("out of memory");
                 break :blk copy;
             } else &[_]u8{};
 
