@@ -136,7 +136,8 @@ def main():
     out = []
 
     if not keys:
-        print("### Benchmark\n\nNo comparable blocks were produced.")
+        heading = f"### Benchmark — {args.label}" if args.label else "### Benchmark"
+        print(f"{heading}\n\nNo comparable blocks were produced.")
         return 1
 
     # Correctness first: a perf table for a build that computed the wrong root
