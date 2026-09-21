@@ -151,7 +151,7 @@ pub fn buildAccessedEntries(
 
     var addr_iter = access_log.accounts.iterator();
     while (addr_iter.next()) |acc_kv| {
-        const address = acc_kv.key_ptr.*;
+        const address = acc_kv.key;
         // EIP-7928 (bal-devnet-7): SYSTEM_ADDRESS only appears in the BAL if a user
         // tx touched it OR it received ETH (balance change). Pre/post-block system
         // calls warm SYSTEM_ADDRESS (it is the caller) but those touches alone do

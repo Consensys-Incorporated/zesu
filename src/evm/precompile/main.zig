@@ -221,9 +221,9 @@ pub fn u64ToAddress(value: u64) primitives.Address {
 /// Precompiles collection
 pub const Precompiles = struct {
     /// Inner HashMap of precompiles
-    inner: std.HashMap(primitives.Address, Precompile, primitives.AddressContext, 80),
+    inner: primitives.AddressTrieManaged(Precompile),
     /// Addresses of precompiles
-    addresses: std.HashMap(primitives.Address, void, primitives.AddressContext, 80),
+    addresses: primitives.AddressTrieManaged(void),
     /// Optimized access for short addresses
     optimized_access: [256]?Precompile,
     /// Whether all precompiles are short addresses
@@ -236,8 +236,8 @@ pub const Precompiles = struct {
     /// Create new precompiles collection
     pub fn new() Precompiles {
         return Precompiles{
-            .inner = std.HashMap(primitives.Address, Precompile, primitives.AddressContext, 80).init(alloc_mod.get()),
-            .addresses = std.HashMap(primitives.Address, void, primitives.AddressContext, 80).init(alloc_mod.get()),
+            .inner = primitives.AddressTrieManaged(Precompile).init(alloc_mod.get()),
+            .addresses = primitives.AddressTrieManaged(void).init(alloc_mod.get()),
             .optimized_access = [_]?Precompile{null} ** 256,
             .all_short_addresses = true,
             .precompile_bitset = .{0} ** 5,
