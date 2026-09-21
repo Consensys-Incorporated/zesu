@@ -37,7 +37,7 @@ pub inline fn opPushNImpl(ctx: *InstructionContext, comptime n: u8) void {
     // buffer, skipping the intermediate [n]u8 copy that readImmediates would allocate.
     var buf: [32]u8 = .{0} ** 32;
     const ext = &ctx.interpreter.bytecode;
-    const bytes = ext.bytecode.bytecode();
+    const bytes = ext.bytes();
     const pc = ext.pc;
     if (pc + n <= bytes.len) {
         @memcpy(buf[32 - n ..], bytes[pc .. pc + n]);

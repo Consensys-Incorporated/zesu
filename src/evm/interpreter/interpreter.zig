@@ -193,7 +193,7 @@ pub const RuntimeFlags = struct {
 
 /// Extended bytecode functionality
 pub const ExtBytecode = struct {
-    bytecode: bytecode.Bytecode,
+    inner: bytecode.Bytecode,
     pc: usize,
     /// Whether execution is still running (false after halt/stop/return)
     continue_execution: bool,
@@ -205,7 +205,7 @@ pub const ExtBytecode = struct {
     /// Borrow semantics: bytecode is shared with account state, will NOT be freed on deinit.
     pub fn new(bytecode_data: bytecode.Bytecode) ExtBytecode {
         return ExtBytecode{
-            .bytecode = bytecode_data,
+            .inner = bytecode_data,
             .pc = 0,
             .continue_execution = true,
             .owns_bytecode = false,
@@ -216,7 +216,7 @@ pub const ExtBytecode = struct {
     /// Use for CREATE init-code frames and test frames with locally-created bytecodes.
     pub fn newOwned(bytecode_data: bytecode.Bytecode) ExtBytecode {
         return ExtBytecode{
-            .bytecode = bytecode_data,
+            .inner = bytecode_data,
             .pc = 0,
             .continue_execution = true,
             .owns_bytecode = true,
@@ -225,7 +225,7 @@ pub const ExtBytecode = struct {
 
     pub fn default() ExtBytecode {
         return ExtBytecode{
-            .bytecode = bytecode.Bytecode.new(),
+            .inner = bytecode.Bytecode.new(),
             .pc = 0,
             .continue_execution = true,
             .owns_bytecode = false,
@@ -234,15 +234,15 @@ pub const ExtBytecode = struct {
 
     pub fn deinit(self: *ExtBytecode) void {
         if (self.owns_bytecode) {
-            self.bytecode.deinit();
+            self.inner.deinit();
         }
     }
 
     /// Read current opcode byte (returns 0x00/STOP if past end)
     pub fn opcode(self: *const ExtBytecode) u8 {
-        const bytes = self.bytecode.bytecode();
-        if (self.pc >= bytes.len) return 0x00;
-        return bytes[self.pc];
+        const b = self.inner.bytes();
+        if (self.pc >= b.len) return 0x00;
+        return b[self.pc];
     }
 
     /// Advance PC by delta bytes
@@ -257,14 +257,14 @@ pub const ExtBytecode = struct {
 
     /// Check if jump destination is a valid JUMPDEST
     pub fn isValidJump(self: *const ExtBytecode, dest: usize) bool {
-        return self.bytecode.isValidJump(dest);
+        return self.inner.isValidJump(dest);
     }
 
     /// Read a single immediate byte at current PC (returns 0 if past end of code)
     pub fn readImmediate(self: *const ExtBytecode) u8 {
-        const bytes = self.bytecode.bytecode();
-        if (self.pc >= bytes.len) return 0;
-        return bytes[self.pc];
+        const b = self.inner.bytes();
+        if (self.pc >= b.len) return 0;
+        return b[self.pc];
     }
 
     pub fn isNotEnd(self: *const ExtBytecode) bool {
@@ -272,11 +272,15 @@ pub const ExtBytecode = struct {
     }
 
     pub fn getBytecode(self: ExtBytecode) bytecode.Bytecode {
-        return self.bytecode;
+        return self.inner;
     }
 
     pub fn setBytecode(self: *ExtBytecode, bytecode_data: bytecode.Bytecode) void {
-        self.bytecode = bytecode_data;
+        self.inner = bytecode_data;
+    }
+
+    pub fn bytes(self: *const ExtBytecode) []const u8 {
+        return self.inner.bytes();
     }
 };
 
@@ -535,6 +539,18 @@ pub const Interpreter = struct {
 // against a median of 1,962 with ~80% of it in dispatch rather than the shift.
 // PUSH0 and the rest stay cold.
 
+/// Fetch the opcode at `pc` from an already-resolved code slice.
+///
+/// `ExtBytecode.opcode()` goes through `Bytecode.bytes()`, which switches on the
+/// Bytecode union tag and reloads ptr/len from the payload — on every single opcode
+/// fetch. The bytecode of a frame cannot change while its dispatch loop runs (CALL and
+/// CREATE build new frames; JUMP only moves pc), so runDispatch resolves the slice once
+/// and fetches through this instead.
+inline fn opcodeAt(code: []const u8, pc: usize) u8 {
+    if (pc >= code.len) return 0x00;
+    return code[pc];
+}
+
 fn runDispatch(
     self: *Interpreter,
     table: *const InstructionTable,
@@ -542,9 +558,11 @@ fn runDispatch(
     comptime check_pending: bool,
 ) void {
     if (!self.bytecode.isNotEnd()) return;
+    // Hoisted once per frame — see opcodeAt.
+    const code = self.bytecode.bytes();
     // EIP-145. Loop-invariant: spec_id is fixed for the frame.
     const has_shifts = primitives.isEnabledIn(self.runtime_flags.spec_id, .constantinople);
-    sw: switch (self.bytecode.opcode()) {
+    sw: switch (opcodeAt(code, self.bytecode.pc)) {
         0x00 => { // STOP
             self.bytecode.relativeJump(1);
             opcodes.opStop(ctx);
@@ -557,7 +575,7 @@ fn runDispatch(
             }
             opcodes.opAdd(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x02 => { // MUL
             self.bytecode.relativeJump(1);
@@ -567,7 +585,7 @@ fn runDispatch(
             }
             opcodes.opMul(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x03 => { // SUB
             self.bytecode.relativeJump(1);
@@ -577,7 +595,7 @@ fn runDispatch(
             }
             opcodes.opSub(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x10 => { // LT
             self.bytecode.relativeJump(1);
@@ -587,7 +605,7 @@ fn runDispatch(
             }
             opcodes.opLt(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x11 => { // GT
             self.bytecode.relativeJump(1);
@@ -597,7 +615,7 @@ fn runDispatch(
             }
             opcodes.opGt(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x14 => { // EQ
             self.bytecode.relativeJump(1);
@@ -607,7 +625,7 @@ fn runDispatch(
             }
             opcodes.opEq(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x15 => { // ISZERO
             self.bytecode.relativeJump(1);
@@ -617,7 +635,7 @@ fn runDispatch(
             }
             opcodes.opIsZero(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x16 => { // AND
             self.bytecode.relativeJump(1);
@@ -627,7 +645,7 @@ fn runDispatch(
             }
             opcodes.opAnd(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x17 => { // OR
             self.bytecode.relativeJump(1);
@@ -637,7 +655,7 @@ fn runDispatch(
             }
             opcodes.opOr(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x18 => { // XOR
             self.bytecode.relativeJump(1);
@@ -647,7 +665,7 @@ fn runDispatch(
             }
             opcodes.opXor(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x19 => { // NOT
             self.bytecode.relativeJump(1);
@@ -657,7 +675,7 @@ fn runDispatch(
             }
             opcodes.opNot(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         // SHL/SHR/SAR — fork-gated on Constantinople (EIP-145), see the note above.
         // When the gate is closed `coldStep` reads the table, which holds
@@ -672,7 +690,7 @@ fn runDispatch(
                 opcodes.opShl(ctx);
             } else if (!coldStep(self, table, ctx, 0x1B)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x1C => { // SHR
             self.bytecode.relativeJump(1);
@@ -684,7 +702,7 @@ fn runDispatch(
                 opcodes.opShr(ctx);
             } else if (!coldStep(self, table, ctx, 0x1C)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x1D => { // SAR
             self.bytecode.relativeJump(1);
@@ -696,7 +714,7 @@ fn runDispatch(
                 opcodes.opSar(ctx);
             } else if (!coldStep(self, table, ctx, 0x1D)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x50 => { // POP
             self.bytecode.relativeJump(1);
@@ -706,7 +724,7 @@ fn runDispatch(
             }
             opcodes.opPop(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         // MLOAD/MSTORE/MSTORE8 — Frontier, behaviour-stable, and all three charge
         // G_VERYLOW statically with memory expansion billed inside the handler,
@@ -719,7 +737,7 @@ fn runDispatch(
             }
             opcodes.opMload(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x52 => { // MSTORE
             self.bytecode.relativeJump(1);
@@ -729,7 +747,7 @@ fn runDispatch(
             }
             opcodes.opMstore(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x53 => { // MSTORE8
             self.bytecode.relativeJump(1);
@@ -739,7 +757,7 @@ fn runDispatch(
             }
             opcodes.opMstore8(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x56 => { // JUMP
             self.bytecode.relativeJump(1);
@@ -749,7 +767,7 @@ fn runDispatch(
             }
             opcodes.opJump(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x57 => { // JUMPI
             self.bytecode.relativeJump(1);
@@ -759,7 +777,7 @@ fn runDispatch(
             }
             opcodes.opJumpi(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         0x5B => { // JUMPDEST
             self.bytecode.relativeJump(1);
@@ -769,7 +787,7 @@ fn runDispatch(
             }
             opcodes.opJumpdest(ctx);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         // PUSH1..PUSH32: inlined opPushNImpl reads directly from the bytecode slice
         inline 0x60...0x7F => |push_op| {
@@ -781,7 +799,7 @@ fn runDispatch(
             }
             opcodes.opPushNImpl(ctx, n);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         // DUP1..DUP16: comptime N enables constant-folded depth checks
         inline 0x80...0x8F => |dup_op| {
@@ -793,7 +811,7 @@ fn runDispatch(
             }
             opcodes.opDupNImpl(ctx, n);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         // SWAP1..SWAP16: comptime N enables constant-folded depth checks
         inline 0x90...0x9F => |swap_op| {
@@ -805,17 +823,18 @@ fn runDispatch(
             }
             opcodes.opSwapNImpl(ctx, n);
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
         // Cold path: table lookup + indirect call.
         // Fork-gated opcodes (PUSH0, TLOAD/TSTORE etc.) land here and are handled
-        // correctly via the table — opUnknown on old forks, real handler on new
-        // forks. SHL/SHR/SAR reach it too whenever `has_shifts` is false.
-        else => |op| {
+        // correctly via the table — opUnknown on old forks, real handler on new forks.
+        // Naming every cold value explicitly (rather than using `else`) keeps the jump
+        // table dense over the whole u8 domain — no upper-bound compare needed.
+        0x04...0x0f, 0x12, 0x13, 0x1a, 0x1e, 0x1f, 0x20...0x4f, 0x54, 0x55, 0x58...0x5a, 0x5c...0x5f, 0xa0...0xff => |op| {
             self.bytecode.relativeJump(1);
             if (!coldStep(self, table, ctx, op)) return;
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw self.bytecode.opcode();
+                continue :sw opcodeAt(code, self.bytecode.pc);
         },
     }
 }

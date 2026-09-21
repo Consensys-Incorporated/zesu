@@ -42,7 +42,7 @@ fn runPendingCreate(host: *Host, interp: *Interpreter, spec: primitives.SpecId) 
                 sub.return_data.data
             else
                 &[_]u8{};
-            var rd_buf: std.ArrayList(u8) = .{};
+            var rd_buf: std.ArrayList(u8) = .empty;
             defer rd_buf.deinit(std.heap.c_allocator);
             rd_buf.appendSlice(std.heap.c_allocator, rd) catch {};
             const r = host.finalizeCreate(pc.checkpoint, pc.new_addr, sub.result, sub.gas.remaining, sub.gas.refunded, rd_buf.items, spec, true, sub.gas.reservoir);

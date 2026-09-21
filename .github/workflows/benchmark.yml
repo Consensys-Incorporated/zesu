@@ -1,7 +1,10 @@
 # On-demand guest benchmark. Comment `/benchmark` on a PR (optionally
 # `/benchmark 20` for a block count) and this builds the guest ELF at the PR
-# head and at its merge-base, runs both over the same devnet-8 blocks, and
-# posts the per-chip cost delta.
+# head and at its merge-base for each guest object variant (the zkvm-standards
+# rv64im baseline, and the ZisK-specific rv64im+Zbb+Zbs build — see
+# build.zig's `rv64im-object` / `zisk-object` steps), runs both over the same
+# devnet-8 blocks, and posts a separate per-chip cost delta comment for each
+# variant.
 #
 # Worth doing here because ZisK trace costs are deterministic: the same ELF on
 # the same input always bills the same cells, so a 0.05% move is real signal
@@ -51,7 +54,7 @@ env:
 
 jobs:
   bench:
-    name: Guest benchmark
+    name: Guest benchmark (${{ matrix.key }})
     # The author-association gate is required, not optional: this checks out
     # and runs PR code with a writable token.
     if: >
@@ -62,6 +65,18 @@ jobs:
                 github.event.comment.author_association))
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: rv64im
+            label: "rv64im (zkvm-standards baseline)"
+            build_step: rv64im-object
+            obj_file: zesu.o
+          - key: zisk
+            label: "ZisK (rv64im + Zbb + Zbs)"
+            build_step: zisk-object
+            obj_file: zesu-zisk.o
 
     steps:
       # `author_association` describes the commenter's relationship to the
@@ -262,32 +277,59 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: elf-base
+          # Keyed by matrix.key too: rv64im-object and zisk-object are different
+          # ELFs for the same base sha and must never share a cache entry.
           key: >-
-            benchelf-${{ steps.shas.outputs.base }}-${{ steps.zisk.outputs.version }}-${{
+            benchelf-${{ matrix.key }}-${{ steps.shas.outputs.base }}-${{ steps.zisk.outputs.version }}-${{
             steps.shas.outputs.zkvm }}-${{ runner.os }}
 
       - name: Build merge-base ELF
+        id: base-elf
         if: steps.cache-base-elf.outputs.cache-hit != 'true'
+        env:
+          BUILD_STEP: ${{ matrix.build_step }}
+          OBJ_FILE: ${{ matrix.obj_file }}
         run: |
           set -euo pipefail
-          (cd base && zig build rv64im-object -Doptimize=ReleaseFast)
+          cd base
+          # zig build -l writes to stderr; redirect so grep can see it.
+          if zig build -l 2>&1 | grep -q "^  $BUILD_STEP "; then
+            zig build "$BUILD_STEP" -Doptimize=ReleaseFast
+            base_obj="zig-out/lib/$OBJ_FILE"
+          elif [ "$BUILD_STEP" = "rv64im-object" ]; then
+            # rv64im-object always exists; this branch shouldn't be reached.
+            zig build rv64im-object -Doptimize=ReleaseFast
+            base_obj=zig-out/lib/zesu.o
+          else
+            # merge-base predates this build step — no like-for-like baseline.
+            # Linking the rv64im fallback through the HEAD zisk linker fails
+            # because the ABI may have diverged; skip the comparison instead.
+            echo "no_base=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cd ..
           (cd zesu-zkvm/zisk && zig build -Doptimize=ReleaseFast \
-            -Dzesu_obj="$GITHUB_WORKSPACE/base/zig-out/lib/zesu.o")
+            -Dzesu_obj="$GITHUB_WORKSPACE/base/$base_obj")
           cp zesu-zkvm/zisk/zig-out/bin/zesu-zisk elf-base
 
       - name: Build PR head ELF
+        if: steps.base-elf.outputs.no_base != 'true'
+        env:
+          BUILD_STEP: ${{ matrix.build_step }}
+          OBJ_FILE: ${{ matrix.obj_file }}
         run: |
           set -euo pipefail
-          (cd head && zig build rv64im-object -Doptimize=ReleaseFast)
+          (cd head && zig build "$BUILD_STEP" -Doptimize=ReleaseFast)
           # Remove the previous link output: a failed build otherwise leaves a
           # stale ELF behind and the benchmark silently measures the old one.
           rm -f zesu-zkvm/zisk/zig-out/bin/zesu-zisk
           (cd zesu-zkvm/zisk && zig build -Doptimize=ReleaseFast \
-            -Dzesu_obj="$GITHUB_WORKSPACE/head/zig-out/lib/zesu.o")
+            -Dzesu_obj="$GITHUB_WORKSPACE/head/zig-out/lib/$OBJ_FILE")
           cp zesu-zkvm/zisk/zig-out/bin/zesu-zisk elf-head
           ls -l elf-base elf-head
 
       - name: Fetch corpus blocks
+        if: steps.base-elf.outputs.no_base != 'true'
         env:
           BLOCKS: ${{ steps.req.outputs.blocks }}
         run: |
@@ -317,10 +359,12 @@ jobs:
           find corpus/blockchain_tests -name '*.json' | wc -l
 
       - name: Build the harness
+        if: steps.base-elf.outputs.no_base != 'true'
         working-directory: harness
         run: go build -o "$GITHUB_WORKSPACE/bench" ./bench
 
       - name: Run benchmark
+        if: steps.base-elf.outputs.no_base != 'true'
         run: |
           set -euo pipefail
           for v in base head; do
@@ -339,6 +383,7 @@ jobs:
       # moved, while the corpus above says how much.
       - name: Detail pass
         id: detail
+        if: steps.base-elf.outputs.no_base != 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -358,6 +403,7 @@ jobs:
       # numbers as current.
       - name: Re-read the PR head
         id: now
+        if: steps.base-elf.outputs.no_base != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -368,11 +414,13 @@ jobs:
 
       - name: Render comparison
         id: diff
+        if: steps.base-elf.outputs.no_base != 'true'
         env:
           DETAIL_LABEL: ${{ steps.detail.outputs.label }}
           BASE_SHA: ${{ steps.shas.outputs.base }}
           HEAD_SHA: ${{ steps.shas.outputs.head }}
           CURRENT_HEAD: ${{ steps.now.outputs.head }}
+          OBJECT_LABEL: ${{ matrix.label }}
         run: |
           set +e
           detail=""
@@ -386,7 +434,8 @@ jobs:
             --base base.csv --head head.csv \
             --base-sha "$BASE_SHA" \
             --head-sha "$HEAD_SHA" \
-            --corpus "$CORPUS" $detail > comment.md
+            --corpus "$CORPUS" \
+            --label "$OBJECT_LABEL" $detail > comment.md
           echo "status=$?" >> "$GITHUB_OUTPUT"
 
           # The run summary has a 1 MB budget against the comment's 64 KB, so
@@ -402,14 +451,42 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           done
 
-      - name: Post result
+      - name: Post no-baseline notice
+        if: steps.base-elf.outputs.no_base == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ steps.req.outputs.pr }}
+          MATRIX_KEY: ${{ matrix.key }}
+          MATRIX_LABEL: ${{ matrix.label }}
         run: |
           set -euo pipefail
-          marker='<!-- zesu-benchmark -->'
+          marker="<!-- zesu-benchmark:$MATRIX_KEY -->"
+          body="### Benchmark — $MATRIX_LABEL"$'\n\n'
+          body+="No baseline available: the merge-base predates the \`$MATRIX_KEY\` build step, "
+          body+="so a like-for-like comparison cannot be produced."$'\n'
+          body+="$marker"
+          existing=$(gh api --paginate \
+            "repos/$REPO/issues/$PR/comments" \
+            --jq "[.[] | select(.body | contains(\"$marker\"))] | last | .id // empty")
+          if [ -n "$existing" ]; then
+            gh api "repos/$REPO/issues/comments/$existing" -X PATCH -f body="$body"
+          else
+            gh api "repos/$REPO/issues/$PR/comments" -f body="$body"
+          fi
+
+      - name: Post result
+        if: steps.base-elf.outputs.no_base != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.req.outputs.pr }}
+          MATRIX_KEY: ${{ matrix.key }}
+        run: |
+          set -euo pipefail
+          # Per-variant marker: rv64im and zisk each get their own comment,
+          # updated in place on repeat runs rather than overwriting each other.
+          marker="<!-- zesu-benchmark:$MATRIX_KEY -->"
           printf '%s\n' "$marker" >> comment.md
           # Update in place so repeated runs don't bury the PR in comments.
           existing=$(gh api --paginate \
@@ -454,7 +531,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: benchmark-${{ steps.req.outputs.pr }}-${{ steps.shas.outputs.head }}
+          name: benchmark-${{ steps.req.outputs.pr }}-${{ steps.shas.outputs.head }}-${{ matrix.key }}
           path: |
             base.csv
             head.csv
@@ -469,7 +546,7 @@ jobs:
       # Perf movement never fails the run; a wrong payload root or a block that
       # did not execute does, so a broken PR cannot read as a clean benchmark.
       - name: Fail on correctness divergence
-        if: steps.diff.outputs.status != '0'
+        if: steps.diff.outcome == 'success' && steps.diff.outputs.status != '0'
         run: |
           echo "Benchmark found a correctness divergence — see the PR comment."
           exit 1

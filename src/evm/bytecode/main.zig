@@ -542,9 +542,9 @@ pub const Bytecode = union(enum) {
                 if (self.isEmpty()) {
                     return primitives.KECCAK_EMPTY;
                 }
-                const bytes = self.originalBytes();
+                const raw = self.originalBytes();
                 var hash: primitives.Hash = undefined;
-                accel.keccak256(bytes, &hash);
+                accel.keccak256(raw, &hash);
                 return hash;
             },
         }
@@ -563,8 +563,8 @@ pub const Bytecode = union(enum) {
         return Self{ .legacy_analyzed = LegacyRawBytecode.init(raw).intoAnalyzed() };
     }
 
-    /// Returns a reference to the bytecode.
-    pub fn bytecode(self: *const Self) []const u8 {
+    /// Returns a reference to the bytecode bytes.
+    pub fn bytes(self: *const Self) []const u8 {
         return switch (self.*) {
             .legacy_analyzed => |*analyzed| analyzed.getBytecode(),
             .eip7702 => |*code| code.raw(),
@@ -573,7 +573,7 @@ pub const Bytecode = union(enum) {
 
     /// Returns raw bytes slice.
     pub fn bytesSlice(self: *const Self) []const u8 {
-        return self.bytecode();
+        return self.bytes();
     }
 
     /// Returns the original bytecode.
@@ -753,19 +753,18 @@ fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
 
     // Allocate bit vector on heap (one bit per bytecode position) to avoid dangling pointer
     const bit_vec_len = (bytecode.len + 7) / 8;
-    const bit_vec = alloc_mod.get().alloc(u8, bit_vec_len) catch {
-        // Allocation failed: return bytecode with empty jump table
-        return LegacyAnalyzedBytecode{
-            .bytecode = bytecode,
-            .original_len = bytecode.len,
-            .jump_table = JumpTable.init(),
-        };
-    };
+    const bit_vec = alloc_mod.get().alloc(u8, bit_vec_len) catch @panic("out of memory");
     @memset(bit_vec, 0);
 
     var i: usize = 0;
 
-    // Analyze bytecode to find JUMPDEST positions
+    // Analyze bytecode to find JUMPDEST positions.
+    //
+    // Byte-serial by necessity: a PUSH carries immediates, so the next opcode's
+    // position depends on this one. Anecdotally a SWAR fast path that skipped
+    // whole words cost 9.4% on a real block because PUSH is roughly a quarter
+    // of contract bytes, so an eight-byte window is clean only ~10% of the time
+    // and the probe is pure overhead on the rest.
     while (i < bytecode.len) {
         const opcode = bytecode[i];
 
@@ -818,3 +817,7 @@ pub const testing = struct {
         try std.testing.expectEqual(@as(usize, 1), bytecode.len());
     }
 };
+
+test {
+    _ = @import("bytecode_tests.zig");
+}

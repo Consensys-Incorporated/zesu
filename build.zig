@@ -1,5 +1,13 @@
 const std = @import("std");
 
+/// Selects the crypto accelerator implementation.
+///   default — native host crypto (default.zig, dynamically linked C libs)
+///   extern  — zkvm-standards extern ABI (extern_bridge.zig, zkvm_* symbols resolved at link by the consumer)
+const CryptoBackend = enum {
+    default,
+    @"extern",
+};
+
 /// The set of modules produced by `buildModules`. The exposable ones are registered
 /// via `addModule` (retrievable by dependents through `dep.module(name)`) when
 /// `expose` is true; `accel_impl`, `executor_types`, `zkvm_io` and `zkvm_root` stay private.
@@ -33,11 +41,13 @@ const ModuleSet = struct {
 
 /// Create (and optionally expose) zesu's whole module graph for a single target.
 ///
-/// Backends are selected by target so the same call serves native builds and zkVM guests:
-///   accel_impl = freestanding ? extern_bridge.zig : default.zig
-///   zkvm_io    = freestanding ? extern_io.zig     : io/interface.zig
+/// Two independent axes select implementations, one per caller-supplied parameter:
+///   accel_impl = crypto_backend == extern ? extern_bridge.zig : default.zig
+///   zkvm_io    = guest                    ? extern_io.zig     : io/interface.zig
+/// `guest` is true only for the rv64im-object build
+///
 /// The allocator root is supplied by the caller (`allocator.zig` settable singleton for the
-/// exposed graph; `bump_alloc.zig` for the standalone rv64im object).
+/// exposed graph; `alt_fl_alloc.zig` for the standalone rv64im object).
 fn buildModules(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -45,8 +55,10 @@ fn buildModules(
     expose: bool,
     alloc_root: std.Build.LazyPath,
     crypto_prefix: []const u8,
+    crypto_backend: CryptoBackend,
+    guest: bool,
 ) ModuleSet {
-    const freestanding = target.result.os.tag == .freestanding;
+    const use_extern = crypto_backend == .@"extern";
 
     const mkmod = struct {
         fn f(bb: *std.Build, exp: bool, name: []const u8, opts: std.Build.Module.CreateOptions) *std.Build.Module {
@@ -70,11 +82,11 @@ fn buildModules(
     // accel_impl is a private leaf: native crypto (default.zig) or the zkvm-standards extern
     // bridge (extern_bridge.zig, whose zkvm_* symbols the host resolves at link).
     const accel_impl = b.createModule(.{
-        .root_source_file = b.path(if (freestanding) "src/crypto/extern_bridge.zig" else "src/crypto/default.zig"),
+        .root_source_file = b.path(if (use_extern) "src/crypto/extern_bridge.zig" else "src/crypto/default.zig"),
         .target = target,
         .optimize = optimize,
     });
-    if (!freestanding) {
+    if (!use_extern) {
         accel_impl.addImport("zesu_allocator", zesu_allocator);
         // default.zig @cImports system crypto headers (e.g. secp256k1.h). C include paths are
         // per-module and don't cross the dependency boundary, so set it on the accel_impl module
@@ -280,9 +292,9 @@ fn buildModules(
     executor.addImport("accelerators", accelerators);
 
     // zkvm_io is private: native stdin/env (io/interface.zig) or the extern C-ABI refs
-    // (zkvm/extern_io.zig) the zkVM host resolves at link.
+    // (zkvm/extern_io.zig) the zkVM host resolves at link. Selected by the `guest` parameter
     const zkvm_io = b.createModule(.{
-        .root_source_file = b.path(if (freestanding) "src/zkvm/extern_io.zig" else "src/io/interface.zig"),
+        .root_source_file = b.path(if (guest) "src/zkvm/extern_io.zig" else "src/io/interface.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -298,7 +310,7 @@ fn buildModules(
     runner.addImport("zkvm_io", zkvm_io);
 
     var zkvm_root: ?*std.Build.Module = null;
-    if (freestanding) {
+    if (guest) {
         // zkvm_root stays PRIVATE (never addModule'd). It wires the full turnkey object
         // (runner + extern IO + allocator) and exports main(). It must NOT be exposed: the
         // exposed graph roots `zesu_allocator` on the settable singleton, and a consumer
@@ -344,20 +356,19 @@ fn buildModules(
     };
 }
 
-/// Link the native crypto C libraries onto a host exe/test.
-/// No-op for freestanding targets (their crypto symbols are externs resolved by the zkVM host).
+/// Link libc and, for the default backend, native crypto C libraries onto a host exe/test.
 fn addCryptoLibraries(
     step: *std.Build.Step.Compile,
-    target: std.Build.ResolvedTarget,
+    crypto_backend: CryptoBackend,
     inc: []const u8,
     blst: []const u8,
     mcl: []const u8,
     linux: bool,
 ) void {
-    if (target.result.os.tag == .freestanding) return;
+    step.root_module.linkSystemLibrary("c", .{});
+    if (crypto_backend == .@"extern") return;
 
     step.root_module.addIncludePath(.{ .cwd_relative = inc });
-    step.root_module.linkSystemLibrary("c", .{});
     step.root_module.linkSystemLibrary("m", .{});
     step.root_module.linkSystemLibrary("secp256k1", .{});
     step.root_module.linkSystemLibrary("ssl", .{});
@@ -388,9 +399,56 @@ fn addRunStep(
     step.dependOn(&cmd.step);
 }
 
+/// Build a relocatable rv64im ELF guest object (zkvm-standards ABI: IO, crypto, heap and
+/// logging left as unresolved externs) on the freestanding riscv64 baseline plus
+/// `extra_features`, and wire an install step named `step_name` that publishes it to
+/// `install_name` under zig-out. Shared by `rv64im-object` and `zisk-object`, which differ
+/// only in which optional ISA extensions ride on top of the shared baseline.
+fn addRv64imObjectStep(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+    crypto_prefix: []const u8,
+    extra_features: []const std.Target.riscv.Feature,
+    step_name: []const u8,
+    step_desc: []const u8,
+    install_name: []const u8,
+) void {
+    const rv64im_target = b.resolveTargetQuery(.{
+        .cpu_arch = .riscv64,
+        .cpu_model = .{ .explicit = &std.Target.riscv.cpu.baseline_rv64 },
+        .cpu_features_add = std.Target.riscv.featureSet(extra_features),
+        .cpu_features_sub = std.Target.riscv.featureSet(&.{ .a, .c, .zca, .zcb, .d, .f, .zicsr, .zaamo, .zalrsc }),
+        .os_tag = .freestanding,
+        .abi = .none,
+    });
+
+    const obj_mods = buildModules(b, rv64im_target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), crypto_prefix, .@"extern", true);
+
+    const rv64_obj = b.addObject(.{
+        .name = "zesu",
+        .root_module = obj_mods.zkvm_root.?,
+    });
+    rv64_obj.root_module.code_model = .medium;
+
+    const obj_step = b.step(step_name, step_desc);
+    const install_obj = b.addInstallFile(rv64_obj.getEmittedBin(), install_name);
+    obj_step.dependOn(&install_obj.step);
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    const crypto_backend = b.option(
+        CryptoBackend,
+        "crypto-backend",
+        "Crypto accelerator backend: selects the crypto implementation (default: default)",
+    ) orelse CryptoBackend.default;
+    // default.zig @cImports system crypto headers and needs libc; neither exists on a
+    // freestanding target, so this combination can never build. Fail fast with an actionable
+    // message rather than a bare "header not found" three @cImports deep.
+    if (target.result.os.tag == .freestanding and crypto_backend == .default)
+        std.debug.panic("freestanding targets require -Dcrypto-backend=extern (no libc/system crypto headers available)", .{});
 
     // ── Platform detection ────────────────────────────────────────────────────
     const is_linux = b.graph.host.result.os.tag == .linux;
@@ -410,209 +468,235 @@ pub fn build(b: *std.Build) void {
     const libblst_path = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
     const libmcl_path = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
 
-    // ── Module graph (exposed via addModule; backends selected by target) ──────
-    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix);
+    // ── Module graph (exposed via addModule; backend selected by option) ──────
+    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend, false);
 
-    // ── zesu binary ───────────────────────────────────────────────────────────
-    const stateless_exe = b.addExecutable(.{
-        .name = "zesu",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/stateless/stateless/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    stateless_exe.root_module.addImport("rlp_decode", mods.rlp_decode);
-    stateless_exe.root_module.addImport("input", mods.input);
-    stateless_exe.root_module.addImport("mpt", mods.mpt);
-    stateless_exe.root_module.addImport("executor", mods.executor);
-    stateless_exe.root_module.addImport("zesu_allocator", mods.zesu_allocator);
-    stateless_exe.root_module.addImport("zkvm_io", mods.zkvm_io);
-    stateless_exe.root_module.addImport("ssz_decode", mods.ssz_decode);
-    stateless_exe.root_module.addImport("accelerators", mods.accelerators);
-    stateless_exe.root_module.addImport("primitives", mods.primitives);
-    stateless_exe.root_module.addImport("hardfork", mods.hardfork);
-    addCryptoLibraries(stateless_exe, target, crypto_include, libblst_path, libmcl_path, is_linux);
-    b.installArtifact(stateless_exe);
-    addRunStep(b, "run", "Run the zesu app", stateless_exe, &.{});
-
-    // ── t8n: Ethereum State Transition Tool ───────────────────────────────────
-    const t8n_input_module = b.createModule(.{
-        .root_source_file = b.path("tools/t8n/input.zig"),
+    // ── Host artifacts ────────────────────────────────────────────────────────
+    //
+    // extern backend: compile the stateless binary as a relocatable object so a
+    // consumer (e.g. Linea with CTT) can link the unresolved zkvm_* crypto symbols
+    // against their own static library. All other tooling is omitted — it cannot
+    // be linked without a symbol provider.
+    //
+    // default backend: build the fully-linked zesu binary plus all supporting
+    // tools and unit tests.
+    const host_io = b.createModule(.{
+        .root_source_file = b.path("src/io/interface.zig"),
         .target = target,
         .optimize = optimize,
     });
-    t8n_input_module.addImport("executor", mods.executor);
-
-    const t8n_exe = b.addExecutable(.{
-        .name = "t8n",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/t8n/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    t8n_exe.root_module.addImport("executor", mods.executor);
-    t8n_exe.root_module.addImport("hardfork", mods.hardfork);
-    addCryptoLibraries(t8n_exe, target, crypto_include, libblst_path, libmcl_path, is_linux);
-    b.installArtifact(t8n_exe);
-    addRunStep(b, "t8n", "Run the t8n state transition tool", t8n_exe, &.{});
-
-    // ── spec-test-runner ──────────────────────────────────────────────────────
-    const spec_test_exe = b.addExecutable(.{
-        .name = "spec-test-runner",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/spec_test/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    spec_test_exe.root_module.addImport("t8n_input", t8n_input_module);
-    spec_test_exe.root_module.addImport("executor", mods.executor);
-    spec_test_exe.root_module.addImport("hardfork", mods.hardfork);
-    addCryptoLibraries(spec_test_exe, target, crypto_include, libblst_path, libmcl_path, is_linux);
-    b.installArtifact(spec_test_exe);
-    addRunStep(b, "state-tests", "Run execution-spec-tests state fixtures", spec_test_exe, &.{});
-
-    // ── blockchain-test-runner ────────────────────────────────────────────────
-    const blockchain_runner_module = b.createModule(.{
-        .root_source_file = b.path("tools/blockchain_test/runner.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    blockchain_runner_module.addImport("primitives", mods.primitives);
-    blockchain_runner_module.addImport("executor", mods.executor);
-    blockchain_runner_module.addImport("mpt", mods.mpt);
-    blockchain_runner_module.addImport("hardfork", mods.hardfork);
-
-    const bc_test_exe = b.addExecutable(.{
-        .name = "blockchain-test-runner",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/blockchain_test/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    bc_test_exe.root_module.addImport("runner", blockchain_runner_module);
-    addCryptoLibraries(bc_test_exe, target, crypto_include, libblst_path, libmcl_path, is_linux);
-    b.installArtifact(bc_test_exe);
-    addRunStep(b, "blockchain-tests", "Run Ethereum blockchain test fixtures", bc_test_exe, &.{});
-
-    // ── zkevm-blockchain-test-runner ──────────────────────────────────────────
-    const zkevm_test_exe = b.addExecutable(.{
-        .name = "zkevm-blockchain-test-runner",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/zkevm_test/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    zkevm_test_exe.root_module.addImport("ssz_decode", mods.ssz_decode);
-    zkevm_test_exe.root_module.addImport("ssz_output", mods.ssz_output);
-    zkevm_test_exe.root_module.addImport("executor", mods.executor);
-    addCryptoLibraries(zkevm_test_exe, target, crypto_include, libblst_path, libmcl_path, is_linux);
-    b.installArtifact(zkevm_test_exe);
-    addRunStep(b, "zkevm-tests", "Run zkevm blockchain test fixtures", zkevm_test_exe, &.{ "--fixtures", "spec-tests/fixtures/zkevm/blockchain_tests" });
-
-    // ── hive-rlp: Hive consume-rlp execution client ───────────────────────────
-    const hive_exe = b.addExecutable(.{
-        .name = "hive-rlp",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/hive/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    hive_exe.root_module.addImport("primitives", mods.primitives);
-    hive_exe.root_module.addImport("executor", mods.executor);
-    hive_exe.root_module.addImport("hardfork", mods.hardfork);
-    hive_exe.root_module.addImport("mpt", mods.mpt);
-    addCryptoLibraries(hive_exe, target, crypto_include, libblst_path, libmcl_path, is_linux);
-    b.installArtifact(hive_exe);
-    b.step("hive-rlp", "Build and install the Hive consume-rlp client").dependOn(b.getInstallStep());
-
-    // ── Tests ─────────────────────────────────────────────────────────────────
-    const test_step = b.step("test", "Run all unit tests");
-
-    for ([_]struct { m: *std.Build.Module, name: []const u8 }{
-        .{ .m = mods.precompile, .name = "precompile" },
-        .{ .m = mods.interpreter, .name = "interpreter" },
-        .{ .m = mods.handler, .name = "handler" },
-        .{ .m = mods.mpt, .name = "mpt" },
-        .{ .m = mods.rlp_decode, .name = "rlp_decode" },
-        .{ .m = mods.executor, .name = "executor" },
-        .{ .m = mods.hardfork, .name = "hardfork" },
-    }) |t| {
-        const tst = b.addTest(.{ .root_module = t.m });
-        _ = t.name;
-        addCryptoLibraries(tst, target, crypto_include, libblst_path, libmcl_path, is_linux);
-        test_step.dependOn(&b.addRunArtifact(tst).step);
-    }
-
-    // MPT integration tests
-    {
-        const m = b.createModule(.{
-            .root_source_file = b.path("src/stateless/mpt/test.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        m.addImport("primitives", mods.primitives);
-        m.addImport("mpt", mods.mpt);
-        m.addImport("input", mods.input);
-        const tst = b.addTest(.{ .root_module = m });
-        addCryptoLibraries(tst, target, crypto_include, libblst_path, libmcl_path, is_linux);
-        test_step.dependOn(&b.addRunArtifact(tst).step);
-    }
-
-    // WitnessDatabase integration tests
-    {
-        const m = b.createModule(.{
-            .root_source_file = b.path("src/stateless/db/test.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        m.addImport("primitives", mods.primitives);
-        m.addImport("state", mods.state);
-        m.addImport("bytecode", mods.bytecode);
-        m.addImport("mpt", mods.mpt);
-        m.addImport("input", mods.input);
-        m.addImport("db", mods.db);
-        const tst = b.addTest(.{ .root_module = m });
-        addCryptoLibraries(tst, target, crypto_include, libblst_path, libmcl_path, is_linux);
-        test_step.dependOn(&b.addRunArtifact(tst).step);
-    }
-
-    // ── rv64im relocatable object ─────────────────────────────────────────────
-    //
-    // Produces zig-out/lib/zesu.o: a relocatable rv64im ELF with all EVM and stateless
-    // execution logic compiled in, but IO, crypto accelerators, heap and logging left as
-    // unresolved extern references per zkvm-standards. Built from a private graph wired with
-    // the bump allocator (over ZKVM_HEAP_POS/TOP) so the standalone object needs no set() call.
-    //
-    // Build with: zig build rv64im-object
-    // Verify undefined refs: llvm-nm zig-out/lib/zesu.o | grep ' U '
-    {
-        const rv64im_target = b.resolveTargetQuery(.{
-            .cpu_arch = .riscv64,
-            .cpu_model = .{ .explicit = &std.Target.riscv.cpu.baseline_rv64 },
-            .cpu_features_add = std.Target.riscv.featureSet(&.{ .m, .zicclsm, .unaligned_scalar_mem }),
-            .cpu_features_sub = std.Target.riscv.featureSet(&.{ .a, .c, .zca, .zcb, .d, .f, .zicsr, .zaamo, .zalrsc }),
-            .os_tag = .freestanding,
-            .abi = .none,
-        });
-
-        const obj_mods = buildModules(b, rv64im_target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), crypto_prefix);
-
-        const rv64_obj = b.addObject(.{
+    if (crypto_backend == .@"extern") {
+        const stateless_obj = b.addObject(.{
             .name = "zesu",
-            .root_module = obj_mods.zkvm_root.?,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/stateless/stateless/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
         });
-        rv64_obj.root_module.code_model = .medium;
+        stateless_obj.root_module.addImport("rlp_decode", mods.rlp_decode);
+        stateless_obj.root_module.addImport("input", mods.input);
+        stateless_obj.root_module.addImport("mpt", mods.mpt);
+        stateless_obj.root_module.addImport("executor", mods.executor);
+        stateless_obj.root_module.addImport("zesu_allocator", mods.zesu_allocator);
+        stateless_obj.root_module.addImport("zkvm_io", host_io);
+        stateless_obj.root_module.addImport("ssz_decode", mods.ssz_decode);
+        stateless_obj.root_module.addImport("accelerators", mods.accelerators);
+        stateless_obj.root_module.addImport("primitives", mods.primitives);
+        stateless_obj.root_module.addImport("hardfork", mods.hardfork);
+        // Distinct path from rv64im-object's zig-out/lib/zesu.o (the guest ELF) — they must
+        // never collide if both steps are invoked against the same zig-out.
+        b.getInstallStep().dependOn(&b.addInstallFile(stateless_obj.getEmittedBin(), "lib/zesu-host.o").step);
+    } else {
+        // ── zesu binary ───────────────────────────────────────────────────────
+        const stateless_exe = b.addExecutable(.{
+            .name = "zesu",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/stateless/stateless/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        stateless_exe.root_module.addImport("rlp_decode", mods.rlp_decode);
+        stateless_exe.root_module.addImport("input", mods.input);
+        stateless_exe.root_module.addImport("mpt", mods.mpt);
+        stateless_exe.root_module.addImport("executor", mods.executor);
+        stateless_exe.root_module.addImport("zesu_allocator", mods.zesu_allocator);
+        stateless_exe.root_module.addImport("zkvm_io", host_io);
+        stateless_exe.root_module.addImport("ssz_decode", mods.ssz_decode);
+        stateless_exe.root_module.addImport("accelerators", mods.accelerators);
+        stateless_exe.root_module.addImport("primitives", mods.primitives);
+        stateless_exe.root_module.addImport("hardfork", mods.hardfork);
+        addCryptoLibraries(stateless_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        b.installArtifact(stateless_exe);
+        addRunStep(b, "run", "Run the zesu app", stateless_exe, &.{});
 
-        const obj_step = b.step("rv64im-object", "Build relocatable rv64im ELF object (zesu.o)");
-        const install_obj = b.addInstallFile(rv64_obj.getEmittedBin(), "lib/zesu.o");
-        obj_step.dependOn(&install_obj.step);
+        // ── t8n: Ethereum State Transition Tool ───────────────────────────────
+        const t8n_input_module = b.createModule(.{
+            .root_source_file = b.path("tools/t8n/input.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        t8n_input_module.addImport("executor", mods.executor);
+
+        const t8n_exe = b.addExecutable(.{
+            .name = "t8n",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/t8n/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        t8n_exe.root_module.addImport("executor", mods.executor);
+        t8n_exe.root_module.addImport("hardfork", mods.hardfork);
+        addCryptoLibraries(t8n_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        b.installArtifact(t8n_exe);
+        addRunStep(b, "t8n", "Run the t8n state transition tool", t8n_exe, &.{});
+
+        // ── spec-test-runner ──────────────────────────────────────────────────
+        const spec_test_exe = b.addExecutable(.{
+            .name = "spec-test-runner",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/spec_test/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        spec_test_exe.root_module.addImport("t8n_input", t8n_input_module);
+        spec_test_exe.root_module.addImport("executor", mods.executor);
+        spec_test_exe.root_module.addImport("hardfork", mods.hardfork);
+        addCryptoLibraries(spec_test_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        b.installArtifact(spec_test_exe);
+        addRunStep(b, "state-tests", "Run execution-spec-tests state fixtures", spec_test_exe, &.{});
+
+        // ── blockchain-test-runner ────────────────────────────────────────────
+        const blockchain_runner_module = b.createModule(.{
+            .root_source_file = b.path("tools/blockchain_test/runner.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        blockchain_runner_module.addImport("primitives", mods.primitives);
+        blockchain_runner_module.addImport("executor", mods.executor);
+        blockchain_runner_module.addImport("mpt", mods.mpt);
+        blockchain_runner_module.addImport("hardfork", mods.hardfork);
+
+        const bc_test_exe = b.addExecutable(.{
+            .name = "blockchain-test-runner",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/blockchain_test/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        bc_test_exe.root_module.addImport("runner", blockchain_runner_module);
+        addCryptoLibraries(bc_test_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        b.installArtifact(bc_test_exe);
+        addRunStep(b, "blockchain-tests", "Run Ethereum blockchain test fixtures", bc_test_exe, &.{});
+
+        // ── zkevm-blockchain-test-runner ──────────────────────────────────────
+        const zkevm_test_exe = b.addExecutable(.{
+            .name = "zkevm-blockchain-test-runner",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/zkevm_test/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        zkevm_test_exe.root_module.addImport("ssz_decode", mods.ssz_decode);
+        zkevm_test_exe.root_module.addImport("ssz_output", mods.ssz_output);
+        zkevm_test_exe.root_module.addImport("executor", mods.executor);
+        addCryptoLibraries(zkevm_test_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        b.installArtifact(zkevm_test_exe);
+        addRunStep(b, "zkevm-tests", "Run zkevm blockchain test fixtures", zkevm_test_exe, &.{ "--fixtures", "spec-tests/fixtures/zkevm/blockchain_tests" });
+
+        // ── hive-rlp: Hive consume-rlp execution client ───────────────────────
+        const hive_exe = b.addExecutable(.{
+            .name = "hive-rlp",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/hive/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        hive_exe.root_module.addImport("primitives", mods.primitives);
+        hive_exe.root_module.addImport("executor", mods.executor);
+        hive_exe.root_module.addImport("hardfork", mods.hardfork);
+        hive_exe.root_module.addImport("mpt", mods.mpt);
+        addCryptoLibraries(hive_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        b.installArtifact(hive_exe);
+        b.step("hive-rlp", "Build and install the Hive consume-rlp client").dependOn(b.getInstallStep());
+
+        // ── Tests ─────────────────────────────────────────────────────────────
+        const test_step = b.step("test", "Run all unit tests");
+
+        for ([_]struct { m: *std.Build.Module, name: []const u8 }{
+            .{ .m = mods.precompile, .name = "precompile" },
+            .{ .m = mods.interpreter, .name = "interpreter" },
+            .{ .m = mods.handler, .name = "handler" },
+            .{ .m = mods.bytecode, .name = "bytecode" },
+            .{ .m = mods.mpt, .name = "mpt" },
+            .{ .m = mods.rlp_decode, .name = "rlp_decode" },
+            .{ .m = mods.executor, .name = "executor" },
+            .{ .m = mods.hardfork, .name = "hardfork" },
+        }) |t| {
+            const tst = b.addTest(.{ .root_module = t.m });
+            _ = t.name;
+            addCryptoLibraries(tst, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+            test_step.dependOn(&b.addRunArtifact(tst).step);
+        }
+
+        // MPT integration tests
+        {
+            const m = b.createModule(.{
+                .root_source_file = b.path("src/stateless/mpt/test.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            m.addImport("primitives", mods.primitives);
+            m.addImport("mpt", mods.mpt);
+            m.addImport("input", mods.input);
+            const tst = b.addTest(.{ .root_module = m });
+            addCryptoLibraries(tst, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+            test_step.dependOn(&b.addRunArtifact(tst).step);
+        }
+
+        // WitnessDatabase integration tests
+        {
+            const m = b.createModule(.{
+                .root_source_file = b.path("src/stateless/db/test.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            m.addImport("primitives", mods.primitives);
+            m.addImport("state", mods.state);
+            m.addImport("bytecode", mods.bytecode);
+            m.addImport("mpt", mods.mpt);
+            m.addImport("input", mods.input);
+            m.addImport("db", mods.db);
+            const tst = b.addTest(.{ .root_module = m });
+            addCryptoLibraries(tst, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+            test_step.dependOn(&b.addRunArtifact(tst).step);
+        }
     }
+
+    // ── rv64im relocatable object(s) ──────────────────────────────────────────
+    //
+    // Produces a relocatable rv64im ELF with all EVM and stateless execution logic
+    // compiled in, but IO, crypto accelerators, heap and logging left as unresolved
+    // extern references per zkvm-standards. Built from a private graph wired with the
+    // bump allocator (over ZKVM_HEAP_POS/TOP) so the standalone object needs no set() call.
+    //
+    // `rv64im-object` targets the zkvm-standards baseline (M + Zicclsm + unaligned scalar
+    // mem) shared across zkVM backends. `zisk-object` is the same graph on the same base
+    // ISA, plus the Zbb and Zbs bit-manipulation extensions that ZisK's transpiler and cost
+    // model support natively (see PRs #117, #119) — bitmanip instructions ZisK implements
+    // as single ops but other zkVM backends may not, so they stay off the shared default
+    // and are opt-in via this separate target instead of widening every consumer's ISA.
+    //
+    // Build with: zig build rv64im-object | zig build zisk-object
+    // Verify undefined refs: llvm-nm zig-out/lib/<name> | grep ' U '
+    addRv64imObjectStep(b, optimize, crypto_prefix, &.{ .m, .zicclsm, .unaligned_scalar_mem }, "rv64im-object", "Build relocatable rv64im ELF object (zesu.o)", "lib/zesu.o");
+    addRv64imObjectStep(b, optimize, crypto_prefix, &.{ .m, .zicclsm, .unaligned_scalar_mem, .zbb, .zbs }, "zisk-object", "Build relocatable rv64im+Zbb+Zbs ELF object for the ZisK guest (zesu-zisk.o)", "lib/zesu-zisk.o");
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
     const spec_test_version = "tests-glamsterdam-devnet@v8.1.4";
@@ -646,23 +730,25 @@ pub fn build(b: *std.Build) void {
     // ── r2-stateless: execute latest R2 devnet batch natively ─────────────────
     // The catalog URL is defined here (single source of truth) and baked into
     // the tool as its default; the tool still accepts a runtime --catalog override.
-    const r2_catalog_url = "https://pub-df22334654034ebab51bc096137a59d8.r2.dev/devnets/glamsterdam-devnet-7";
-    const r2_options = b.addOptions();
-    r2_options.addOption([]const u8, "catalog_url", r2_catalog_url);
+    if (crypto_backend == .default) {
+        const r2_catalog_url = "https://pub-df22334654034ebab51bc096137a59d8.r2.dev/devnets/glamsterdam-devnet-7";
+        const r2_options = b.addOptions();
+        r2_options.addOption([]const u8, "catalog_url", r2_catalog_url);
 
-    const r2_exe = b.addExecutable(.{
-        .name = "r2-stateless",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/r2_stateless/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    r2_exe.root_module.addImport("ssz_decode", mods.ssz_decode);
-    r2_exe.root_module.addImport("ssz_output", mods.ssz_output);
-    r2_exe.root_module.addImport("executor", mods.executor);
-    r2_exe.root_module.addOptions("build_options", r2_options);
-    addCryptoLibraries(r2_exe, target, crypto_include, libblst_path, libmcl_path, is_linux);
-    b.installArtifact(r2_exe);
-    addRunStep(b, "r2-stateless", "Fetch and execute the latest R2 devnet batch", r2_exe, &.{});
+        const r2_exe = b.addExecutable(.{
+            .name = "r2-stateless",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/r2_stateless/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        r2_exe.root_module.addImport("ssz_decode", mods.ssz_decode);
+        r2_exe.root_module.addImport("ssz_output", mods.ssz_output);
+        r2_exe.root_module.addImport("executor", mods.executor);
+        r2_exe.root_module.addOptions("build_options", r2_options);
+        addCryptoLibraries(r2_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        b.installArtifact(r2_exe);
+        addRunStep(b, "r2-stateless", "Fetch and execute the latest R2 devnet batch", r2_exe, &.{});
+    }
 }
