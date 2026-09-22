@@ -25,7 +25,7 @@ const types = @import("executor_types");
 const db_mod = @import("db");
 const context_mod = @import("context");
 const block_validation = @import("./block_validation.zig");
-const block_rlp_size = @import("./block_rlp_size.zig");
+const block_rlp_size = @import("block_rlp_size");
 
 /// Re-export so callers can use these types without importing executor_types directly.
 pub const BlockHashEntry = types.BlockHashEntry;
