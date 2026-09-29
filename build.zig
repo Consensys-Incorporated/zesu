@@ -716,7 +716,7 @@ pub fn build(b: *std.Build) void {
     addRv64imObjectStep(b, optimize, crypto_prefix, &.{ .m, .zicclsm, .unaligned_scalar_mem, .zbb, .zbs }, "zisk-object", "Build relocatable rv64im+Zbb+Zbs ELF object for the ZisK guest (zesu-zisk.o)", "lib/zesu-zisk.o");
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
-    const spec_test_version = "tests-glamsterdam-devnet@v8.1.4";
+    const spec_test_version = "tests@v21.0.0";
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-specs " ++ spec_test_version ++ " fixtures");
     fetch_fixtures_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
@@ -725,13 +725,13 @@ pub fn build(b: *std.Build) void {
             "echo 'Downloading execution-specs " ++ spec_test_version ++ " fixtures...' && " ++
             "rm -rf spec-tests/fixtures && mkdir -p spec-tests/fixtures && " ++
             "encoded=$(printf '%s' '" ++ spec_test_version ++ "' | sed 's/@/%40/g') && " ++
-            "curl -fL \"https://github.com/ethereum/execution-specs/releases/download/${encoded}/fixtures_glamsterdam-devnet.tar.gz\" " ++
+            "curl -fL \"https://github.com/ethereum/execution-specs/releases/download/${encoded}/fixtures.tar.gz\" " ++
             "| tar xz --strip-components=1 -C spec-tests/fixtures/ && " ++
             "touch \"$marker\" && " ++
             "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
     }).step);
 
-    const zkevm_version = "tests-zkevm@v0.8.4";
+    const zkevm_version = "tests-zkevm@v21.0.0";
     const fetch_zkevm_step = b.step("fetch-zkevm-fixtures", "Download " ++ zkevm_version ++ " execution-specs fixtures");
     fetch_zkevm_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",

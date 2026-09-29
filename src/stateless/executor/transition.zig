@@ -144,6 +144,8 @@ const BaTracker = struct {
     }
 
     fn detectAndRecord(self: *BaTracker, bai: u64, ctx: anytype, from_tx_id: usize) void {
+        // Every commit of index `bai` has happened by now; net the access log's slots over it.
+        ctx.journaled_state.inner.closeBalIndex();
         const a = self.alloc;
         // For bai > 0, skip accounts not touched since from_tx_id: their state hasn't
         // changed since the last detectAndRecord call, so nothing new to record.

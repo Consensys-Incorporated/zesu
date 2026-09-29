@@ -748,7 +748,10 @@ fn setupCallCore(js: anytype, host: *Host, inputs: CallInputs, frame_depth: usiz
                         return .{ .precompile = .{ .success = false, .return_data = out.bytes, .gas_used = inputs.gas_limit, .gas_remaining = 0, .gas_refunded = 0, .delegation_gas = 0, .state_gas_used = 0, .state_gas_remaining = inputs.reservoir } };
                     }
                     js.checkpointCommit();
-                    js.touchAccount(inputs.callee);
+                    // Touch the message target, not the code address: under CALLCODE and
+                    // DELEGATECALL the precompile is only the code source. Pre-EIP-161 a touch
+                    // materialises an empty account.
+                    js.touchAccount(inputs.target);
                     return .{ .precompile = .{ .success = true, .return_data = out.bytes, .gas_used = out.gas_used, .gas_remaining = inputs.gas_limit - out.gas_used, .gas_refunded = 0, .delegation_gas = 0, .state_gas_used = 0, .state_gas_remaining = inputs.reservoir } };
                 },
                 .err => {

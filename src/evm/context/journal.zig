@@ -66,8 +66,8 @@ pub const AccessLog = struct {
     accounts: std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80),
     /// Pre-block storage values for all accessed slots.
     storage: std.HashMap(primitives.Address, primitives.SlotMap(primitives.StorageValue), primitives.AddressContext, 80),
-    /// Slots that were committed to a value different from the pre-block value at any tx boundary.
-    /// Used to distinguish storageChanges from storageReads for cross-tx net-zero writes.
+    /// Slots whose value differed from the block-access-index-start value at the end of any index.
+    /// Used to distinguish storageChanges from storageReads for cross-index net-zero writes.
     committed_changed: std.HashMap(primitives.Address, primitives.SlotMap(void), primitives.AddressContext, 80),
 
     pub fn deinit(self: *@This()) void {
@@ -451,8 +451,12 @@ pub const JournalInner = struct {
     // Per-tx staging: flushed on commitTx, cleared on discardTx.
     bal_pending_accounts: std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80),
     bal_pending_storage: std.HashMap(primitives.Address, primitives.SlotMap(primitives.StorageValue), primitives.AddressContext, 80),
-    // Slots committed to a non-pre-block value at any tx boundary.
+    // Slots that differed from their index-start value at the end of any block access index.
     bal_committed_changed: std.HashMap(primitives.Address, primitives.SlotMap(void), primitives.AddressContext, 80),
+    // Slots committed within the open block access index, keyed to their index-start value.
+    // Several commits share one index (the system calls at index 0 and N+1), so a slot is only
+    // flagged in bal_committed_changed if it differs from this value when the index closes.
+    bal_index_start_storage: std.HashMap(primitives.Address, primitives.SlotMap(primitives.StorageValue), primitives.AddressContext, 80),
     // EIP-7928: addresses whose account was loaded via loadAccountMutOptionalCode
     // (the reference's get_account_optional). This is the reference's `account_reads`
     // set, which — unioned with account_writes and storage — determines BAL membership.
@@ -475,6 +479,7 @@ pub const JournalInner = struct {
             .bal_pending_accounts = std.HashMap(primitives.Address, AccountPreState, primitives.AddressContext, 80).init(alloc_mod.get()),
             .bal_pending_storage = std.HashMap(primitives.Address, primitives.SlotMap(primitives.StorageValue), primitives.AddressContext, 80).init(alloc_mod.get()),
             .bal_committed_changed = std.HashMap(primitives.Address, primitives.SlotMap(void), primitives.AddressContext, 80).init(alloc_mod.get()),
+            .bal_index_start_storage = std.HashMap(primitives.Address, primitives.SlotMap(primitives.StorageValue), primitives.AddressContext, 80).init(alloc_mod.get()),
             .bal_account_reads = std.HashMap(primitives.Address, void, primitives.AddressContext, 80).init(alloc_mod.get()),
         };
     }
@@ -498,6 +503,9 @@ pub const JournalInner = struct {
         var cc_it = self.bal_committed_changed.valueIterator();
         while (cc_it.next()) |m| m.deinit();
         self.bal_committed_changed.deinit();
+        var is_it = self.bal_index_start_storage.valueIterator();
+        while (is_it.next()) |m| m.deinit();
+        self.bal_index_start_storage.deinit();
         self.bal_account_reads.deinit();
     }
 
@@ -552,6 +560,7 @@ pub const JournalInner = struct {
     /// Drain the accumulated Block Access Log. Flushes any remaining pending state
     /// into the permanent maps and transfers ownership to the caller.
     pub fn takeAccessLog(self: *JournalInner) AccessLog {
+        self.closeBalIndex();
         // Flush remaining pending (e.g. if called after last tx without commitTx)
         var pa_it = self.bal_pending_accounts.iterator();
         while (pa_it.next()) |e| {
@@ -587,6 +596,28 @@ pub const JournalInner = struct {
         return log;
     }
 
+    /// EIP-7928: close the current block access index. A slot committed during the index is
+    /// flagged as changed only if its value now differs from the value at the index start,
+    /// so writes by several commits sharing one index (system calls) are netted together.
+    pub fn closeBalIndex(self: *JournalInner) void {
+        var it = self.bal_index_start_storage.iterator();
+        while (it.next()) |e| {
+            const addr = e.key_ptr.*;
+            const acct = self.evm_state.getPtr(addr);
+            var slot_it = e.value_ptr.iterator();
+            while (slot_it.next()) |s| {
+                const key = s.key_ptr.*;
+                const present: ?primitives.StorageValue = if (acct) |a| (if (a.storage.getPtr(key)) |sl| sl.present_value else null) else null;
+                if (present != null and present.? == s.value_ptr.*) continue;
+                const gop = self.bal_committed_changed.getOrPut(addr) catch continue;
+                if (!gop.found_existing) gop.value_ptr.* = primitives.SlotMap(void).init(alloc_mod.get());
+                gop.value_ptr.put(key, {}) catch {};
+            }
+            e.value_ptr.deinit();
+        }
+        self.bal_index_start_storage.clearRetainingCapacity();
+    }
+
     /// Returns the logs
     pub fn takeLogs(self: *JournalInner) std.ArrayList(primitives.Log) {
         const logs = self.logs;
@@ -610,8 +641,8 @@ pub const JournalInner = struct {
         // present != original records + resets; subsequent entries see original == present
         // and skip — idempotent.
         //
-        // EIP-7928: slots where present != original at commit boundary are flagged in
-        // bal_committed_changed so cross-tx net-zero writes are storageChanges, not reads.
+        // EIP-7928: slots where present != original at commit boundary are staged with their
+        // block-access-index-start value; closeBalIndex decides whether they changed.
         // Skip accounts created AND selfdestructed in the same tx (net zero effect).
         const bal_enabled = primitives.isEnabledIn(self.spec, .amsterdam);
         for (self.journal.items) |entry| {
@@ -623,16 +654,21 @@ pub const JournalInner = struct {
             if (acct.status.created and acct.status.self_destructed) continue;
             const slot = acct.storage.getPtr(data.key) orelse continue;
             if (slot.present_value == slot.original_value) continue;
-            // EIP-7928 (Amsterdam+) only: record cross-tx dirty slot. Pre-Amsterdam this
-            // map is never consumed, so skip the per-entry getOrPut/put bookkeeping.
+            // EIP-7928 (Amsterdam+) only: stage the dirty slot at its index-start value
+            // (first commit in the index wins). Pre-Amsterdam this map is never consumed, so
+            // skip the per-entry getOrPut/put bookkeeping.
             if (bal_enabled) {
-                const gop = self.bal_committed_changed.getOrPut(data.address) catch {
+                const gop = self.bal_index_start_storage.getOrPut(data.address) catch {
                     // OOM: best-effort — still perform the EIP-2200 reset below.
                     slot.original_value = slot.present_value;
                     continue;
                 };
-                if (!gop.found_existing) gop.value_ptr.* = primitives.SlotMap(void).init(alloc_mod.get());
-                gop.value_ptr.put(data.key, {}) catch {};
+                if (!gop.found_existing) gop.value_ptr.* = primitives.SlotMap(primitives.StorageValue).init(alloc_mod.get());
+                const kgop = gop.value_ptr.getOrPut(data.key) catch {
+                    slot.original_value = slot.present_value;
+                    continue;
+                };
+                if (!kgop.found_existing) kgop.value_ptr.* = slot.original_value;
             }
             // EIP-2200 (all forks): original_value becomes present_value at tx commit.
             slot.original_value = slot.present_value;
