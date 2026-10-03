@@ -52,6 +52,7 @@ test {
     _ = @import("opcodes/arithmetic_tests.zig");
     _ = @import("opcodes/host_ops_tests.zig");
     _ = @import("opcodes/environment_tests.zig");
+    _ = @import("host_tests.zig");
     // The remaining opcode suites were unreachable from any test graph: each is imported
     // only by its sibling source file, and nothing imported those siblings, so
     // `zig build test` silently skipped all of them.
