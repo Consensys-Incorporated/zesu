@@ -94,14 +94,15 @@ pub const WitnessDatabase = struct {
     /// Called by the journal after each committed transaction to register bytecodes
     /// deployed by CREATE in that transaction. Allows codeByHash to serve them without
     /// requiring them in the witness (EIP-8025: the verifier derives them from execution).
-    pub fn notifyCodeDeployed(self: *Self, code_hash: primitives.Hash, code: bytecode.Bytecode) !void {
+    pub fn notifyCodeDeployed(self: *Self, code_hash: primitives.Hash, code: bytecode.Bytecode) void {
         // getOrPut avoids two pitfalls from a naive newLegacy + put sequence:
         //   1. duplicate hash (same bytecode deployed at two addresses): put would
         //      overwrite the existing entry without deinitting its jump table → leak.
         //   2. put OOM after newLegacy already allocated: the new jump table is
         //      abandoned with no way to free it → leak.
         // Same hash ⟹ same bytecode content, so the existing entry is always correct.
-        const gop = try self.deployed_codes.getOrPut(code_hash);
+        // OOM panics rather than propagates: see basic()'s comment below for why.
+        const gop = self.deployed_codes.getOrPut(code_hash) catch @panic("out of memory");
         if (!gop.found_existing) {
             gop.value_ptr.* = bytecode.Bytecode.newLegacy(code.originalBytes());
         }
@@ -130,11 +131,19 @@ pub const WitnessDatabase = struct {
             else => return DbError.InvalidWitness,
         };
 
+        // These puts must not be dropped: storageRootFor() is a bare cache `get()`,
+        // so a dropped entry reads as "account never loaded", and the post-execution
+        // batch trie update (executor/output.zig) rebuilds the storage trie from only
+        // the touched slots for that case -- a wrong state root reported as success.
+        // Nor may a put failure propagate as a plain error: the generic
+        // `catch { ctx_error = .database_error }` wrappers in context.zig/host.zig
+        // can't tell OOM apart from DbError.InvalidWitness, so it would misreport a
+        // host allocator failure as "the witness is incomplete". Panic on OOM instead.
         const as = account_state orelse {
-            self.storage_root_cache.put(address, EMPTY_TRIE_HASH) catch {};
+            self.storage_root_cache.put(address, EMPTY_TRIE_HASH) catch @panic("out of memory");
             return null;
         };
-        self.storage_root_cache.put(address, as.storage_root) catch {};
+        self.storage_root_cache.put(address, as.storage_root) catch @panic("out of memory");
         return state.AccountInfo{
             .balance = as.balance,
             .nonce = as.nonce,
@@ -176,16 +185,28 @@ pub const WitnessDatabase = struct {
                 address,
                 self.node_index,
             ) catch |err| switch (err) {
-                error.InvalidProof => break :blk EMPTY_TRIE_HASH,
+                // InvalidProof means the witness lacks the node needed to prove
+                // anything here — genuine absence is reported as a null
+                // account_state below ("valid non-inclusion" in mpt/main.zig).
+                // Defaulting to EMPTY_TRIE_HASH would make every subsequent slot
+                // read on this account return 0, i.e. a wrong execution result
+                // from an incomplete witness. Matches basic()'s handling.
+                error.InvalidProof => return DbError.InvalidWitness,
                 else => return DbError.InvalidWitness,
             };
             const root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
-            self.storage_root_cache.put(address, root) catch {};
+            // OOM panics rather than propagates: see basic()'s comment above for why.
+            self.storage_root_cache.put(address, root) catch @panic("out of memory");
             break :blk root;
         };
         const slot = u256ToHash(index);
         const value = mpt.verifyStorageIndexed(storage_root, slot, self.node_index) catch |err| switch (err) {
-            error.InvalidProof => return 0,
+            // A slot that is genuinely unset yields null from verifyStorageIndexed
+            // (valid non-inclusion), which becomes 0 without an error. Reaching
+            // InvalidProof means the storage node is missing from the witness, so
+            // returning 0 would fabricate a value — the slot's real contents are
+            // unknown and may be non-zero.
+            error.InvalidProof => return DbError.InvalidWitness,
             else => return DbError.InvalidWitness,
         };
         return value;
@@ -193,7 +214,12 @@ pub const WitnessDatabase = struct {
 
     // ── hasNonZeroStorageForAddress ─────────────────────────────────────────
 
-    pub fn hasNonZeroStorageForAddress(self: *const Self, address: primitives.Address) bool {
+    /// Fallible: this feeds the CREATE collision check, so "I cannot prove it"
+    /// must not collapse into "no storage here". Doing so would let a CREATE
+    /// succeed at an address the reference rejects — a consensus-level wrong
+    /// result from an incomplete witness. A genuinely absent account still
+    /// resolves to null (valid non-inclusion) and returns false without error.
+    pub fn hasNonZeroStorageForAddress(self: *const Self, address: primitives.Address) !bool {
         if (self.storage_root_cache.get(address)) |root| {
             return !std.mem.eql(u8, &root, &EMPTY_TRIE_HASH);
         }
@@ -201,7 +227,7 @@ pub const WitnessDatabase = struct {
             self.pre_state_root,
             address,
             self.node_index,
-        ) catch return false;
+        ) catch return DbError.InvalidWitness;
         const as = account_state orelse return false;
         return !std.mem.eql(u8, &as.storage_root, &EMPTY_TRIE_HASH);
     }

@@ -31,6 +31,7 @@ const ModuleSet = struct {
     ssz_decode: *std.Build.Module,
     ssz_output: *std.Build.Module,
     db: *std.Build.Module,
+    block_rlp_size: *std.Build.Module,
     executor: *std.Build.Module,
     runner: *std.Build.Module,
     zkvm_io: *std.Build.Module,
@@ -268,12 +269,21 @@ fn buildModules(
     db.addImport("mpt", mpt);
     db.addImport("executor_types", executor_types);
 
+    const block_rlp_size = mkmod(b, expose, "block_rlp_size", .{
+        .root_source_file = b.path("src/stateless/executor/block_rlp_size.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    block_rlp_size.addImport("primitives", primitives);
+    block_rlp_size.addImport("input", input);
+
     const executor = mkmod(b, expose, "executor", .{
         .root_source_file = b.path("src/stateless/executor/main.zig"),
         .target = target,
         .optimize = optimize,
     });
     executor.addImport("executor_types", executor_types);
+    executor.addImport("block_rlp_size", block_rlp_size);
     executor.addImport("zesu_allocator", zesu_allocator);
     executor.addImport("primitives", primitives);
     executor.addImport("input", input);
@@ -349,6 +359,7 @@ fn buildModules(
         .ssz_decode = ssz_decode,
         .ssz_output = ssz_output,
         .db = db,
+        .block_rlp_size = block_rlp_size,
         .executor = executor,
         .runner = runner,
         .zkvm_io = zkvm_io,
@@ -470,6 +481,10 @@ pub fn build(b: *std.Build) void {
 
     // ── Module graph (exposed via addModule; backend selected by option) ──────
     const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend, false);
+    const block_rlp_size_test_step = b.step("test-block-rlp-size", "Run block RLP size unit tests");
+    const block_rlp_size_test = b.addTest(.{ .root_module = mods.block_rlp_size });
+    const run_block_rlp_size_test = b.addRunArtifact(block_rlp_size_test);
+    block_rlp_size_test_step.dependOn(&run_block_rlp_size_test.step);
 
     // ── Host artifacts ────────────────────────────────────────────────────────
     //
@@ -628,6 +643,7 @@ pub fn build(b: *std.Build) void {
 
         // ── Tests ─────────────────────────────────────────────────────────────
         const test_step = b.step("test", "Run all unit tests");
+        test_step.dependOn(&run_block_rlp_size_test.step);
 
         for ([_]struct { m: *std.Build.Module, name: []const u8 }{
             .{ .m = mods.precompile, .name = "precompile" },
@@ -642,7 +658,8 @@ pub fn build(b: *std.Build) void {
             const tst = b.addTest(.{ .root_module = t.m });
             _ = t.name;
             addCryptoLibraries(tst, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
-            test_step.dependOn(&b.addRunArtifact(tst).step);
+            const run_tst = b.addRunArtifact(tst);
+            test_step.dependOn(&run_tst.step);
         }
 
         // MPT integration tests

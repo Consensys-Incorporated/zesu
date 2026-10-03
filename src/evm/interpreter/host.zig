@@ -378,7 +378,10 @@ pub const Host = struct {
 
     /// Load account info. Returns null on database error.
     pub fn accountInfo(self: *Host, addr: primitives.Address) ?struct { balance: primitives.U256, is_cold: bool, is_empty: bool } {
-        const load = self.js_vtable.accountInfo(self.js, addr) catch return null;
+        const load = self.js_vtable.accountInfo(self.js, addr) catch {
+            self.ctx_error.* = context_mod.ContextError.database_error;
+            return null;
+        };
         return .{
             .balance = load.info.balance,
             .is_cold = load.is_cold,
@@ -443,12 +446,18 @@ pub const Host = struct {
     }
 
     pub fn sload(self: *Host, addr: primitives.Address, key: primitives.U256) ?struct { value: primitives.U256, is_cold: bool } {
-        const load = self.js_vtable.sload(self.js, addr, key) catch return null;
+        const load = self.js_vtable.sload(self.js, addr, key) catch {
+            self.ctx_error.* = context_mod.ContextError.database_error;
+            return null;
+        };
         return .{ .value = load.data, .is_cold = load.is_cold };
     }
 
     pub fn sstore(self: *Host, addr: primitives.Address, key: primitives.U256, val: primitives.U256) ?struct { original: primitives.U256, current: primitives.U256, new: primitives.U256, is_cold: bool } {
-        const result = self.js_vtable.sstore(self.js, addr, key, val) catch return null;
+        const result = self.js_vtable.sstore(self.js, addr, key, val) catch {
+            self.ctx_error.* = context_mod.ContextError.database_error;
+            return null;
+        };
         return .{
             .original = result.data.original_value,
             .current = result.data.present_value,
@@ -470,7 +479,10 @@ pub const Host = struct {
     }
 
     pub fn selfdestruct(self: *Host, addr: primitives.Address, target: primitives.Address) ?SelfDestructLoadResult {
-        const result = self.js_vtable.selfdestruct(self.js, addr, target) catch return null;
+        const result = self.js_vtable.selfdestruct(self.js, addr, target) catch {
+            self.ctx_error.* = context_mod.ContextError.database_error;
+            return null;
+        };
         return .{
             .had_value = result.data.had_value,
             .target_exists = result.data.target_exists,
@@ -869,7 +881,10 @@ fn recordCreateTargetCore(
         accel.keccak256(init_code, &init_hash);
         break :blk create2Address(caller, salt, init_hash);
     } else createAddress(caller, nonce);
-    const load = js.loadAccount(new_addr) catch return null;
+    const load = js.loadAccount(new_addr) catch {
+        host.ctx_error.* = context_mod.ContextError.database_error;
+        return null;
+    };
     // is_account_alive: reference generic_create charges NEW_ACCOUNT only when the target
     // leaf does not already exist (balance/nonce/code present).
     const info = load.data.info;
@@ -946,7 +961,14 @@ fn setupCreateCore(
         }
     }
 
-    _ = js.loadAccount(new_addr) catch return .{ .failed = CreateResult.preExecFailure(gas_limit) };
+    // Mark the block invalid before failing: with a stateless witness this error
+    // means the CREATE target could not be resolved, so "create failed" would be a
+    // fabricated outcome. Note js.loadAccount is a Journal call and so bypasses the
+    // Host accessors that already set ctx_error on a database error.
+    _ = js.loadAccount(new_addr) catch {
+        host.ctx_error.* = context_mod.ContextError.database_error;
+        return .{ .failed = CreateResult.preExecFailure(gas_limit) };
+    };
 
     // EIP-8037 (Amsterdam+): was the target already alive (pre-funded) before creation?
     // Captured before createAccountCheckpoint transfers value / bumps nonce. A deployable
@@ -971,12 +993,24 @@ fn setupCreateCore(
     {
         const storage_wiped = if (js.inner.evm_state.get(new_addr)) |acct| acct.status.storage_wiped else false;
         if (!storage_wiped) {
-            if (js.hasNonZeroStorageForAddress(new_addr)) {
+            // A database error here means we cannot tell whether the target has
+            // storage. Treating that as "no storage" would let the CREATE proceed
+            // at an address the reference rejects, so mark the block invalid and
+            // fail the CREATE closed.
+            const has_storage = js.hasNonZeroStorageForAddress(new_addr) catch {
+                host.ctx_error.* = context_mod.ContextError.database_error;
+                return .{ .failed = CreateResult.failure() };
+            };
+            if (has_storage) {
                 return .{ .failed = CreateResult.failure() };
             }
         }
     }
 
+    // Safe to swallow: createAccountCheckpoint's error set is exactly TransferError
+    // (OutOfFunds, OverflowPayment, CreateCollision), all of which are legitimate
+    // CREATE failures rather than "outcome could not be determined". It cannot
+    // surface a database error, so there is nothing to record here.
     const checkpoint = js.createAccountCheckpoint(caller, new_addr, value, spec_id) catch {
         return .{ .failed = CreateResult.failure() };
     };

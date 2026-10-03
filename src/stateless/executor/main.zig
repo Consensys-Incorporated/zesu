@@ -25,7 +25,7 @@ const types = @import("executor_types");
 const db_mod = @import("db");
 const context_mod = @import("context");
 const block_validation = @import("./block_validation.zig");
-const block_rlp_size = @import("./block_rlp_size.zig");
+const block_rlp_size = @import("block_rlp_size");
 
 /// Re-export so callers can use these types without importing executor_types directly.
 pub const BlockHashEntry = types.BlockHashEntry;
@@ -50,6 +50,9 @@ test {
     // every declaration through semantic analysis, so a signature change that
     // misses a call site fails `zig build test`.
     std.testing.refAllDecls(@This());
+    // transition_tests.zig is a leaf test file nothing else imports, so it must be
+    // referenced explicitly to be pulled into the test graph.
+    _ = @import("./transition_tests.zig");
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
@@ -421,6 +424,9 @@ pub fn executeBlockStateless(
         fork_mod.blockReward(spec),
         public_keys,
     );
+    // Backstop for a database error raised after the per-tx loop (mining reward,
+    // withdrawals, post-block system calls) -- transitionWithContext only bails
+    // out early on ctx_error while looping over transactions.
     if (ctx.ctx_error != .ok) return error.InvalidWitness;
     // EIP-7928 (Amsterdam+): the block access list is only validated on Amsterdam+
     // (validatePostExecution gates the comparison). Pre-Amsterdam, skip draining the

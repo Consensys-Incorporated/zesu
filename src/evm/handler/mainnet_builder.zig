@@ -239,7 +239,10 @@ pub const MainnetHandler = struct {
 
                                     // Load authority account (marks it warm; EIP-7702 spec: always access
                                     // the signer's account even if the authorization is ultimately invalid)
-                                    const load_result = js.loadAccountMutOptionalCode(authority_addr, true, false) catch continue;
+                                    const load_result = js.loadAccountMutOptionalCode(authority_addr, true, false) catch |err| {
+                                        if (err == error.InvalidWitness) ctx.ctx_error = .database_error;
+                                        continue;
+                                    };
                                     const journaled = load_result.data;
 
                                     // Per EIP-7702: skip if authority has non-empty, non-EIP-7702 code.
