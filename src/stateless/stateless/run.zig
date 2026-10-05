@@ -11,6 +11,7 @@ const executor = @import("executor");
 const ssz_decode = @import("ssz_decode");
 const ssz_output = @import("ssz_output");
 const zkvm_io = @import("zkvm_io");
+const primitives = @import("primitives");
 
 pub const Result = struct {
     /// zkevm@v0.8.4: SszStatelessValidationResult is a fixed-size 43-byte container,
@@ -37,13 +38,18 @@ pub fn runStateless(allocator: std.mem.Allocator) !Result {
     const ep = &si.new_payload_request.execution_payload;
     std.log.info("block={d} txns={d}", .{ ep.block_number, ep.transactions.len });
 
+    // The output root doubles as the hash key: it commits to the whole payload, so
+    // it can't be known while the block's keys are being chosen (see setHashKey).
+    const root = try ssz_output.newPayloadRequestRoot(allocator, si.new_payload_request);
+    primitives.setHashKey(root);
+
     const exec_result = executor.executeStatelessInput(allocator, si, si.chain_config.fork_name);
     const success = if (exec_result) |_| true else |err| blk: {
         std.log.err("execution failed: {s}", .{@errorName(err)});
         break :blk false;
     };
 
-    const out = try ssz_output.serialize(allocator, si.chain_config, si.new_payload_request, success);
+    const out = ssz_output.serializeWithRoot(root, si.chain_config, success);
     std.log.info("root: 0x{x} success={d}", .{ out[0..32].*, @intFromBool(success) });
 
     return .{ .out = out, .success = success };

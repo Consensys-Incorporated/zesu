@@ -36,29 +36,45 @@ pub inline fn mix64(x: u64) u64 {
     return h ^ (h >> 32);
 }
 
-/// Hash context for HashMap keyed on Address ([20]u8).
+/// Key for `AddressContext`. Defaults to Wyhash's secret so
+/// native tooling that never calls `setHashKey` still gets a well-mixed hash.
+var hash_key: [4]u64 = .{ 0xa0761d6478bd642f, 0xe7037ed1a0b428db, 0x8ebc6af09c88c6e3, 0x589965cc75374cc3 };
+
+/// Keys every `AddressContext` map for one block.
 ///
-/// Addresses are NOT uniformly distributed: only keccak-derived ones are. CREATE2
-/// salts, synthetic test addresses and precompiles all share leading bytes, and an
-/// address prefix is attacker-influenceable. Truncating `key[0..8]` mapped every
-/// address agreeing on its first eight bytes to one identical u64, which collides in
-/// both the bucket index (`hash & mask`) and the 7-bit fingerprint (`hash >> 57`), so
-/// every probe fell through to the 20-byte `eql` — quadratic in the size of the
-/// colliding group, across all ~38 maps built on this context at once.
+/// Addresses are attacker-chosen: BALANCE/EXTCODE*/CALL take any address, at no
+/// keccak cost. So any fixed hash, however well mixed,
+/// can be collided offline, and a colliding group turns every probe into a full
+/// `eql` -- quadratic in the group's size. A seed fixes that only if the block's
+/// author can neither predict it while choosing keys nor read it during execution;
+/// `prevRandao` fails both. `new_payload_request_root` passes both: it commits to
+/// fields execution cannot observe (state/receipts roots, extra_data, block_hash),
+/// so keys are fixed before the seed exists, and regrinding only re-rolls it.
 ///
-/// So mix all 20 bytes: three loads and a multiply-xor chain, ending in a fold that
-/// carries the high half's entropy down into the bucket bits.
+/// Must be called before any keyed map is populated, and never while one is live:
+/// a map hashed under one key cannot be read under another.
+pub fn setHashKey(seed: [32]u8) void {
+    for (&hash_key, 0..) |*k, i| k.* = std.mem.readInt(u64, seed[i * 8 ..][0..8], .little);
+}
+
+/// Wyhash's keyed step: the 128-bit product of two key-masked words, folded. Its
+/// output can't be predicted without the key. Callers still finish with a
+/// multiply so the bucket index (`hash & mask`) and fingerprint (`hash >> 57`) see
+/// every input bit.
+inline fn mum(a: u64, b: u64) u64 {
+    const p = @as(u128, a) * b;
+    return @as(u64, @truncate(p)) ^ @as(u64, @truncate(p >> 64));
+}
+
+/// Hash context for HashMap keyed on Address ([20]u8). Keyed -- see `setHashKey`.
 pub const AddressContext = struct {
     pub fn hash(_: @This(), key: Address) u64 {
         const lo = std.mem.readInt(u64, key[0..8], .little);
         const mid = std.mem.readInt(u64, key[8..16], .little);
         const hi: u64 = std.mem.readInt(u32, key[16..20], .little);
-        // Fold all 20 bytes, then avalanche. The rotations are odd and unequal so
-        // chunks holding the same bytes don't cancel (without them lo == mid folds
-        // to just `hi`). They don't make the fold injective — it's linear over
-        // GF(2) — which is fine: addresses come from keccak, so a caller can't
-        // supply a chosen preimage.
-        return mix64(lo ^ std.math.rotl(u64, mid, 27) ^ std.math.rotl(u64, hi, 13));
+        // `hi` skips the product, so this needs `mix64`'s full avalanche: one
+        // multiply leaves the shared-prefix shapes in testAddressHashSpread clumped.
+        return mix64(mum(lo ^ hash_key[0], mid ^ hash_key[1]) ^ hi);
     }
     pub fn eql(_: @This(), a: Address, b: Address) bool {
         return std.mem.eql(u8, &a, &b);
@@ -445,10 +461,8 @@ pub const testing = struct {
         //   mid_word               8-9   -> mid
         //   head_only              2-3   -> low half of lo
         //
-        // `lo_high_bits` earns the second multiply in `mix64`: a lone multiply
-        // can't carry entropy downwards, so it puts all 4096 keys in one bucket.
-        // Don't move it to addr[8..16] — that drops the entropy into bits 0-15 and
-        // the shape stops discriminating. `mid_word` is what covers `mid`.
+        // `lo_high_bits` leaves the low 48 bits of `lo` zero, so it only spreads if
+        // the high half of the product reaches the bucket bits.
         const Shape = enum { tail, prefixed_tail, lo_high_bits, mid_word, head_only };
         for (std.enums.values(Shape)) |shape| {
             var seen = [_]bool{false} ** n;
@@ -484,6 +498,37 @@ pub const testing = struct {
         }
     }
 
+    /// Why the key has to be unpredictable: knowing it, `lo = hash_key[0]` zeroes
+    /// the product, so every `mid` collides. Re-keying scatters that family.
+    pub fn testHashKeyScattersKnownKeyCollisions() !void {
+        const saved = hash_key;
+        defer hash_key = saved;
+
+        const ctx = AddressContext{};
+        const n = 4096;
+        var addrs: [n]Address = undefined;
+        for (&addrs, 0..) |*a, i| {
+            std.mem.writeInt(u64, a[0..8], hash_key[0], .little);
+            std.mem.writeInt(u64, a[8..16], @intCast(i), .little);
+            @memset(a[16..20], 0);
+        }
+        const h0 = ctx.hash(addrs[0]);
+        for (addrs) |a| try std.testing.expectEqual(h0, ctx.hash(a));
+
+        setHashKey([_]u8{0x5A} ** 32);
+        const mask: u64 = n - 1;
+        var seen = [_]bool{false} ** n;
+        var distinct_buckets: usize = 0;
+        for (addrs) |a| {
+            const bucket = ctx.hash(a) & mask;
+            if (!seen[bucket]) {
+                seen[bucket] = true;
+                distinct_buckets += 1;
+            }
+        }
+        try std.testing.expect(distinct_buckets > n / 2);
+    }
+
     pub fn testSpecId() !void {
         // Test string conversion
         try std.testing.expectEqual(SpecId.frontier, specIdFromString("Frontier"));
@@ -498,3 +543,8 @@ pub const testing = struct {
         try std.testing.expectEqualStrings("Prague", specIdToString(.prague));
     }
 };
+
+test "address hashes spread, and re-keying scatters known-key collisions" {
+    try testing.testAddressHashSpread();
+    try testing.testHashKeyScattersKnownKeyCollisions();
+}
