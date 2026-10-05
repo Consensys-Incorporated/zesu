@@ -65,7 +65,6 @@ fn runTestBlock(arena: std.mem.Allocator, ctx: anytype, txs: []input.TxInput) !T
         primitives.SpecId.shanghai,
         1,
         0,
-        &.{},
     );
 }
 

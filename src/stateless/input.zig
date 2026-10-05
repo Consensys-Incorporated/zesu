@@ -118,9 +118,11 @@ pub const ExecutionPayload = struct {
     extra_data: []const u8,
     base_fee_per_gas: u64,
     block_hash: primitives.Hash,
+    /// Decoded transactions. The SSZ decoder leaves this empty; executeStatelessInput
+    /// decodes `raw_transactions` after checking the block hash.
     transactions: []const Transaction,
     /// Raw RLP bytes for each transaction, parallel to `transactions`.
-    /// Populated by the SSZ decoder; empty slice on JSON/RLP paths.
+    /// Populated by the SSZ decoder.
     /// Used to compute the SSZ hash_tree_root of the execution payload.
     raw_transactions: []const []const u8 = &.{},
     withdrawals: []const Withdrawal,
@@ -191,8 +193,4 @@ pub const StatelessInput = struct {
     new_payload_request: NewPayloadRequest,
     witness: ExecutionWitness,
     chain_config: ChainConfig = .{},
-    /// Pre-recovered secp256k1 public keys, one per transaction in order.
-    /// Each entry is 64 bytes (uncompressed, no 0x04 prefix); empty slice = not provided.
-    /// When provided, used to derive sender address instead of calling ecrecover.
-    public_keys: []const []const u8 = &.{},
 };
