@@ -11,6 +11,7 @@ const bytecode_mod = @import("bytecode");
 const database_mod = @import("database");
 const context_mod = @import("context");
 const handler_mod = @import("handler");
+const interpreter_mod = @import("interpreter");
 
 const input = @import("executor_types");
 const bloom = @import("bloom.zig");
@@ -687,7 +688,8 @@ pub fn transitionWithContext(
 
     var receipts = std.ArrayListUnmanaged(Receipt).empty;
     var accepted_txs = std.ArrayListUnmanaged(input.TxInput).empty;
-    var cumulative_gas: u64 = 0; // block gas (max(regular, state) per tx, for block header gasUsed)
+    var cumulative_gas: u64 = 0; // block gas: the execution lane on Amsterdam+
+    var block_state_gas: u64 = 0; // EIP-8037 (Amsterdam+): the block's state-gas lane
     var cumulative_receipt_gas: u64 = 0; // receipt gas (regular + state per tx, for cumulativeGasUsed)
     var block_bloom = bloom.ZERO;
     var total_blob_gas: u64 = 0;
@@ -761,14 +763,16 @@ pub fn transitionWithContext(
         }
 
         // 1d. Transaction gas limit cannot exceed remaining block gas allowance.
-        // Pre-Amsterdam: tx.gas == block_gas_used, so this check is exact.
-        // Amsterdam+: tx.gas = regular + state, but block_gas_used = max(regular, state),
-        // which can be much smaller than tx.gas for state-dominant txs. Skip the
-        // pre-execution check here; the overflow is detected post-execution below (step 5).
-        if (!primitives.isEnabledIn(spec, .amsterdam)) {
-            if (tx.gas > env.gas_limit - cumulative_gas) {
+        // EIP-8037 (Amsterdam+, reference check_block_gas_capacity): each lane is checked against
+        // its own remaining budget, and one tx can use at most TX_MAX_GAS_LIMIT of the execution lane.
+        if (primitives.isEnabledIn(spec, .amsterdam)) {
+            if (@min(interpreter_mod.gas_costs.TX_MAX_GAS_LIMIT, tx.gas) > env.gas_limit - cumulative_gas or
+                tx.gas > env.gas_limit - block_state_gas)
+            {
                 return error.TxGasLimitExceedsBlockLimit;
             }
+        } else if (tx.gas > env.gas_limit - cumulative_gas) {
+            return error.TxGasLimitExceedsBlockLimit;
         }
 
         // 1e. Type-3 blob pre-checks (EIP-4844 / EIP-7594).
@@ -1138,13 +1142,7 @@ pub fn transitionWithContext(
 
         // 5. Build receipt
         cumulative_gas += exec_result.block_gas_used;
-        // Amsterdam+: block_gas_used = max(regular, state), which is only known
-        // post-execution. Reject the block immediately if this tx overflows the limit.
-        if (primitives.isEnabledIn(spec, .amsterdam)) {
-            if (cumulative_gas > env.gas_limit) {
-                return error.TxGasLimitExceedsBlockLimit;
-            }
-        }
+        if (primitives.isEnabledIn(spec, .amsterdam)) block_state_gas += exec_result.state_gas_used;
         cumulative_receipt_gas += exec_result.gas_used;
 
         const status: u8 = if (exec_result.status == .Success) 1 else 0;
@@ -1308,7 +1306,7 @@ pub fn transitionWithContext(
         .alloc = post_alloc,
         .deleted_accounts = try deleted.toOwnedSlice(arena),
         .receipts = try receipts.toOwnedSlice(arena),
-        .cumulative_gas = cumulative_gas,
+        .cumulative_gas = @max(cumulative_gas, block_state_gas),
         .block_bloom = block_bloom,
         .current_base_fee = env.base_fee,
         .excess_blob_gas = env.excess_blob_gas,

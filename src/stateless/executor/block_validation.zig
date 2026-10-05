@@ -153,14 +153,8 @@ pub fn validatePostExecution(
     if (total_gas_used > env.gas_limit) return error.GasUsedOverflow;
 
     // INVALID_GAS_USED: computed total ≠ header's declared gasUsed.
-    // Gated to pre-Amsterdam: EIP-7778 (Amsterdam+) splits block-header gasUsed
-    // (no-refund accounting) from receipt cumulative_gas_used (post-refund).
-    // result.cumulative_gas tracks receipt-level gas; once EIP-7778 is
-    // implemented in transition(), remove this gate.
-    if (!primitives.isEnabledIn(spec, .amsterdam)) {
-        if (env.gas_used_header) |declared| {
-            if (total_gas_used != declared) return error.InvalidGasUsed;
-        }
+    if (env.gas_used_header) |declared| {
+        if (total_gas_used != declared) return error.InvalidGasUsed;
     }
 
     if (primitives.isEnabledIn(spec, .cancun)) {
