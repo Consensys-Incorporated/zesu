@@ -196,32 +196,3 @@ pub const StatelessInput = struct {
     /// When provided, used to derive sender address instead of calling ecrecover.
     public_keys: []const []const u8 = &.{},
 };
-
-/// Build an ExecutionPayload from a BlockHeader + decoded transactions + withdrawals.
-/// Used by RLP and JSON decoders. Maps consensus-layer field names to execution-payload names.
-pub fn payloadFromBlock(
-    block: BlockHeader,
-    transactions: []const Transaction,
-    withdrawals: []const Withdrawal,
-) ExecutionPayload {
-    return .{
-        .parent_hash = block.parent_hash,
-        .fee_recipient = block.beneficiary,
-        .state_root = block.state_root,
-        .receipts_root = block.receipts_root,
-        .logs_bloom = block.logs_bloom,
-        .prev_randao = block.mix_hash,
-        .block_number = block.number,
-        .gas_limit = block.gas_limit,
-        .gas_used = block.gas_used,
-        .timestamp = block.timestamp,
-        .extra_data = block.extra_data,
-        .base_fee_per_gas = block.base_fee_per_gas orelse 0,
-        .block_hash = @splat(0), // not stored in BlockHeader
-        .transactions = transactions,
-        .withdrawals = withdrawals,
-        .blob_gas_used = block.blob_gas_used orelse 0,
-        .excess_blob_gas = block.excess_blob_gas orelse 0,
-        .slot_number = block.slot_number,
-    };
-}
