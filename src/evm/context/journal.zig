@@ -534,6 +534,7 @@ pub const JournalInner = struct {
         self.journal.deinit(alloc_mod.get());
         self.warm_addresses.deinit();
         self.pending_burns.deinit(alloc_mod.get());
+        self.tx_touched.deinit(alloc_mod.get());
         self.bal_pre_accounts.deinit();
         var pre_sit = self.bal_pre_storage.valueIterator();
         while (pre_sit.next()) |m| m.deinit();
