@@ -65,7 +65,6 @@ All inputs are read from **stdin** by default, or from the file at `$ZESU_INPUT`
 |---|---|
 | **SSZ** | Raw SSZ-encoded `SszStatelessInput`. This is the canonical zkVM input format. |
 | **SSZ/Ere** | Same SSZ payload prefixed with a 4-byte u32 LE length field, as produced by the [Ere](https://github.com/eqlabs/ere) test framework's `Input::with_prefixed_stdin`. The prefix is stripped automatically. |
-| **JSON** | Development/debug only (`--json` flag). Accepts a `debug_getRawBlock` JSON-RPC response and a witness JSON file. |
 
 ### SSZ schema
 
@@ -106,12 +105,9 @@ zig build
 ## CLI usage
 
 ```
-zesu [--fork <name>]                               # SSZ from stdin / $ZESU_INPUT  (default)
-zesu --ssz <file> [--fork <name>]                  # SSZ from a binary file
-zesu --json <block.json> <witness.json> [--fork <name>]
+zesu                  # SSZ from stdin / $ZESU_INPUT  (default)
+zesu --ssz <file>     # SSZ from a binary file
 ```
-
-`--fork` overrides the fork name embedded in the input (useful when the SSZ chain config is absent or you want to pin a specific EIP set, e.g. `Prague`, `Amsterdam`).
 
 ## Running against devnet blocks
 
