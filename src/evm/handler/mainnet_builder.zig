@@ -563,11 +563,10 @@ pub const MainnetHandler = struct {
                     const xfer_err = try ctx.journaled_state.transfer(tx.caller, target, tx.value);
                     if (xfer_err != null) {
                         ctx.journaled_state.checkpointRevert(call_checkpoint);
-                        return main.FrameResult.new(
-                            main.ExecutionResult.new(.Fail, exec_gas),
-                            0,
-                            0,
-                        );
+                        var fr = main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
+                        fr.reservoir_remaining = call_reservoir;
+                        fr.state_gas_spilled = auth_spill;
+                        return fr;
                     }
                     // EIP-7708 (Amsterdam+): emit Transfer log for ETH sent via TX.
                     if (primitives.isEnabledIn(spec, .amsterdam) and
