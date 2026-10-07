@@ -792,7 +792,7 @@ pub fn build(b: *std.Build) void {
     // The catalog URL is defined here (single source of truth) and baked into
     // the tool as its default; the tool still accepts a runtime --catalog override.
     if (crypto_backend == .default) {
-        const r2_catalog_url = "https://pub-df22334654034ebab51bc096137a59d8.r2.dev/devnets/glamsterdam-devnet-7";
+        const r2_catalog_url = "https://pub-afa6b160acfb4919bda1d0e2a00b5b77.r2.dev/testnets/sepolia";
         const r2_options = b.addOptions();
         r2_options.addOption([]const u8, "catalog_url", r2_catalog_url);
 

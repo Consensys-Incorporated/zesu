@@ -123,7 +123,7 @@ zesu --ssz <file>     # SSZ from a binary file
 # Build
 zig build
 
-# Run the latest batch from the default catalog (glamsterdam-devnet-7)
+# Run the latest batch from the default catalog (Sepolia)
 ./zig-out/bin/r2-stateless
 
 # Run the latest N batches
