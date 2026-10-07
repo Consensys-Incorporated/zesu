@@ -358,9 +358,10 @@ jobs:
           # Keep the first N blocks, in block order (fixtures are named
           # <block>-<hash>.json), in a directory of their own: a batch holds
           # more blocks than were asked for, and the archives also carry
-          # .meta/manifest.json, which is not a fixture.
+          # .meta/manifest.json, which is not a fixture. sed, not head: head
+          # exits early, and sort's next write would then fail on SIGPIPE.
           mkdir -p corpus-run
-          find corpus/blockchain_tests_engine -name '*.json' | sort | head -n "$blocks" \
+          find corpus/blockchain_tests_engine -name '*.json' | sort | sed -n "1,${blocks}p" \
             | xargs -I{} cp {} corpus-run/
           ls corpus-run | wc -l
 
