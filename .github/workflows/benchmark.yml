@@ -3,7 +3,7 @@
 # head and at its merge-base for each guest object variant (the zkvm-standards
 # rv64im baseline, and the ZisK-specific rv64im+Zbb+Zbs build — see
 # build.zig's `rv64im-object` / `zisk-object` steps), runs both over the same
-# devnet-8 blocks, and posts a separate per-chip cost delta comment for each
+# Sepolia blocks, and posts a separate per-chip cost delta comment for each
 # variant.
 #
 # Worth doing here because ZisK trace costs are deterministic: the same ELF on
@@ -26,7 +26,7 @@ on:
         required: true
         type: string
       blocks:
-        description: "Number of devnet-8 blocks (rounded up to whole 10-block batches)"
+        description: "Number of Sepolia blocks (max 50)"
         required: false
         default: "10"
         type: string
@@ -41,16 +41,17 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CORPUS: glamsterdam-devnet-8
-  CORPUS_URL: https://pub-760ad8b3dd9547539f829c1ea30f18b5.r2.dev/devnets/glamsterdam-devnet-8
+  CORPUS: sepolia
+  CORPUS_URL: https://pub-afa6b160acfb4919bda1d0e2a00b5b77.r2.dev/testnets/sepolia
   # Pinned so runs stay comparable over time. The corpus is append-only, but
   # "the newest N blocks" would silently change what is being measured.
-  CORPUS_START: "93350"
-  # Benchmark harness (public). Its `bench-eest-fixtures` branch walks fixture
-  # trees recursively and reports per-chip costs; `main` misparses these
-  # fixtures as empty blocks.
+  CORPUS_START: "11856500"
+  # Blocks per corpus batch: a run downloads whole batches and keeps the first N.
+  CORPUS_BATCH_SIZE: "100"
+  # Benchmark harness (public), at a commit that reads the corpus's
+  # blockchain_test_engine fixtures (stateless-executor #21).
   SE_REPO: Gabriel-Trintinalia/stateless-executor
-  SE_REF: "7ce7770c2ce41c9439237e73fc980fed615d7fb1"
+  SE_REF: "c8bdd98c390c04b25841fd2b442710e0dd7ef20b"
 
 jobs:
   bench:
@@ -335,7 +336,7 @@ jobs:
         run: |
           set -euo pipefail
           blocks="$BLOCKS"
-          batches=$(( (blocks + 9) / 10 ))
+          batches=$(( (blocks + CORPUS_BATCH_SIZE - 1) / CORPUS_BATCH_SIZE ))
           curl -fsSL "$CORPUS_URL/batches.jsonl" -o batches.jsonl
           mkdir -p corpus
           python3 - "$batches" <<'PY' > wanted.txt
@@ -354,9 +355,14 @@ jobs:
             echo "$sha  $f" | sha256sum -c -
             tar --zstd -xf "$f" -C corpus
           done < wanted.txt
-          # Point the harness at blockchain_tests/, not the corpus root: the
-          # archives also carry .meta/manifest.json, which is not a fixture.
-          find corpus/blockchain_tests -name '*.json' | wc -l
+          # Keep the first N blocks, in block order (fixtures are named
+          # <block>-<hash>.json), in a directory of their own: a batch holds
+          # more blocks than were asked for, and the archives also carry
+          # .meta/manifest.json, which is not a fixture.
+          mkdir -p corpus-run
+          find corpus/blockchain_tests_engine -name '*.json' | sort | head -n "$blocks" \
+            | xargs -I{} cp {} corpus-run/
+          ls corpus-run | wc -l
 
       - name: Build the harness
         if: steps.base-elf.outputs.no_base != 'true'
@@ -369,7 +375,7 @@ jobs:
           set -euo pipefail
           for v in base head; do
             ./bench \
-              --fixtures corpus/blockchain_tests \
+              --fixtures corpus-run \
               --elf "elf-$v" \
               --zkvmPath ziskemu \
               --jobs "$(nproc)" \
