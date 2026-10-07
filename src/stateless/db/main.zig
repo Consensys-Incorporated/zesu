@@ -91,9 +91,11 @@ pub const WitnessDatabase = struct {
         self.storage_root_cache.deinit();
     }
 
-    /// Called by the journal after each committed transaction to register bytecodes
-    /// deployed by CREATE in that transaction. Allows codeByHash to serve them without
-    /// requiring them in the witness (EIP-8025: the verifier derives them from execution).
+    /// Called by the journal to register code the block itself writes: bytecodes deployed
+    /// by CREATE (after each committed transaction) and EIP-7702 delegation designators
+    /// (when set). Allows codeByHash to serve them without requiring them in the witness
+    /// (EIP-8025: the verifier derives them from execution), including to another account
+    /// whose code has the same hash.
     pub fn notifyCodeDeployed(self: *Self, code_hash: primitives.Hash, code: bytecode.Bytecode) void {
         // getOrPut avoids two pitfalls from a naive newLegacy + put sequence:
         //   1. duplicate hash (same bytecode deployed at two addresses): put would
@@ -104,7 +106,9 @@ pub const WitnessDatabase = struct {
         // OOM panics rather than propagates: see basic()'s comment below for why.
         const gop = self.deployed_codes.getOrPut(code_hash) catch @panic("out of memory");
         if (!gop.found_existing) {
-            gop.value_ptr.* = bytecode.Bytecode.newLegacy(code.originalBytes());
+            // A designator keeps its type, as codeByHash returns it for witness codes, so
+            // callers that test isEip7702() (sender checks, CALL resolution) still see one.
+            gop.value_ptr.* = if (code == .eip7702) code else bytecode.Bytecode.newLegacy(code.originalBytes());
         }
     }
 

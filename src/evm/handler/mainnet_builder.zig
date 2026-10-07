@@ -340,7 +340,7 @@ pub const MainnetHandler = struct {
 
                                     // Apply delegation. setCode() handles zero address → clearing code.
                                     const bc = bytecode.Bytecode{ .eip7702 = bytecode.Eip7702Bytecode.new(auth.address) };
-                                    js.inner.setCode(authority_addr, bc);
+                                    js.setDelegation(authority_addr, bc);
                                 },
                                 .Invalid => {}, // unrecoverable authority — no delegation, no charge
                             }

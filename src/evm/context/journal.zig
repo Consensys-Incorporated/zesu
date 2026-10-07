@@ -1582,6 +1582,18 @@ pub fn Journal(comptime DB: type) type {
             self.inner.setCodeWithHash(address, code, hash);
         }
 
+        /// EIP-7702: install a delegation designator, as inner.setCode does. The reference
+        /// keys code by hash, so the designator is then readable by hash for the rest of the
+        /// block: an account delegated to the same target in pre-state reads this code
+        /// without it being in the witness.
+        pub fn setDelegation(self: *@This(), address: primitives.Address, code: bytecode.Bytecode) void {
+            self.inner.setCode(address, code);
+            if (comptime @hasDecl(DB, "notifyCodeDeployed")) {
+                const info = self.inner.evm_state.get(address).?.info;
+                if (!info.isEmptyCodeHash()) self.database.notifyCodeDeployed(info.code_hash, code);
+            }
+        }
+
         pub fn createAccountCheckpoint(self: *@This(), caller: primitives.Address, address: primitives.Address, balance: primitives.U256, spec_id: primitives.SpecId) !JournalCheckpoint {
             // Ignore error.
             return self.inner.createAccountCheckpoint(caller, address, balance, spec_id);
