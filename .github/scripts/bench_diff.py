@@ -12,9 +12,7 @@ fails the run.
 
 import argparse
 import csv
-import re
 import sys
-from collections import defaultdict
 
 CHIPS = ("total", "main", "opcodes", "precompiles", "memory", "base")
 
@@ -40,56 +38,6 @@ def mark(delta):
     if delta >= FLAT:
         return "🔴"
     return "⚪"
-
-FUNC_ROW = re.compile(r"\s*([\d,]+)\s+[\d.]+%\s+([\d,]+)\s+([\d,]+)\s+(\S+)")
-
-
-def top_functions(path):
-    """Parse the `TOP STEP FUNCTIONS` table out of a `ziskemu -X -S` report."""
-    steps = defaultdict(int)
-    inside = False
-    with open(path) as fh:
-        for line in fh:
-            if line.startswith("TOP STEP FUNCTIONS"):
-                inside = True
-                continue
-            if not inside or line.startswith("---"):
-                continue
-            m = FUNC_ROW.match(line)
-            if not m:
-                if not line.strip() and steps:
-                    break
-                continue
-            # Anonymous-struct ids are assigned per build and shift when
-            # unrelated code changes. Without stripping them, every function
-            # reads as simultaneously removed and added.
-            steps[re.sub(r"__anon_\d+", "", m.group(4))] += int(m.group(1).replace(",", ""))
-    return steps
-
-
-def function_section(base_report, head_report, limit=12):
-    base, head = top_functions(base_report), top_functions(head_report)
-    common = set(base) & set(head)
-    rows = [(head[k] - base[k], base[k], head[k], k) for k in common if base[k] != head[k]]
-    if not rows:
-        return ["_No per-function step movement._", ""]
-    rows.sort(key=lambda r: r[0])
-    movers = rows[:limit] + rows[-limit:] if len(rows) > 2 * limit else rows
-    seen, out = set(), []
-    out.append("| function | merge-base | this PR | delta |")
-    out.append("|---|---:|---:|---:|")
-    for d, b, h, k in movers:
-        if k in seen:
-            continue
-        seen.add(k)
-        out.append(f"| `{k}` | {b:,} | {h:,} | {d:+,} ({100 * d / b:+.2f}%) |")
-    out.append("")
-    only = (set(base) ^ set(head))
-    if only:
-        out.append(f"<sub>{len(only)} function(s) appear in only one build.</sub>")
-        out.append("")
-    return out
-
 
 def load(path):
     rows = {}
@@ -120,12 +68,6 @@ def main():
     ap.add_argument("--head-sha", default="")
     ap.add_argument("--corpus", default="")
     ap.add_argument("--label", default="", help="Object/target label, e.g. 'ZisK (rv64im+Zbb+Zbs)'")
-    # Detail pass (single vector, `ziskemu -X -S`): optional, so the aggregate
-    # comparison still renders if the detail run was skipped or failed.
-    ap.add_argument("--base-report")
-    ap.add_argument("--head-report")
-    ap.add_argument("--opcode-diff")
-    ap.add_argument("--detail-label", default="the guest vector")
     # The PR head as of rendering. A run takes minutes, so the branch can move
     # under it; when it has, say so rather than implying the numbers are current.
     ap.add_argument("--current-head", default="")
@@ -220,7 +162,7 @@ def main():
                    f"(best {deltas[0][0]:+.3f}%, worst {deltas[-1][0]:+.3f}%).")
         out.append("")
 
-    out.append("<details><summary>Per-block</summary>")
+    out.append(f"<details><summary>Per-block{f' ({args.corpus})' if args.corpus else ''}</summary>")
     out.append("")
     out.append("| block | merge-base | this PR | delta |")
     out.append("|---|---:|---:|---:|")
@@ -234,33 +176,6 @@ def main():
     out.append("</details>")
     out.append("")
 
-    # Per-opcode and per-function detail come from a single vector rather than
-    # the whole set, so label it: it answers "what moved", not "how much".
-    if args.base_report and args.head_report:
-        out.append(f"<details><summary>What moved — by function ({args.detail_label})</summary>")
-        out.append("")
-        try:
-            out.extend(function_section(args.base_report, args.head_report))
-        except OSError as e:
-            out.append(f"_Per-function detail unavailable: {e}._")
-            out.append("")
-        out.append("</details>")
-        out.append("")
-
-    if args.opcode_diff:
-        out.append(f"<details><summary>What moved — by opcode ({args.detail_label})</summary>")
-        out.append("")
-        out.append("```")
-        try:
-            with open(args.opcode_diff) as fh:
-                out.append(fh.read().rstrip())
-        except OSError as e:
-            out.append(f"unavailable: {e}")
-        out.append("```")
-        out.append("")
-        out.append("</details>")
-        out.append("")
-
     out.append("<sub>Trace costs are deterministic, so these deltas carry no run-to-run noise. "
                "A handful of blocks is a smoke signal, not a verdict — the full corpus stays the "
                "arbiter for anything perf-sensitive.</sub>")
@@ -270,13 +185,7 @@ def main():
     # all bounded, so this should never trigger — but losing the whole comment
     # to a hard API error is a bad way to find out otherwise.
     if len(body) > LIMIT:
-        keep = body.split("<details><summary>What moved — by opcode")[0]
-        body = keep + (
-            "<sub>Per-opcode detail omitted to stay under GitHub's comment size "
-            "limit — see the workflow artifacts for the full report.</sub>\n"
-        )
-        if len(body) > LIMIT:
-            body = body[: LIMIT - 200] + "\n\n<sub>Output truncated.</sub>\n"
+        body = body[: LIMIT - 200] + "\n\n<sub>Output truncated.</sub>\n"
 
     print(body)
     return 1 if (failed or mismatched) else 0
