@@ -395,7 +395,6 @@ jobs:
           set -euo pipefail
           vector=$(find zesu-zkvm/vectors -name '*.bin' | sort | head -1)
           test -n "$vector"
-          echo "label=$(basename "$vector" .bin)" >> "$GITHUB_OUTPUT"
           for v in base head; do
             ziskemu -e "elf-$v" -i "$vector" -X -S --mem-stats \
               --save-stats "snap-$v.csv" > "report-$v.txt"
@@ -422,7 +421,6 @@ jobs:
         id: diff
         if: steps.base-elf.outputs.no_base != 'true'
         env:
-          DETAIL_LABEL: ${{ steps.detail.outputs.label }}
           BASE_SHA: ${{ steps.shas.outputs.base }}
           HEAD_SHA: ${{ steps.shas.outputs.head }}
           CURRENT_HEAD: ${{ steps.now.outputs.head }}
@@ -430,12 +428,7 @@ jobs:
         run: |
           set +e
           detail=""
-          if [ -s report-base.txt ] && [ -s report-head.txt ]; then
-            detail="--base-report report-base.txt --head-report report-head.txt"
-            detail="$detail --detail-label $DETAIL_LABEL"
-            [ -s opcode-diff.txt ] && detail="$detail --opcode-diff opcode-diff.txt"
-          fi
-          [ -n "$CURRENT_HEAD" ] && detail="$detail --current-head $CURRENT_HEAD"
+          [ -n "$CURRENT_HEAD" ] && detail="--current-head $CURRENT_HEAD"
           python3 trusted/.github/scripts/bench_diff.py \
             --base base.csv --head head.csv \
             --base-sha "$BASE_SHA" \
