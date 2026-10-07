@@ -162,7 +162,7 @@ def main():
                    f"(best {deltas[0][0]:+.3f}%, worst {deltas[-1][0]:+.3f}%).")
         out.append("")
 
-    out.append("<details><summary>Per-block</summary>")
+    out.append(f"<details><summary>Per-block{f' ({args.corpus})' if args.corpus else ''}</summary>")
     out.append("")
     out.append("| block | merge-base | this PR | delta |")
     out.append("|---|---:|---:|---:|")

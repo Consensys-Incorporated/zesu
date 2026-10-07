@@ -41,7 +41,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CORPUS: sepolia
+  CORPUS: Sepolia
   CORPUS_URL: https://pub-afa6b160acfb4919bda1d0e2a00b5b77.r2.dev/testnets/sepolia
   # Pinned so runs stay comparable over time. The corpus is append-only, but
   # "the newest N blocks" would silently change what is being measured.
