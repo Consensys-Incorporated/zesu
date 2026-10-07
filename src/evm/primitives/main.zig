@@ -1,5 +1,14 @@
 const std = @import("std");
 
+test {
+    _ = @import("address_context_tests.zig");
+    _ = @import("address_trie_tests.zig");
+}
+
+const address_trie = @import("address_trie.zig");
+pub const AddressTrie = address_trie.AddressTrie;
+pub const AddressTrieManaged = address_trie.AddressTrieManaged;
+
 /// Core primitive types and constants for the Ethereum Virtual Machine (EVM) implementation.
 /// This module provides:
 /// - EVM constants and limits (gas, stack, code size)
@@ -38,27 +47,27 @@ pub inline fn mix64(x: u64) u64 {
 
 /// Hash context for HashMap keyed on Address ([20]u8).
 ///
-/// Addresses are NOT uniformly distributed: only keccak-derived ones are. CREATE2
-/// salts, synthetic test addresses and precompiles all share leading bytes, and an
-/// address prefix is attacker-influenceable. Truncating `key[0..8]` mapped every
-/// address agreeing on its first eight bytes to one identical u64, which collides in
-/// both the bucket index (`hash & mask`) and the 7-bit fingerprint (`hash >> 57`), so
-/// every probe fell through to the 20-byte `eql` — quadratic in the size of the
-/// colliding group, across all ~38 maps built on this context at once.
+/// No longer used by anything in the zkVM guest path: `EvmState`, `WarmAddresses`, the
+/// `bal_*` maps, `WitnessDatabase.storage_root_cache`, `Precompiles`, and `BaTracker`'s own
+/// per-address maps all moved to `AddressTrie`/`AddressTrieManaged` (address_trie.zig) — a
+/// path-compressed radix trie with no hash function to collide at all, so no seed and no
+/// choice of hash function is needed there. See address_trie.zig's docs for why: a
+/// hashmap's worst-case cost here is bounded by an attacker's ability to collide whatever
+/// hash buckets it, and that bound (`log2(capacity) + 7` fingerprint bits — see
+/// `std.HashMapUnmanaged`'s own comments) stayed small regardless of hash quality or
+/// per-block seeding, because it's set by the realistic size these maps reach in one block,
+/// not by the hash's nominal width; worse, a seed drawn from `prevRandao` is, by
+/// construction, known to whoever produces the block before they finalize its contents, so
+/// it doesn't defend against the attacker that actually matters here.
 ///
-/// So mix all 20 bytes: three loads and a multiply-xor chain, ending in a fold that
-/// carries the high half's entropy down into the bucket bits.
+/// The remaining consumer is native-only tooling (`database.InMemoryDB`), which doesn't face
+/// that threat model (no attacker is trying to make a local dev tool's block proving
+/// unprovable), so a plain — not seeded — Wyhash is a perfectly reasonable choice for it:
+/// still real mixing (see address_trie.zig's docs on why a linear fold isn't enough), just
+/// without the now-pointless per-block seed machinery.
 pub const AddressContext = struct {
     pub fn hash(_: @This(), key: Address) u64 {
-        const lo = std.mem.readInt(u64, key[0..8], .little);
-        const mid = std.mem.readInt(u64, key[8..16], .little);
-        const hi: u64 = std.mem.readInt(u32, key[16..20], .little);
-        // Fold all 20 bytes, then avalanche. The rotations are odd and unequal so
-        // chunks holding the same bytes don't cancel (without them lo == mid folds
-        // to just `hi`). They don't make the fold injective — it's linear over
-        // GF(2) — which is fine: addresses come from keccak, so a caller can't
-        // supply a chosen preimage.
-        return mix64(lo ^ std.math.rotl(u64, mid, 27) ^ std.math.rotl(u64, hi, 13));
+        return std.hash.Wyhash.hash(0, &key);
     }
     pub fn eql(_: @This(), a: Address, b: Address) bool {
         return std.mem.eql(u8, &a, &b);
@@ -438,17 +447,16 @@ pub const testing = struct {
         const mask: u64 = n - 1;
 
         // Bytes each shape varies, for i < 4096 — a mixer can be blind to one
-        // chunk while handling the others:
+        // region of the address while handling the others:
         //
-        //   tail, prefixed_tail   18-19  -> hi (the latter over a 0xAB background)
-        //   lo_high_bits           6-7   -> top of lo, low 48 bits zero
-        //   mid_word               8-9   -> mid
-        //   head_only              2-3   -> low half of lo
+        //   tail, prefixed_tail   18-19  -> low tail (the latter over a 0xAB background)
+        //   lo_high_bits           6-7   -> mid-low region, low 48 bits zero
+        //   mid_word               8-9   -> middle region
+        //   head_only              2-3   -> head region
         //
-        // `lo_high_bits` earns the second multiply in `mix64`: a lone multiply
-        // can't carry entropy downwards, so it puts all 4096 keys in one bucket.
-        // Don't move it to addr[8..16] — that drops the entropy into bits 0-15 and
-        // the shape stops discriminating. `mid_word` is what covers `mid`.
+        // These are regression shapes carried over from the pre-Wyhash mixers that
+        // broke on one of them each; kept so a future swap can't quietly reintroduce
+        // the same blind spot.
         const Shape = enum { tail, prefixed_tail, lo_high_bits, mid_word, head_only };
         for (std.enums.values(Shape)) |shape| {
             var seen = [_]bool{false} ** n;
