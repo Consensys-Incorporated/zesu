@@ -17,6 +17,7 @@ const std = @import("std");
 const ssz_decode = @import("ssz_decode");
 const ssz_output = @import("ssz_output");
 const executor = @import("executor");
+const primitives = @import("primitives");
 const executor_exceptions = @import("executor").executor_exceptions;
 
 pub fn main(init: std.process.Init) !void {
@@ -234,6 +235,10 @@ fn runBlock(
         }
     }
 
+    // Key the address hash as the guest does (runner.runStateless).
+    const root = try ssz_output.newPayloadRequestRoot(alloc, si.new_payload_request);
+    primitives.setHashKey(root);
+
     // successful_validation mirrors spec: True iff execution succeeds AND
     // post_state_root and receipts_root match the payload. executeStatelessInput
     // validates the roots itself (StateRootMismatch / ReceiptsRootMismatch), so a
@@ -247,7 +252,7 @@ fn runBlock(
         break :blk true;
     };
 
-    const computed = try ssz_output.serialize(alloc, si.chain_config, si.new_payload_request, successful_validation);
+    const computed = ssz_output.serializeWithRoot(root, si.chain_config, successful_validation);
     if (!std.mem.eql(u8, &computed, &expected)) {
         const got_valid = computed[32] == 0x01;
         const expected_valid = expected[32] == 0x01;

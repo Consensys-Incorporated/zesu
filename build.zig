@@ -318,6 +318,7 @@ fn buildModules(
     runner.addImport("ssz_decode", ssz_decode);
     runner.addImport("ssz_output", ssz_output);
     runner.addImport("zkvm_io", zkvm_io);
+    runner.addImport("primitives", primitives);
 
     var zkvm_root: ?*std.Build.Module = null;
     if (guest) {
@@ -620,6 +621,7 @@ pub fn build(b: *std.Build) void {
         zkevm_test_exe.root_module.addImport("ssz_decode", mods.ssz_decode);
         zkevm_test_exe.root_module.addImport("ssz_output", mods.ssz_output);
         zkevm_test_exe.root_module.addImport("executor", mods.executor);
+        zkevm_test_exe.root_module.addImport("primitives", mods.primitives);
         addCryptoLibraries(zkevm_test_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
         b.installArtifact(zkevm_test_exe);
         addRunStep(b, "zkevm-tests", "Run zkevm blockchain test fixtures", zkevm_test_exe, &.{ "--fixtures", "spec-tests/fixtures/zkevm/blockchain_tests" });
@@ -654,6 +656,7 @@ pub fn build(b: *std.Build) void {
             .{ .m = mods.rlp_decode, .name = "rlp_decode" },
             .{ .m = mods.executor, .name = "executor" },
             .{ .m = mods.hardfork, .name = "hardfork" },
+            .{ .m = mods.primitives, .name = "primitives" },
         }) |t| {
             const tst = b.addTest(.{ .root_module = t.m });
             _ = t.name;
