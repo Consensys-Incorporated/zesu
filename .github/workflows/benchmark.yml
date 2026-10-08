@@ -4,7 +4,8 @@
 # rv64im baseline, and the ZisK-specific rv64im+Zbb+Zbs build — see
 # build.zig's `rv64im-object` / `zisk-object` steps), runs both over the same
 # Sepolia blocks, and posts a separate per-chip cost delta comment for each
-# variant.
+# variant. Each comment also carries a per-suite table for the 30M gas tier of
+# tests-zkevm-benchmark, sampled to one gas-using block per suite.
 #
 # Worth doing here because ZisK trace costs are deterministic: the same ELF on
 # the same input always bills the same cells, so a 0.05% move is real signal
@@ -52,6 +53,11 @@ env:
   # blockchain_test_engine fixtures (stateless-executor #21).
   SE_REPO: Gabriel-Trintinalia/stateless-executor
   SE_REF: "c8bdd98c390c04b25841fd2b442710e0dd7ef20b"
+  # Gas tier from tests-zkevm-benchmark. The full tier is ~1200 gas-using
+  # blocks at about a minute each, so bench_sample.py keeps one per suite.
+  TIER: 30M
+  TIER_RELEASE: tests-zkevm-benchmark@v21.0.5
+  TIER_DIR: for_amsterdam_at_0030M
 
 jobs:
   bench:
@@ -65,7 +71,7 @@ jobs:
        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
                 github.event.comment.author_association))
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -383,6 +389,48 @@ jobs:
               --csv "$v.csv"
           done
 
+      # Only the sample is cached: it is a few MB against the tier's 156 MB
+      # tarball, and it is fixed by the release and the sampler.
+      - name: Cache gas-tier sample
+        id: cache-tier
+        if: steps.base-elf.outputs.no_base != 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: tier-sample
+          key: >-
+            tier-${{ env.TIER_RELEASE }}-${{ env.TIER_DIR }}-${{
+            hashFiles('trusted/.github/scripts/bench_sample.py') }}
+
+      - name: Fetch and sample the gas tier
+        if: steps.base-elf.outputs.no_base != 'true' && steps.cache-tier.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          tag=$(printf '%s' "$TIER_RELEASE" | sed 's/@/%40/')
+          tier=$(printf '%04dM' "${TIER%M}")
+          curl -fsSL -o tier.tar.gz \
+            "https://github.com/ethereum/execution-specs/releases/download/$tag/fixtures_zkevm-benchmark_$tier.tar.gz"
+          mkdir -p tier-full
+          tar -xzf tier.tar.gz -C tier-full
+          python3 trusted/.github/scripts/bench_sample.py \
+            "tier-full/fixtures/blockchain_tests/$TIER_DIR" tier-sample
+          rm -rf tier-full tier.tar.gz
+
+      # Never fails the job: the corpus run above is the headline, and a tier
+      # problem should cost its table, not the whole comment.
+      - name: Run gas-tier benchmark
+        if: steps.base-elf.outputs.no_base != 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          for v in base head; do
+            ./bench \
+              --fixtures tier-sample \
+              --elf "elf-$v" \
+              --zkvmPath ziskemu \
+              --jobs "$(nproc)" \
+              --csv "tier-$v.csv"
+          done
+
       # Detail pass: one extra execution per variant (~10s each) buys the
       # per-opcode, FROPS, memory-by-type and per-function tables. `--save-stats`
       # then lets ziskemu diff the two snapshots itself, with no further run.
@@ -430,6 +478,9 @@ jobs:
           set +e
           detail=""
           [ -n "$CURRENT_HEAD" ] && detail="--current-head $CURRENT_HEAD"
+          if [ -s tier-base.csv ] && [ -s tier-head.csv ]; then
+            detail="$detail --tier-base tier-base.csv --tier-head tier-head.csv --tier-name $TIER"
+          fi
           python3 trusted/.github/scripts/bench_diff.py \
             --base base.csv --head head.csv \
             --base-sha "$BASE_SHA" \
@@ -535,6 +586,8 @@ jobs:
           path: |
             base.csv
             head.csv
+            tier-base.csv
+            tier-head.csv
             report-base.txt
             report-head.txt
             snap-base.csv
