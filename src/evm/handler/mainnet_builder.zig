@@ -366,8 +366,10 @@ pub const MainnetHandler = struct {
         // EIP-8037 (Amsterdam+): split exec_gas into regular and state reservoir.
         // regular_gas_budget = TX_MAX_GAS_LIMIT - intrinsic (the intrinsic is entirely regular
         // gas post-EIP-2780). Any excess exec_gas above regular_gas_budget goes to the reservoir.
+        // System calls bypass the split with a fixed grant and reservoir (reference
+        // process_unchecked_system_transaction).
         const tx_reservoir = txReservoir(ctx, initial_gas);
-        const tx_regular_exec_gas: u64 = exec_gas - tx_reservoir;
+        const tx_regular_exec_gas: u64 = if (ctx.cfg.system_call_gas) |g| g.execution else exec_gas - tx_reservoir;
 
         const DB = @TypeOf(ctx.*).DatabaseType;
         var host = interpreter_mod.Host.init(DB, ctx, &evm.precompiles.precompiles);
@@ -867,8 +869,10 @@ pub const MainnetHandler = struct {
 
 /// EIP-8037 (Amsterdam+): the transaction's state-gas reservoir grant (reference
 /// `allocate_evm_gas`). The intrinsic is entirely regular gas, so execution gets at most
-/// TX_MAX_GAS_LIMIT - intrinsic and the rest goes to the reservoir.
+/// TX_MAX_GAS_LIMIT - intrinsic and the rest goes to the reservoir. System calls use a fixed
+/// grant and reservoir (reference process_unchecked_system_transaction).
 fn txReservoir(ctx: anytype, initial_gas: u64) u64 {
+    if (ctx.cfg.system_call_gas) |g| return g.reservoir;
     if (!primitives.isEnabledIn(ctx.cfg.spec, .amsterdam)) return 0;
     const exec_gas = ctx.tx.gas_limit - initial_gas;
     return exec_gas - @min(interpreter_mod.gas_costs.TX_MAX_GAS_LIMIT -| initial_gas, exec_gas);

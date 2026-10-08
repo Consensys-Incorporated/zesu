@@ -16,6 +16,12 @@
 //!   { "<test-name>": { "network", "config", "blocks": [
 //!       { "statelessInputBytes": "0x..", "statelessOutputBytes": "0x..", "blockHeader" }
 //!   ], "_info" } }
+//! or, as in the Sepolia catalog, blockchain_tests_engine/NNNNNN/<block>-<hash>.json
+//! in the engine form, whose payloads carry the same bytes and the block number in
+//! params[0]:
+//!   { "<test-name>": { "network", "config", "engineNewPayloads": [
+//!       { "params": [ { "blockNumber", .. } ], "statelessInputBytes", "statelessOutputBytes" }
+//!   ], "_info" } }
 //! `statelessOutputBytes` is the authoritative expected SSZ output. A block
 //! "passes" iff execution succeeds AND the computed SSZ output matches it
 //! byte-for-byte (executeStatelessInput itself validates the post-state/
@@ -222,10 +228,9 @@ fn runTar(gpa: std.mem.Allocator, tar_bytes: []const u8, results: *std.ArrayList
     }
 }
 
-/// Decode + execute every block in one canonical EEST blockchain-test
-/// fixture (a per-artifact arena bounds peak memory):
-///   { "<test-name>": { "blocks": [ { statelessInputBytes,
-///     statelessOutputBytes, blockHeader: { number, .. } } ] } }
+/// Decode + execute every block in one EEST blockchain-test fixture, in the
+/// "blocks" or the "engineNewPayloads" form (a per-artifact arena bounds peak
+/// memory).
 fn runArtifact(gpa: std.mem.Allocator, artifact_json: []const u8, results: *std.ArrayList(BlockResult)) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -241,7 +246,8 @@ fn runArtifact(gpa: std.mem.Allocator, artifact_json: []const u8, results: *std.
         const test_case = test_kv.value_ptr.*;
         if (test_case != .object) continue;
 
-        const blocks_val = test_case.object.get("blocks") orelse continue;
+        const blocks_val = test_case.object.get("blocks") orelse
+            test_case.object.get("engineNewPayloads") orelse continue;
         if (blocks_val != .array) continue;
 
         for (blocks_val.array.items) |block_val| {
@@ -255,9 +261,15 @@ fn runArtifact(gpa: std.mem.Allocator, artifact_json: []const u8, results: *std.
 /// the fixture's authoritative `statelessOutputBytes` byte-for-byte.
 fn runBlock(gpa: std.mem.Allocator, alloc: std.mem.Allocator, block: std.json.ObjectMap, results: *std.ArrayList(BlockResult)) !void {
     const number: u64 = blk: {
-        const bh = block.get("blockHeader") orelse break :blk 0;
-        if (bh != .object) break :blk 0;
-        break :blk jsonU64(bh.object.get("number"));
+        if (block.get("blockHeader")) |bh| {
+            if (bh == .object) break :blk jsonU64(bh.object.get("number"));
+        }
+        // An engine payload carries the block number in its execution payload.
+        if (block.get("params")) |params| {
+            if (params == .array and params.array.items.len > 0 and params.array.items[0] == .object)
+                break :blk jsonU64(params.array.items[0].object.get("blockNumber"));
+        }
+        break :blk 0;
     };
 
     const in_val = block.get("statelessInputBytes") orelse return;

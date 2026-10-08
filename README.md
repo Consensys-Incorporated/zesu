@@ -68,23 +68,29 @@ All inputs are read from **stdin** by default, or from the file at `$ZESU_INPUT`
 
 ### SSZ schema
 
+tests-zkevm@v21.0.5 layout. A 2-byte big-endian schema id precedes the container: the
+`ProtocolFork` index, then the schema revision (`0x1501` = Amsterdam, revision 1).
+
 ```
-SszStatelessInput
+SszStatelessInput                           (16-byte fixed region)
   new_payload_request: SszNewPayloadRequest
-    execution_payload: SszExecutionPayload   (V3: 528B fixed / V4: 540B fixed)
+    execution_payload: SszExecutionPayload   (540B fixed)
+    versioned_hashes: List[Bytes32]
     parent_beacon_block_root: Bytes32
     execution_requests: SszExecutionRequests
-  witness: SszExecutionWitness
-  chain_config: SszChainConfig
-  public_keys: List[BLSPubkey]
+  witness: SszExecutionWitness             (state, codes, headers)
+  chain_id: uint64
 ```
 
 ### Output schema
 
+`SszStatelessValidationResult`, 43 bytes:
+
 ```
 [0..32]  new_payload_request HashTreeRoot  (Bytes32)
-[32..40] chain_id                          (uint64 LE)
-[40]     success flag                      (0x00 / 0x01)
+[32]     successful_validation             (0x00 / 0x01)
+[33..41] chain_id                          (uint64 LE)
+[41..43] schema_id                         (uint16 LE, echoed from the input)
 ```
 
 ## Building for host OS
@@ -117,7 +123,7 @@ zesu --ssz <file>     # SSZ from a binary file
 # Build
 zig build
 
-# Run the latest batch from the default catalog (glamsterdam-devnet-7)
+# Run the latest batch from the default catalog (Sepolia)
 ./zig-out/bin/r2-stateless
 
 # Run the latest N batches

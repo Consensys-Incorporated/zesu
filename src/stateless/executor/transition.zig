@@ -144,6 +144,8 @@ const BaTracker = struct {
     }
 
     fn detectAndRecord(self: *BaTracker, bai: u64, ctx: anytype, from_tx_id: usize) void {
+        // Every commit of index `bai` has happened by now; net the access log's slots over it.
+        ctx.journaled_state.inner.closeBalIndex();
         const a = self.alloc;
         // For bai > 0, skip accounts not touched since from_tx_id: their state hasn't
         // changed since the last detectAndRecord call, so nothing new to record.
@@ -601,7 +603,7 @@ pub fn transition(
     reward: i64,
 ) !TransitionResult {
     const db = try buildDb(pre_alloc_in, env.block_hashes);
-    return transitionWithDb(arena, db, pre_alloc_in, env, txs, spec, chain_id, reward, &.{});
+    return transitionWithDb(arena, db, pre_alloc_in, env, txs, spec, chain_id, reward);
 }
 
 /// Entry point for stateless execution: accepts any DB type (InMemoryDB for the stateful
@@ -619,11 +621,6 @@ pub fn transitionWithDb(
     spec: primitives.SpecId,
     chain_id: u64,
     reward: i64,
-    /// Pre-recovered secp256k1 public keys, one per tx in order (Amsterdam spec).
-    /// Each entry must be exactly 64 bytes (uncompressed, no 0x04 prefix).
-    /// When provided for tx i, sender = keccak256(pubkey)[12:] — avoids ecrecover.
-    /// Empty slice or entry shorter than 64 bytes falls back to ecrecover.
-    public_keys: []const []const u8,
 ) !TransitionResult {
     const DB = @TypeOf(db);
     var ctx = context_mod.Context(DB).new(db, spec);
@@ -632,7 +629,7 @@ pub fn transitionWithDb(
     ctx.block = buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
     ctx.cfg.disable_base_fee = (env.base_fee == null);
-    return transitionWithContext(arena, &ctx, pre_alloc_in, env, txs, spec, chain_id, reward, public_keys);
+    return transitionWithContext(arena, &ctx, pre_alloc_in, env, txs, spec, chain_id, reward);
 }
 
 /// Low-level entry point: executes block transition on a pre-built context.
@@ -648,7 +645,6 @@ pub fn transitionWithContext(
     spec: primitives.SpecId,
     chain_id: u64,
     reward: i64,
-    public_keys: []const []const u8,
 ) !TransitionResult {
     var instructions = handler_mod.Instructions.new(spec);
     var precompiles = handler_mod.Precompiles.new(spec);
@@ -712,20 +708,6 @@ pub fn transitionWithContext(
         // 1. Determine sender
         var sender: input.Address = undefined;
         const maybe_sender: ?input.Address = blk: {
-            // Use pre-recovered public key (Amsterdam spec optimization) when provided.
-            // bal-devnet-7 SSZ schema: ByteVector[65] = full uncompressed secp256k1 key
-            // (0x04 || X || Y). Older snapshots used 64 bytes (X || Y, no 0x04 prefix).
-            // sender = keccak256(X || Y)[12:] — peel the 0x04 prefix if present.
-            if (tx_idx < public_keys.len) {
-                const pk = public_keys[tx_idx];
-                const xy: ?[]const u8 = if (pk.len == 64) pk else if (pk.len == 65 and pk[0] == 0x04) pk[1..] else null;
-                if (xy) |bytes| {
-                    const h = rlp.keccak256(bytes);
-                    var addr: input.Address = undefined;
-                    @memcpy(&addr, h[12..32]);
-                    break :blk addr;
-                }
-            }
             if (tx.r != null and tx.s != null and (tx.r.? != 0 or tx.s.? != 0)) {
                 break :blk try tx_signing.recoverSender(arena, tx, chain_id);
             }
@@ -1376,7 +1358,7 @@ fn collectDeposits(arena: std.mem.Allocator, receipts: []const Receipt) error{In
 ///                || SHA256(0x04||builder_exits) )
 /// where each type is omitted if its data is empty. Types 0x03/0x04 are the
 /// EIP-8282 (Amsterdam+) builder execution requests.
-fn computeRequestsHash(
+pub fn computeRequestsHash(
     arena: std.mem.Allocator,
     deposits: []const u8,
     withdrawals: []const u8,

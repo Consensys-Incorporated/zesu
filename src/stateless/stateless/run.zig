@@ -35,7 +35,7 @@ pub fn runStateless(allocator: std.mem.Allocator) !Result {
     };
 
     const ep = &si.new_payload_request.execution_payload;
-    std.log.info("block={d} txns={d}", .{ ep.block_number, ep.transactions.len });
+    std.log.info("block={d} txns={d}", .{ ep.block_number, ep.raw_transactions.len });
 
     const exec_result = executor.executeStatelessInput(allocator, si, si.chain_config.fork_name);
     const success = if (exec_result) |_| true else |err| blk: {
