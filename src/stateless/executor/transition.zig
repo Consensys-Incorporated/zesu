@@ -1036,8 +1036,7 @@ pub fn transitionWithContext(
 
             // Intrinsic gas check: call validateInitialTxGas via a temporary EVM instance.
             // ctx.tx is fully populated at this point (kind, data, access_list, etc.).
-            var frame_stack_pre = handler_mod.FrameStack.new();
-            var evm_pre = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType).init(ctx, null, &instructions, &precompiles, &frame_stack_pre);
+            var evm_pre = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType).init(ctx, null, &instructions, &precompiles);
             _ = handler_mod.Validation.validateInitialTxGas(&evm_pre) catch |err| {
                 ctx.journaled_state.discardTx();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
@@ -1091,8 +1090,7 @@ pub fn transitionWithContext(
         }
 
         // 4. Execute
-        var frame_stack = handler_mod.FrameStack.new();
-        var evm = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType).init(ctx, null, &instructions, &precompiles, &frame_stack);
+        var evm = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType).init(ctx, null, &instructions, &precompiles);
 
         var exec_result = handler_mod.ExecuteEvm.execute(&evm) catch |err| {
             ctx.journaled_state.discardTx();

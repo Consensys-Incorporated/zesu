@@ -29,23 +29,20 @@ pub const CallResult = struct {
     /// EIP-7702: gas charged for loading the delegation target (if any).
     /// Must be deducted from the parent frame's remaining gas after the call.
     delegation_gas: u64,
-    /// EIP-8037 (Amsterdam+): state gas charged in the sub-call.
-    /// Must be added to parent frame's gas.state_gas_used on return.
-    state_gas_used: u64,
     /// EIP-8037 (Amsterdam+): reservoir remaining in the child after execution.
     /// On success: returned to parent's reservoir.
-    /// On failure: added with state_gas_used to restore all state gas to parent's reservoir.
+    /// On failure: restored to the reservoir the call was given.
     state_gas_remaining: u64,
 
     /// Sub-call failed after execution (all gas consumed).
     pub fn failure(gas_limit: u64) CallResult {
-        return .{ .success = false, .return_data = &[_]u8{}, .gas_used = gas_limit, .gas_remaining = 0, .gas_refunded = 0, .delegation_gas = 0, .state_gas_used = 0, .state_gas_remaining = 0 };
+        return .{ .success = false, .return_data = &[_]u8{}, .gas_used = gas_limit, .gas_remaining = 0, .gas_refunded = 0, .delegation_gas = 0, .state_gas_remaining = 0 };
     }
 
     /// Sub-call failed BEFORE execution (depth limit, value-transfer failure).
     /// Per EVM spec: when no sub-code runs, all forwarded gas is returned to caller.
     pub fn preExecFailure(gas_limit: u64) CallResult {
-        return .{ .success = false, .return_data = &[_]u8{}, .gas_used = 0, .gas_remaining = gas_limit, .gas_refunded = 0, .delegation_gas = 0, .state_gas_used = 0, .state_gas_remaining = 0 };
+        return .{ .success = false, .return_data = &[_]u8{}, .gas_used = 0, .gas_remaining = gas_limit, .gas_refunded = 0, .delegation_gas = 0, .state_gas_remaining = 0 };
     }
 };
 
@@ -97,8 +94,7 @@ pub const CreateResult = struct {
     return_data: []const u8,
     /// Refund counter accumulated inside the init-code sub-interpreter.
     gas_refunded: i64,
-    /// EIP-8037 (Amsterdam+): state gas charged in the sub-call.
-    /// Must be added to parent frame's gas.state_gas_used on return.
+    /// EIP-8037 (Amsterdam+): code-deposit state gas charged by finalizeCreate on success.
     state_gas_used: u64,
     /// EIP-8037 (Amsterdam+): reservoir remaining in the child after execution.
     state_gas_remaining: u64,
@@ -628,14 +624,14 @@ pub const Host = struct {
                 defer rd_buf.deinit(alloc_mod.get());
                 rd_buf.appendSlice(alloc_mod.get(), rd) catch {};
                 var call_result = self.finalizeCall(s.checkpoint, sub_interp.result, inputs.gas_limit, sub_interp.gas.remaining, sub_interp.gas.refunded, rd_buf.items);
-                const sub_state_gas = sub_interp.gas.state_gas_used;
                 const sub_reservoir = sub_interp.gas.reservoir;
                 if (call_result.success) {
-                    call_result.state_gas_used = sub_state_gas;
                     call_result.state_gas_remaining = sub_reservoir;
                 } else {
-                    call_result.state_gas_used = 0;
-                    call_result.state_gas_remaining = sub_state_gas + sub_reservoir;
+                    // Restore the reservoir the call was given; spill drawn from regular gas returns to
+                    // it on revert and stays burned on halt (see executeIterative).
+                    call_result.state_gas_remaining = ((sub_reservoir +| sub_interp.gas.state_gas_spent) -| sub_interp.gas.state_gas_refunded) -| sub_interp.gas.state_gas_spilled;
+                    if (sub_interp.result == .revert) call_result.gas_remaining += sub_interp.gas.state_gas_spilled;
                 }
                 return call_result;
             },
@@ -677,13 +673,13 @@ pub const Host = struct {
                 var rd_buf: std.ArrayList(u8) = .empty;
                 defer rd_buf.deinit(alloc_mod.get());
                 rd_buf.appendSlice(alloc_mod.get(), rd) catch {};
-                const sub_state_gas = sub_interp.gas.state_gas_used;
                 const sub_reservoir = sub_interp.gas.reservoir;
                 var create_result = self.finalizeCreate(s.checkpoint, s.new_addr, sub_interp.result, sub_interp.gas.remaining, sub_interp.gas.refunded, rd_buf.items, spec_id, true, sub_reservoir);
-                if (create_result.success) {
-                    create_result.state_gas_used += sub_state_gas;
-                } else {
-                    create_result.state_gas_remaining += sub_state_gas;
+                if (!create_result.success) {
+                    // Restore the reservoir the call was given; spill drawn from regular gas returns to
+                    // it on revert and stays burned on halt (see executeIterative).
+                    create_result.state_gas_remaining = ((sub_reservoir +| sub_interp.gas.state_gas_spent) -| sub_interp.gas.state_gas_refunded) -| sub_interp.gas.state_gas_spilled;
+                    if (sub_interp.result == .revert) create_result.gas_remaining += sub_interp.gas.state_gas_spilled;
                 }
                 return create_result;
             },
@@ -745,14 +741,14 @@ fn setupCallCore(js: anytype, host: *Host, inputs: CallInputs, frame_depth: usiz
                     host.last_output = out.bytes;
                     if (out.reverted) {
                         js.checkpointRevert(cp);
-                        return .{ .precompile = .{ .success = false, .return_data = out.bytes, .gas_used = inputs.gas_limit, .gas_remaining = 0, .gas_refunded = 0, .delegation_gas = 0, .state_gas_used = 0, .state_gas_remaining = inputs.reservoir } };
+                        return .{ .precompile = .{ .success = false, .return_data = out.bytes, .gas_used = inputs.gas_limit, .gas_remaining = 0, .gas_refunded = 0, .delegation_gas = 0, .state_gas_remaining = inputs.reservoir } };
                     }
                     js.checkpointCommit();
                     // Touch the message target, not the code address: under CALLCODE and
                     // DELEGATECALL the precompile is only the code source. Pre-EIP-161 a touch
                     // materialises an empty account.
                     js.touchAccount(inputs.target);
-                    return .{ .precompile = .{ .success = true, .return_data = out.bytes, .gas_used = out.gas_used, .gas_remaining = inputs.gas_limit - out.gas_used, .gas_refunded = 0, .delegation_gas = 0, .state_gas_used = 0, .state_gas_remaining = inputs.reservoir } };
+                    return .{ .precompile = .{ .success = true, .return_data = out.bytes, .gas_used = out.gas_used, .gas_remaining = inputs.gas_limit - out.gas_used, .gas_refunded = 0, .delegation_gas = 0, .state_gas_remaining = inputs.reservoir } };
                 },
                 .err => {
                     // EIP-8037: precompiles never consume state gas. On OOG/failure, the caller's
@@ -847,7 +843,6 @@ fn finalizeCallCore(js: anytype, checkpoint: JournalCheckpoint, result: Instruct
         .gas_remaining = gas_rem,
         .gas_refunded = refunded,
         .delegation_gas = 0,
-        .state_gas_used = 0,
         .state_gas_remaining = 0,
     };
 }
