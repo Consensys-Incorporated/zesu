@@ -122,8 +122,6 @@ pub fn computeStateRootDelta(
     while (it.next()) |entry| {
         const addr = entry.key_ptr.*;
         const acct = entry.value_ptr.*;
-        const addr_key = mpt_builder.keccak256(&addr);
-
         const pre_storage_root: ?[32]u8 = acct.pre_storage_root orelse
             pre_storage_roots.storageRootFor(addr);
 
@@ -132,10 +130,22 @@ pub fn computeStateRootDelta(
             if (acct.code.len > 0) mpt_builder.keccak256(acct.code) else KECCAK_EMPTY;
 
         const has_code = !std.mem.eql(u8, &code_hash, &KECCAK_EMPTY);
-        const account_rlp: ?[]const u8 = if (acct.nonce == 0 and
-            acct.balance == 0 and
-            !has_code and
-            std.mem.eql(u8, &storage_root, &mpt_builder.EMPTY_TRIE_HASH))
+        const is_empty = acct.nonce == 0 and acct.balance == 0 and !has_code and
+            std.mem.eql(u8, &storage_root, &mpt_builder.EMPTY_TRIE_HASH);
+
+        // An account the block left as the witness proved it needs no trie update: re-encoding
+        // it would only rebuild its path and re-hash witness nodes whose hashes are known.
+        if (pre_storage_roots.originalAccount(addr)) |o| {
+            const unchanged = if (o.exists)
+                !is_empty and o.nonce == acct.nonce and o.balance == acct.balance and
+                    std.mem.eql(u8, &o.code_hash, &code_hash) and std.mem.eql(u8, &o.storage_root, &storage_root)
+            else
+                is_empty;
+            if (unchanged) continue;
+        }
+
+        const addr_key = mpt_builder.keccak256(&addr);
+        const account_rlp: ?[]const u8 = if (is_empty)
             null
         else
             try encodeAccountRlp(scratch, acct.nonce, acct.balance, storage_root, code_hash);
