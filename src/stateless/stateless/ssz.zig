@@ -16,7 +16,6 @@
 
 const std = @import("std");
 const input_mod = @import("input");
-const rlp_decode = @import("rlp_decode");
 const fork_mod = @import("hardfork");
 
 // ── Primitive reads (little-endian) ──────────────────────────────────────────
@@ -48,11 +47,19 @@ pub const SCHEMA_REVISION: u8 = 0x01;
 
 // ── List[ByteList] decoder ────────────────────────────────────────────────────
 
-/// Decode SSZ `List[ByteList[...], N]` from raw bytes.
+// SSZ limits of the Amsterdam StatelessInput schema (stateless.py, execution_engine/types.py).
+const MAX_EXTRA_DATA_BYTES: usize = 32;
+const MAX_WITNESS_HEADERS: usize = 256;
+const MAX_BYTES_PER_CODE: usize = 1 << 16;
+const MAX_BYTES_PER_HEADER: usize = 1 << 10;
+const MAX_BYTES_PER_WITNESS_NODE: usize = 1 << 10;
+const UNBOUNDED = std.math.maxInt(usize);
+
+/// Decode SSZ `List[ByteList[max_bytes], max_count]` from raw bytes.
 /// The encoding is: N×4-byte LE offsets followed by concatenated element data.
 /// Element i spans [off[i], off[i+1]) with off[N] = data.len.
 /// Returns zero-copy slices pointing into `data`.
-fn decodeByteListList(alloc: std.mem.Allocator, data: []const u8) ![]const []const u8 {
+fn decodeByteListList(alloc: std.mem.Allocator, data: []const u8, max_count: usize, max_bytes: usize) ![]const []const u8 {
     if (data.len == 0) return &.{};
     if (data.len < 4) return error.InvalidSsz;
 
@@ -61,6 +68,7 @@ fn decodeByteListList(alloc: std.mem.Allocator, data: []const u8) ![]const []con
     if (first_off == 0 or first_off % 4 != 0) return error.InvalidSsz;
     if (first_off > data.len) return error.InvalidSsz;
     const n = first_off / 4;
+    if (n > max_count) return error.InvalidSsz;
 
     const result = try alloc.alloc([]const u8, n);
 
@@ -71,6 +79,7 @@ fn decodeByteListList(alloc: std.mem.Allocator, data: []const u8) ![]const []con
             break :blk @intCast(data.len);
         };
         if (off_i > data.len or end_i > data.len or off_i > end_i) return error.InvalidSsz;
+        if (end_i - off_i > max_bytes) return error.InvalidSsz;
         result[i] = data[off_i..end_i];
     }
 
@@ -127,12 +136,11 @@ const EP_FIXED_SIZE: usize = 540;
 /// 1. Ere-prefixed (4-byte u32 LE length prefix prepended by `Input::with_prefixed_stdin`):
 ///    stripped when declared length matches remaining bytes, then format re-detected.
 ///
-/// 2. 2-byte big-endian schema_id + 20-byte SszStatelessInput fixed region:
+/// 2. 2-byte big-endian schema_id + 16-byte SszStatelessInput fixed region:
 ///    [0..2]   schema_id (0x1501 BE)
 ///    [2..6]   offset → new_payload_request
 ///    [6..10]  offset → witness
 ///    [10..18] chain_id (uint64 LE, inline)
-///    [18..22] offset → public_keys (packed ByteVector[65])
 pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessInput {
     // Strip Ere's 4-byte LE length prefix when present. The first 4 bytes of
     // raw SSZ are always a small offset value, so matching against data.len-4
@@ -154,20 +162,18 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     // Kept whole for the output, which echoes back the id it was given.
     const schema_id = std.mem.readInt(u16, payload[0..2], .big);
 
-    // ── SszStatelessInput fixed region (20 bytes) ────────────────────────────
+    // ── SszStatelessInput fixed region (16 bytes) ────────────────────────────
     const body = payload[2..];
-    if (body.len < 20) return error.InvalidSsz;
+    if (body.len < 16) return error.InvalidSsz;
     const off_npr: usize = readU32(body, 0);
     const off_witness: usize = readU32(body, 4);
     const chain_id = readU64(body, 8);
-    const off_pubkeys: usize = readU32(body, 16);
 
-    if (off_npr != 20 or off_witness > body.len or off_pubkeys > body.len) return error.InvalidSsz;
-    if (off_npr > off_witness or off_witness > off_pubkeys) return error.InvalidSsz;
+    if (off_npr != 16 or off_witness > body.len) return error.InvalidSsz;
+    if (off_npr > off_witness) return error.InvalidSsz;
 
     const npr_data = body[off_npr..off_witness];
-    const witness_data = body[off_witness..off_pubkeys];
-    const pubkeys_data = body[off_pubkeys..];
+    const witness_data = body[off_witness..];
 
     // ── SszNewPayloadRequest fixed region (44 bytes) ──────────────────────────
     // [0..4]   offset → execution_payload (variable)
@@ -273,14 +279,12 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     if (off_block_access_list > ep_data.len) return error.InvalidSsz;
 
     // extra_data: ByteList[32] — raw bytes (not an offset-table list)
+    if (off_transactions - off_extra_data > MAX_EXTRA_DATA_BYTES) return error.InvalidSsz;
     const extra_data = try alloc.dupe(u8, ep_data[off_extra_data..off_transactions]);
 
-    // transactions: List[ByteList, N] — offset-table format
-    const txs_raw = try decodeByteListList(alloc, ep_data[off_transactions..off_withdrawals]);
-    const transactions = try alloc.alloc(input_mod.Transaction, txs_raw.len);
-    for (txs_raw, 0..) |raw_tx, i| {
-        transactions[i] = try rlp_decode.decodeSingleTx(alloc, raw_tx);
-    }
+    // transactions: List[ByteList, N] — offset-table format. Kept opaque: a transaction
+    // that does not decode makes the block invalid, not the input (executeStatelessInput).
+    const txs_raw = try decodeByteListList(alloc, ep_data[off_transactions..off_withdrawals], UNBOUNDED, UNBOUNDED);
 
     // block_access_list: last variable field.
     const block_access_list = try alloc.dupe(u8, ep_data[off_block_access_list..]);
@@ -306,23 +310,9 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     if (off_state < 12 or off_headers > witness_data.len) return error.InvalidSsz;
     if (off_state > off_codes or off_codes > off_headers) return error.InvalidSsz;
 
-    const nodes = try decodeByteListList(alloc, witness_data[off_state..off_codes]);
-    const codes = try decodeByteListList(alloc, witness_data[off_codes..off_headers]);
-    const headers = try decodeByteListList(alloc, witness_data[off_headers..]);
-
-    // ── Public keys: List[ByteVector[65], N] (glamsterdam-devnet-6 / zkevm@v0.5.0) ────
-    // Pre-recovered secp256k1 public keys, one per transaction in order.
-    // SSZ schema is now SszList[ByteVector[PUBLIC_KEY_BYTES=65], MAX_PUBLIC_KEYS],
-    // i.e. fixed-size elements → encoded as packed 65-byte chunks (no offset table).
-    // Each key is uncompressed (0x04 || X || Y, 65 bytes). transition.zig peels the
-    // 0x04 prefix to derive the 64-byte form used for address recovery.
-    const PUBKEY_SIZE: usize = 65;
-    if (pubkeys_data.len % PUBKEY_SIZE != 0) return error.InvalidSsz;
-    const pubkey_count = pubkeys_data.len / PUBKEY_SIZE;
-    const public_keys = try alloc.alloc([]const u8, pubkey_count);
-    for (0..pubkey_count) |i| {
-        public_keys[i] = pubkeys_data[i * PUBKEY_SIZE ..][0..PUBKEY_SIZE];
-    }
+    const nodes = try decodeByteListList(alloc, witness_data[off_state..off_codes], UNBOUNDED, MAX_BYTES_PER_WITNESS_NODE);
+    const codes = try decodeByteListList(alloc, witness_data[off_codes..off_headers], UNBOUNDED, MAX_BYTES_PER_CODE);
+    const headers = try decodeByteListList(alloc, witness_data[off_headers..], MAX_WITNESS_HEADERS, MAX_BYTES_PER_HEADER);
 
     // ── Assemble StatelessInput ───────────────────────────────────────────────
     return input_mod.StatelessInput{
@@ -341,7 +331,7 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
                 .extra_data = extra_data,
                 .base_fee_per_gas = base_fee_per_gas,
                 .block_hash = block_hash,
-                .transactions = transactions,
+                .transactions = &.{},
                 .raw_transactions = txs_raw,
                 .withdrawals = withdrawals,
                 .blob_gas_used = blob_gas_used,
@@ -363,6 +353,5 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
             .fork_name = fork_mod.specName(spec),
             .schema_id = schema_id,
         },
-        .public_keys = public_keys,
     };
 }

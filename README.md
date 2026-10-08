@@ -65,27 +65,32 @@ All inputs are read from **stdin** by default, or from the file at `$ZESU_INPUT`
 |---|---|
 | **SSZ** | Raw SSZ-encoded `SszStatelessInput`. This is the canonical zkVM input format. |
 | **SSZ/Ere** | Same SSZ payload prefixed with a 4-byte u32 LE length field, as produced by the [Ere](https://github.com/eqlabs/ere) test framework's `Input::with_prefixed_stdin`. The prefix is stripped automatically. |
-| **JSON** | Development/debug only (`--json` flag). Accepts a `debug_getRawBlock` JSON-RPC response and a witness JSON file. |
 
 ### SSZ schema
 
+tests-zkevm@v21.0.5 layout. A 2-byte big-endian schema id precedes the container: the
+`ProtocolFork` index, then the schema revision (`0x1501` = Amsterdam, revision 1).
+
 ```
-SszStatelessInput
+SszStatelessInput                           (16-byte fixed region)
   new_payload_request: SszNewPayloadRequest
-    execution_payload: SszExecutionPayload   (V3: 528B fixed / V4: 540B fixed)
+    execution_payload: SszExecutionPayload   (540B fixed)
+    versioned_hashes: List[Bytes32]
     parent_beacon_block_root: Bytes32
     execution_requests: SszExecutionRequests
-  witness: SszExecutionWitness
-  chain_config: SszChainConfig
-  public_keys: List[BLSPubkey]
+  witness: SszExecutionWitness             (state, codes, headers)
+  chain_id: uint64
 ```
 
 ### Output schema
 
+`SszStatelessValidationResult`, 43 bytes:
+
 ```
 [0..32]  new_payload_request HashTreeRoot  (Bytes32)
-[32..40] chain_id                          (uint64 LE)
-[40]     success flag                      (0x00 / 0x01)
+[32]     successful_validation             (0x00 / 0x01)
+[33..41] chain_id                          (uint64 LE)
+[41..43] schema_id                         (uint16 LE, echoed from the input)
 ```
 
 ## Building for host OS
@@ -106,12 +111,9 @@ zig build
 ## CLI usage
 
 ```
-zesu [--fork <name>]                               # SSZ from stdin / $ZESU_INPUT  (default)
-zesu --ssz <file> [--fork <name>]                  # SSZ from a binary file
-zesu --json <block.json> <witness.json> [--fork <name>]
+zesu                  # SSZ from stdin / $ZESU_INPUT  (default)
+zesu --ssz <file>     # SSZ from a binary file
 ```
-
-`--fork` overrides the fork name embedded in the input (useful when the SSZ chain config is absent or you want to pin a specific EIP set, e.g. `Prague`, `Amsterdam`).
 
 ## Running against devnet blocks
 
@@ -121,7 +123,7 @@ zesu --json <block.json> <witness.json> [--fork <name>]
 # Build
 zig build
 
-# Run the latest batch from the default catalog (glamsterdam-devnet-7)
+# Run the latest batch from the default catalog (Sepolia)
 ./zig-out/bin/r2-stateless
 
 # Run the latest N batches

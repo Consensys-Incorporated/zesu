@@ -3,8 +3,9 @@
 # head and at its merge-base for each guest object variant (the zkvm-standards
 # rv64im baseline, and the ZisK-specific rv64im+Zbb+Zbs build — see
 # build.zig's `rv64im-object` / `zisk-object` steps), runs both over the same
-# devnet-8 blocks, and posts a separate per-chip cost delta comment for each
-# variant.
+# Sepolia blocks, and posts a separate per-chip cost delta comment for each
+# variant. Each comment also carries a per-suite table for the 30M gas tier of
+# tests-zkevm-benchmark, sampled to one gas-using block per suite.
 #
 # Worth doing here because ZisK trace costs are deterministic: the same ELF on
 # the same input always bills the same cells, so a 0.05% move is real signal
@@ -26,7 +27,7 @@ on:
         required: true
         type: string
       blocks:
-        description: "Number of devnet-8 blocks (rounded up to whole 10-block batches)"
+        description: "Number of Sepolia blocks (max 50)"
         required: false
         default: "10"
         type: string
@@ -41,16 +42,22 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CORPUS: glamsterdam-devnet-8
-  CORPUS_URL: https://pub-760ad8b3dd9547539f829c1ea30f18b5.r2.dev/devnets/glamsterdam-devnet-8
+  CORPUS: Sepolia
+  CORPUS_URL: https://pub-afa6b160acfb4919bda1d0e2a00b5b77.r2.dev/testnets/sepolia
   # Pinned so runs stay comparable over time. The corpus is append-only, but
   # "the newest N blocks" would silently change what is being measured.
-  CORPUS_START: "93350"
-  # Benchmark harness (public). Its `bench-eest-fixtures` branch walks fixture
-  # trees recursively and reports per-chip costs; `main` misparses these
-  # fixtures as empty blocks.
+  CORPUS_START: "11856500"
+  # Blocks per corpus batch: a run downloads whole batches and keeps the first N.
+  CORPUS_BATCH_SIZE: "100"
+  # Benchmark harness (public), at a commit that reads the corpus's
+  # blockchain_test_engine fixtures (stateless-executor #21).
   SE_REPO: Gabriel-Trintinalia/stateless-executor
-  SE_REF: "7ce7770c2ce41c9439237e73fc980fed615d7fb1"
+  SE_REF: "c8bdd98c390c04b25841fd2b442710e0dd7ef20b"
+  # Gas tier from tests-zkevm-benchmark. The full tier is ~1200 gas-using
+  # blocks at about a minute each, so bench_sample.py keeps one per suite.
+  TIER: 30M
+  TIER_RELEASE: tests-zkevm-benchmark@v21.0.5
+  TIER_DIR: for_amsterdam_at_0030M
 
 jobs:
   bench:
@@ -64,7 +71,7 @@ jobs:
        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
                 github.event.comment.author_association))
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -335,7 +342,7 @@ jobs:
         run: |
           set -euo pipefail
           blocks="$BLOCKS"
-          batches=$(( (blocks + 9) / 10 ))
+          batches=$(( (blocks + CORPUS_BATCH_SIZE - 1) / CORPUS_BATCH_SIZE ))
           curl -fsSL "$CORPUS_URL/batches.jsonl" -o batches.jsonl
           mkdir -p corpus
           python3 - "$batches" <<'PY' > wanted.txt
@@ -354,9 +361,15 @@ jobs:
             echo "$sha  $f" | sha256sum -c -
             tar --zstd -xf "$f" -C corpus
           done < wanted.txt
-          # Point the harness at blockchain_tests/, not the corpus root: the
-          # archives also carry .meta/manifest.json, which is not a fixture.
-          find corpus/blockchain_tests -name '*.json' | wc -l
+          # Keep the first N blocks, in block order (fixtures are named
+          # <block>-<hash>.json), in a directory of their own: a batch holds
+          # more blocks than were asked for, and the archives also carry
+          # .meta/manifest.json, which is not a fixture. sed, not head: head
+          # exits early, and sort's next write would then fail on SIGPIPE.
+          mkdir -p corpus-run
+          find corpus/blockchain_tests_engine -name '*.json' | sort | sed -n "1,${blocks}p" \
+            | xargs -I{} cp {} corpus-run/
+          ls corpus-run | wc -l
 
       - name: Build the harness
         if: steps.base-elf.outputs.no_base != 'true'
@@ -369,11 +382,53 @@ jobs:
           set -euo pipefail
           for v in base head; do
             ./bench \
-              --fixtures corpus/blockchain_tests \
+              --fixtures corpus-run \
               --elf "elf-$v" \
               --zkvmPath ziskemu \
               --jobs "$(nproc)" \
               --csv "$v.csv"
+          done
+
+      # Only the sample is cached: it is a few MB against the tier's 156 MB
+      # tarball, and it is fixed by the release and the sampler.
+      - name: Cache gas-tier sample
+        id: cache-tier
+        if: steps.base-elf.outputs.no_base != 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: tier-sample
+          key: >-
+            tier-${{ env.TIER_RELEASE }}-${{ env.TIER_DIR }}-${{
+            hashFiles('trusted/.github/scripts/bench_sample.py') }}
+
+      - name: Fetch and sample the gas tier
+        if: steps.base-elf.outputs.no_base != 'true' && steps.cache-tier.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          tag=$(printf '%s' "$TIER_RELEASE" | sed 's/@/%40/')
+          tier=$(printf '%04dM' "${TIER%M}")
+          curl -fsSL -o tier.tar.gz \
+            "https://github.com/ethereum/execution-specs/releases/download/$tag/fixtures_zkevm-benchmark_$tier.tar.gz"
+          mkdir -p tier-full
+          tar -xzf tier.tar.gz -C tier-full
+          python3 trusted/.github/scripts/bench_sample.py \
+            "tier-full/fixtures/blockchain_tests/$TIER_DIR" tier-sample
+          rm -rf tier-full tier.tar.gz
+
+      # Never fails the job: the corpus run above is the headline, and a tier
+      # problem should cost its table, not the whole comment.
+      - name: Run gas-tier benchmark
+        if: steps.base-elf.outputs.no_base != 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          for v in base head; do
+            ./bench \
+              --fixtures tier-sample \
+              --elf "elf-$v" \
+              --zkvmPath ziskemu \
+              --jobs "$(nproc)" \
+              --csv "tier-$v.csv"
           done
 
       # Detail pass: one extra execution per variant (~10s each) buys the
@@ -389,7 +444,6 @@ jobs:
           set -euo pipefail
           vector=$(find zesu-zkvm/vectors -name '*.bin' | sort | head -1)
           test -n "$vector"
-          echo "label=$(basename "$vector" .bin)" >> "$GITHUB_OUTPUT"
           for v in base head; do
             ziskemu -e "elf-$v" -i "$vector" -X -S --mem-stats \
               --save-stats "snap-$v.csv" > "report-$v.txt"
@@ -416,7 +470,6 @@ jobs:
         id: diff
         if: steps.base-elf.outputs.no_base != 'true'
         env:
-          DETAIL_LABEL: ${{ steps.detail.outputs.label }}
           BASE_SHA: ${{ steps.shas.outputs.base }}
           HEAD_SHA: ${{ steps.shas.outputs.head }}
           CURRENT_HEAD: ${{ steps.now.outputs.head }}
@@ -424,12 +477,10 @@ jobs:
         run: |
           set +e
           detail=""
-          if [ -s report-base.txt ] && [ -s report-head.txt ]; then
-            detail="--base-report report-base.txt --head-report report-head.txt"
-            detail="$detail --detail-label $DETAIL_LABEL"
-            [ -s opcode-diff.txt ] && detail="$detail --opcode-diff opcode-diff.txt"
+          [ -n "$CURRENT_HEAD" ] && detail="--current-head $CURRENT_HEAD"
+          if [ -s tier-base.csv ] && [ -s tier-head.csv ]; then
+            detail="$detail --tier-base tier-base.csv --tier-head tier-head.csv --tier-name $TIER"
           fi
-          [ -n "$CURRENT_HEAD" ] && detail="$detail --current-head $CURRENT_HEAD"
           python3 trusted/.github/scripts/bench_diff.py \
             --base base.csv --head head.csv \
             --base-sha "$BASE_SHA" \
@@ -535,6 +586,8 @@ jobs:
           path: |
             base.csv
             head.csv
+            tier-base.csv
+            tier-head.csv
             report-base.txt
             report-head.txt
             snap-base.csv
