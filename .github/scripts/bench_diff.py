@@ -28,6 +28,7 @@ FLAT = 0.005
 # match wins. Bands grow ~x10, and regressions get more of them than
 # improvements because those are what a reviewer has to triage.
 BANDS = (
+    (-10.0, "🏆"),
     (-2.0, "⭐"),
     (-0.05, "🟢"),
     (0.05, "⚪"),
@@ -35,7 +36,7 @@ BANDS = (
     (2.0, "🟠"),
     (float("inf"), "🔴"),
 )
-LEGEND = ("⭐ ≤ −2% · 🟢 −2…−0.05% · ⚪ within ±0.05% · "
+LEGEND = ("🏆 ≤ −10% · ⭐ −10…−2% · 🟢 −2…−0.05% · ⚪ within ±0.05% · "
           "🟡 +0.05…+0.5% · 🟠 +0.5…+2% · 🔴 ≥ +2%")
 
 
