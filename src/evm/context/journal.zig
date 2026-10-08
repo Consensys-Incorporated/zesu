@@ -1021,6 +1021,21 @@ pub const JournalInner = struct {
         _ = self;
     }
 
+    /// Code a CREATE deployed earlier in this transaction, by hash: the reference reads the
+    /// transaction's own code writes before the pre-state, and the database only learns of
+    /// them at commitTx. Reverted CREATEs are already gone from the journal. Returns a fresh
+    /// analysis, since reverting the creator frees its jump table.
+    fn createdCodeByHash(self: *const JournalInner, code_hash: primitives.Hash) ?bytecode.Bytecode {
+        for (self.journal.items) |entry| {
+            if (entry != .AccountCreated) continue;
+            const acct = self.evm_state.get(entry.AccountCreated.address) orelse continue;
+            const code = acct.info.code orelse continue;
+            if (std.mem.eql(u8, &acct.info.code_hash, &code_hash))
+                return bytecode.Bytecode.newLegacy(code.originalBytes());
+        }
+        return null;
+    }
+
     /// Reverts all changes to evm_state until given checkpoint.
     pub fn checkpointRevert(self: *JournalInner, checkpoint: JournalCheckpoint) void {
         const is_spurious_dragon_enabled = primitives.isEnabledIn(self.spec, .spurious_dragon);
@@ -1360,7 +1375,7 @@ pub const JournalInner = struct {
             const code = if (std.mem.eql(u8, &info.code_hash, &primitives.KECCAK_EMPTY))
                 bytecode.Bytecode.new()
             else
-                try db.codeByHash(info.code_hash);
+                db.codeByHash(info.code_hash) catch |err| (self.createdCodeByHash(info.code_hash) orelse return err);
             info.code = code;
         }
 

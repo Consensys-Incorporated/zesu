@@ -693,6 +693,7 @@ pub fn build(b: *std.Build) void {
             .{ .m = mods.precompile, .name = "precompile" },
             .{ .m = mods.interpreter, .name = "interpreter" },
             .{ .m = mods.handler, .name = "handler" },
+            .{ .m = mods.context, .name = "context" },
             .{ .m = mods.bytecode, .name = "bytecode" },
             .{ .m = mods.mpt, .name = "mpt" },
             .{ .m = mods.rlp_decode, .name = "rlp_decode" },
