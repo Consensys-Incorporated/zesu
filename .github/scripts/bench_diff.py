@@ -12,6 +12,8 @@ fails the run.
 
 import argparse
 import csv
+import os
+import statistics
 import sys
 
 CHIPS = ("total", "main", "opcodes", "precompiles", "memory", "base")
@@ -21,6 +23,19 @@ LIMIT = 65536
 
 # Moves smaller than this are treated as flat.
 FLAT = 0.005
+
+# Marks by delta (%), negative being an improvement: (upper bound, mark), first
+# match wins. Bands grow ~x10, and regressions get more of them than
+# improvements because those are what a reviewer has to triage.
+BANDS = (
+    (-10.0, "🏆"),
+    (-2.0, "⭐"),
+    (-0.05, "🟢"),
+    (0.05, "⚪"),
+    (0.5, "🟡"),
+    (2.0, "🟠"),
+    (float("inf"), "🔴"),
+)
 
 
 def mark(delta):
@@ -33,11 +48,10 @@ def mark(delta):
     """
     if delta is None:
         return "⚪"
-    if delta <= -FLAT:
-        return "🟢"
-    if delta >= FLAT:
-        return "🔴"
-    return "⚪"
+    for bound, m in BANDS:
+        if delta <= bound if bound < 0 else delta < bound:
+            return m
+    return BANDS[-1][1]
 
 def load(path):
     rows = {}
@@ -60,6 +74,71 @@ def pct(before, after):
     return None if not before else 100.0 * (after - before) / before
 
 
+def broken(base, head, keys):
+    """Keys that failed in either build, and keys whose payload roots differ."""
+    # Only if the harness actually reports the column (the RPC-block schema
+    # omits it).
+    failed = [
+        k for k in keys
+        if any("success" in row[k] and row[k]["success"] != "1" for row in (base, head))
+    ]
+    mismatched = [
+        k for k in keys
+        if base[k].get("payload_root") and base[k].get("payload_root") != head[k].get("payload_root")
+    ]
+    return failed, mismatched
+
+
+def render_tier(name, base, head):
+    """Median total cost per suite over a gas tier's sampled blocks.
+
+    Empty blocks are left out: they bill only the fixed per-block overhead, so
+    they would pull a suite's median toward a number that says nothing about it.
+    """
+    keys = sorted(k for k in set(base) & set(head)
+                  if (num(base[k], "gas_used") or 0) > 0)
+    if not keys:
+        return [f"#### {name} tier", "", "No comparable blocks were produced.", ""], [], []
+    failed, mismatched = broken(base, head, keys)
+
+    suites = {}
+    for k in keys:
+        b, h = num(base[k], "total"), num(head[k], "total")
+        if b is not None and h is not None:
+            suites.setdefault(base[k].get("suite", "."), []).append((b, h))
+
+    total_b = sum(num(base[k], "total") or 0 for k in keys)
+    total_h = sum(num(head[k], "total") or 0 for k in keys)
+    d = pct(total_b, total_h)
+    out = [f"#### {name} tier {mark(d)} {'—' if d is None else f'{d:+.3f}%'}", ""]
+    out.append(f"Median total cost by suite over {len(keys)} block(s) "
+               f"(empty blocks excluded).")
+    out.append("")
+    if mismatched:
+        out.append(f"> [!CAUTION]")
+        out.append(f"> **{len(mismatched)} {name} block(s) produced a different payload root "
+                   f"than the merge-base build.**")
+        out.append("")
+    if failed:
+        out.append(f"> [!WARNING]")
+        out.append(f"> {len(failed)} {name} block(s) did not execute successfully in one or "
+                   f"both builds.")
+        out.append("")
+    # Drop the directory every suite shares (`compute/` today): it is on every
+    # row and says nothing.
+    common = os.path.commonpath(list(suites)) if len(suites) > 1 else ""
+    out.append("| suite | blocks | merge-base | this PR | delta |")
+    out.append("|---|---:|---:|---:|---:|")
+    for suite in sorted(suites):
+        mb = int(statistics.median(b for b, _ in suites[suite]))
+        mh = int(statistics.median(h for _, h in suites[suite]))
+        sd = pct(mb, mh)
+        out.append(f"| {mark(sd)} {os.path.relpath(suite, common) if common else suite} | {len(suites[suite])} | {mb:,} | {mh:,} "
+                   f"| {'—' if sd is None else f'{sd:+.3f}%'} |")
+    out.append("")
+    return out, failed, mismatched
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", required=True)
@@ -71,6 +150,10 @@ def main():
     # The PR head as of rendering. A run takes minutes, so the branch can move
     # under it; when it has, say so rather than implying the numbers are current.
     ap.add_argument("--current-head", default="")
+    # Optional gas-tier run (tests-zkevm-benchmark), reported per suite.
+    ap.add_argument("--tier-base", default="")
+    ap.add_argument("--tier-head", default="")
+    ap.add_argument("--tier-name", default="gas")
     args = ap.parse_args()
 
     base, head = load(args.base), load(args.head)
@@ -83,17 +166,8 @@ def main():
         return 1
 
     # Correctness first: a perf table for a build that computed the wrong root
-    # would be actively misleading.
-    # Flag when *either* build failed the block, and only if the harness
-    # actually reports the column (the RPC-block schema omits it).
-    failed = [
-        k for k in keys
-        if any("success" in row[k] and row[k]["success"] != "1" for row in (base, head))
-    ]
-    mismatched = [
-        k for k in keys
-        if base[k].get("payload_root") and base[k].get("payload_root") != head[k].get("payload_root")
-    ]
+    # would be actively misleading. Flag when *either* build failed the block.
+    failed, mismatched = broken(base, head, keys)
 
     deltas = []
     for k in keys:
@@ -175,6 +249,13 @@ def main():
     out.append("")
     out.append("</details>")
     out.append("")
+
+    if args.tier_base and args.tier_head:
+        tier, tier_failed, tier_mismatched = render_tier(
+            args.tier_name, load(args.tier_base), load(args.tier_head))
+        out += tier
+        failed += tier_failed
+        mismatched += tier_mismatched
 
     out.append("<sub>Trace costs are deterministic, so these deltas carry no run-to-run noise. "
                "A handful of blocks is a smoke signal, not a verdict — the full corpus stays the "
