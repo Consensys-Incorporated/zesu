@@ -143,27 +143,6 @@ pub const AuthorizationItem = struct {
 
 // ─── Block access list types ──────────────────────────────────────────────────
 
-/// One storage slot change recorded in the block access list.
-pub const StorageChange = struct { slot: Hash, post_value: u256 };
-
-/// All state accesses on a single address during block execution.
-/// Produced by WitnessDatabase tracking; consumed by validateBlockAccessList.
-pub const AccessedEntry = struct {
-    address: Address,
-    /// Account state BEFORE execution (from WitnessDatabase pre-state).
-    pre_nonce: u64,
-    pre_balance: u256,
-    pre_code_hash: Hash,
-    /// Account state AFTER execution (from post-state alloc).
-    post_nonce: u64,
-    post_balance: u256,
-    post_code_hash: Hash,
-    /// Storage slots whose value changed (pre_val != post_val).
-    storage_changes: []StorageChange,
-    /// Storage slots that were read but whose value did not change.
-    storage_reads: []Hash,
-};
-
 pub const TxInput = struct {
     type: u8 = 0,
     nonce: ?u64 = null,
