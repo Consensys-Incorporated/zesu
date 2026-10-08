@@ -24,6 +24,20 @@ LIMIT = 65536
 # Moves smaller than this are treated as flat.
 FLAT = 0.005
 
+# Marks by delta (%), negative being an improvement: (upper bound, mark), first
+# match wins. Bands grow ~x10, and regressions get more of them than
+# improvements because those are what a reviewer has to triage.
+BANDS = (
+    (-2.0, "⭐"),
+    (-0.05, "🟢"),
+    (0.05, "⚪"),
+    (0.5, "🟡"),
+    (2.0, "🟠"),
+    (float("inf"), "🔴"),
+)
+LEGEND = ("⭐ ≤ −2% · 🟢 −2…−0.05% · ⚪ within ±0.05% · "
+          "🟡 +0.05…+0.5% · 🟠 +0.5…+2% · 🔴 ≥ +2%")
+
 
 def mark(delta):
     """Colour cue for a delta, where negative is an improvement.
@@ -35,11 +49,10 @@ def mark(delta):
     """
     if delta is None:
         return "⚪"
-    if delta <= -FLAT:
-        return "🟢"
-    if delta >= FLAT:
-        return "🔴"
-    return "⚪"
+    for bound, m in BANDS:
+        if delta <= bound if bound < 0 else delta < bound:
+            return m
+    return BANDS[-1][1]
 
 def load(path):
     rows = {}
@@ -214,6 +227,8 @@ def main():
             f"| {mark(d)} | {'**' + c + '**' if c == 'total' else c} "
             f"| {sb:,} | {sh:,} | {cell} |"
         )
+    out.append("")
+    out.append(f"<sub>{LEGEND}</sub>")
     out.append("")
 
     if deltas:
