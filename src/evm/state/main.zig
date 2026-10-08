@@ -644,7 +644,17 @@ pub const Account = struct {
 pub const EvmState = std.HashMap(primitives.Address, Account, primitives.AddressContext, 80);
 
 /// Structure used for EIP-1153 transient storage
-pub const TransientStorage = std.AutoHashMap(struct { primitives.Address, primitives.StorageKey }, primitives.StorageValue);
+pub const TransientKey = struct { primitives.Address, primitives.StorageKey };
+/// Folds the address and slot hashes instead of Wyhashing the 52-byte padded struct.
+pub const TransientContext = struct {
+    pub fn hash(_: @This(), k: TransientKey) u64 {
+        return primitives.AddressContext.hash(.{}, k[0]) ^ std.math.rotl(u64, primitives.SlotContext.hash(.{}, k[1]), 17);
+    }
+    pub fn eql(_: @This(), a: TransientKey, b: TransientKey) bool {
+        return a[1] == b[1] and std.mem.eql(u8, &a[0], &b[0]);
+    }
+};
+pub const TransientStorage = std.HashMap(TransientKey, primitives.StorageValue, TransientContext, 80);
 
 /// An account's Storage is a mapping from 256-bit integer keys to EvmStorageSlots.
 pub const EvmStorage = primitives.SlotMap(EvmStorageSlot);
