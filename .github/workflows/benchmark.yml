@@ -4,7 +4,8 @@
 # rv64im baseline, and the ZisK-specific rv64im+Zbb+Zbs build — see
 # build.zig's `rv64im-object` / `zisk-object` steps), runs both over the same
 # Sepolia blocks, and posts a separate per-chip cost delta comment for each
-# variant.
+# variant. Each comment also carries a per-suite table for the 30M gas tier of
+# tests-zkevm-benchmark, sampled to a few gas-using blocks per suite.
 #
 # Worth doing here because ZisK trace costs are deterministic: the same ELF on
 # the same input always bills the same cells, so a 0.05% move is real signal
@@ -14,6 +15,15 @@
 # write token from the default branch (so posting works from forks with no
 # `pull_request_target` gymnastics), nobody is blocked waiting on it, and
 # numbers posted automatically on every push get ignored within a week.
+#
+# A `/benchmark` comment only runs `trigger`, which re-dispatches this workflow:
+# `issue_comment` runs can read the Actions cache but not write it, and the
+# merge-base caches below are worth nothing unless they get saved.
+#
+# Jobs: (trigger ->) prepare -> (build per variant, inputs) -> run per variant x
+# shard -> report per variant -> finish. The shards are the corpus plus TIER_SHARDS
+# slices of the tier sample, so a bigger sample costs more runners rather than
+# more minutes.
 name: Benchmark
 
 on:
@@ -30,14 +40,25 @@ on:
         required: false
         default: "10"
         type: string
+      comment_id:
+        description: "Comment to react to (set by /benchmark)"
+        required: false
+        default: ""
+        type: string
 
+# Write access is granted per job: only trigger and finish (the reactions and the
+# dispatch) and report (the comment and label) get it. The jobs that build and run PR code
+# stay read-only.
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
 
+# The trigger runs get a group of their own, so the run they dispatch never
+# cancels them; a newer request still cancels an older run for the same PR.
 concurrency:
-  group: benchmark-${{ github.event.issue.number || inputs.pr }}
+  group: >-
+    ${{ github.event_name == 'issue_comment'
+        && format('benchmark-trigger-{0}', github.run_id)
+        || format('benchmark-{0}', inputs.pr) }}
   cancel-in-progress: true
 
 env:
@@ -52,45 +73,43 @@ env:
   # blockchain_test_engine fixtures (stateless-executor #21).
   SE_REPO: Gabriel-Trintinalia/stateless-executor
   SE_REF: "c8bdd98c390c04b25841fd2b442710e0dd7ef20b"
+  # Gas tier from tests-zkevm-benchmark. The full tier is ~1200 gas-using
+  # blocks at about a minute each, so bench_sample.py keeps TIER_PER_SUITE
+  # blocks per suite, each from a different file where the suite has them.
+  TIER: 30M
+  TIER_RELEASE: tests-zkevm-benchmark@v21.0.5
+  TIER_DIR: for_amsterdam_at_0030M
+  TIER_PER_SUITE: "3"
+  # Runners the tier sample is split across: ~6-7 blocks each keeps a shard
+  # near the time of its slowest block. Raise it with TIER_PER_SUITE.
+  TIER_SHARDS: "12"
 
 jobs:
-  bench:
-    name: Guest benchmark (${{ matrix.key }})
-    # The author-association gate is required, not optional: this checks out
-    # and runs PR code with a writable token.
+  trigger:
+    name: Trigger
+    # The author-association gate is required, not optional: the dispatched run
+    # checks out and builds PR code.
     if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.issue.pull_request &&
-       startsWith(github.event.comment.body, '/benchmark') &&
-       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
-                github.event.comment.author_association))
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/benchmark') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+               github.event.comment.author_association)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - key: rv64im
-            label: "rv64im (zkvm-standards baseline)"
-            build_step: rv64im-object
-            obj_file: zesu.o
-          - key: zisk
-            label: "ZisK (rv64im + Zbb + Zbs)"
-            build_step: zisk-object
-            obj_file: zesu-zisk.o
-
+    timeout-minutes: 5
+    # Reacting to a comment on a PR needs pull-requests: write; issues: write
+    # alone is refused with a 403. actions: write is for the dispatch.
+    permissions:
+      actions: write
+      pull-requests: write
+      issues: write
     steps:
       # `author_association` describes the commenter's relationship to the
       # *organisation*, not their access to this repo, so `MEMBER` admits
-      # read-only org members. This job builds PR code — and `zig build` runs
-      # `build.zig` — with a token that can write comments and labels, so the
-      # requester must actually hold write here. The `if:` above stays as a
-      # cheap pre-filter; this is the authority.
-      #
-      # Checked before any checkout, and only for comments: GitHub already
-      # requires write access to start a `workflow_dispatch` run.
+      # read-only org members. The run this dispatches builds PR code — and
+      # `zig build` runs `build.zig` — so the requester must actually hold write
+      # here. The `if:` above stays as a cheap pre-filter; this is the authority.
       - name: Verify the requester can write to this repo
-        if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -105,7 +124,6 @@ jobs:
           esac
 
       - name: Acknowledge the request
-        if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -118,27 +136,58 @@ jobs:
       # Every value below reaches bash through `env`, never through `${{ }}`
       # interpolation: the comment body is attacker-controlled text, and
       # substituting it into the script would let a quote or `$()` in a routine
-      # `/benchmark` note execute as shell.
+      # `/benchmark` note execute as shell. prepare validates both values again.
+      #
+      # A dispatch made with GITHUB_TOKEN does start a new run: workflow_dispatch
+      # is one of the two events exempt from that token's no-recursion rule.
+      - name: Dispatch the benchmark
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.event.repository.default_branch }}
+          PR: ${{ github.event.issue.number }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          # `/benchmark 20` -> 20; bare `/benchmark` -> prepare's default.
+          blocks=$(printf '%s' "$COMMENT_BODY" \
+            | head -1 | grep -oE '[0-9]+' | head -1 || true)
+          gh workflow run benchmark.yml -R "$REPO" --ref "$REF" \
+            -f pr="$PR" -f blocks="${blocks:-10}" -f comment_id="$COMMENT_ID"
+          echo "Dispatched the benchmark for PR #$PR"
+
+  prepare:
+    name: Prepare
+    # GitHub requires write access to start a workflow_dispatch run, and the
+    # trigger job checks it before dispatching on a commenter's behalf.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pr: ${{ steps.req.outputs.pr }}
+      blocks: ${{ steps.req.outputs.blocks }}
+      head: ${{ steps.shas.outputs.head }}
+      base: ${{ steps.shas.outputs.base }}
+      zkvm: ${{ steps.shas.outputs.zkvm }}
+      zisk: ${{ steps.zisk.outputs.version }}
+      sampler: ${{ steps.sampler.outputs.hash }}
+      shards: ${{ steps.shards.outputs.list }}
+
+    steps:
+      # Inputs reach bash through `env`, never through `${{ }}` interpolation.
       - name: Resolve request
         id: req
         env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
           INPUT_PR: ${{ inputs.pr }}
           INPUT_BLOCKS: ${{ inputs.blocks }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            pr="$INPUT_PR"; blocks="$INPUT_BLOCKS"
-          else
-            pr="$ISSUE_NUMBER"
-            # `/benchmark 20` -> 20; bare `/benchmark` -> default.
-            blocks=$(printf '%s' "$COMMENT_BODY" \
-              | head -1 | grep -oE '[0-9]+' | head -1 || true)
-          fi
-          # Both paths are user-supplied, so accept digits only before the
-          # arithmetic comparisons below, which would otherwise error out.
+          pr="$INPUT_PR"; blocks="$INPUT_BLOCKS"
+          # Both are user-supplied, so accept digits only before the arithmetic
+          # comparisons below, which would otherwise error out.
           case "$pr" in ''|*[!0-9]*) echo "bad PR number"; exit 1 ;; esac
           case "$blocks" in *[!0-9]*) blocks="" ;; esac
           blocks="${blocks:-10}"
@@ -174,7 +223,6 @@ jobs:
           base_sha=$(git merge-base "origin/$base_ref" HEAD)
           echo "head=$head_sha" >> "$GITHUB_OUTPUT"
           echo "base=$base_sha" >> "$GITHUB_OUTPUT"
-          echo "base_ref=$base_ref" >> "$GITHUB_OUTPUT"
           echo "head $head_sha"
           echo "base $base_sha (merge-base with $base_ref)"
           # Read the zesu-zkvm pin from the PR's own CI config, so the guest is
@@ -183,35 +231,14 @@ jobs:
           test -n "$ref"
           echo "zkvm=$ref" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout zesu (merge-base)
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          path: base
-          ref: ${{ steps.shas.outputs.base }}
-
-      # The reporting script comes from the default branch, never from the PR:
-      # otherwise a PR could rewrite the script that renders its own verdict.
-      - name: Checkout reporting script
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          sparse-checkout: .github/scripts
-          sparse-checkout-cone-mode: false
-          path: trusted
-
-      - name: Checkout zesu-zkvm
+      - name: Checkout zesu-zkvm CI config
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: Consensys-Incorporated/zesu-zkvm
           ref: ${{ steps.shas.outputs.zkvm }}
+          sparse-checkout: .github/workflows
+          sparse-checkout-cone-mode: false
           path: zesu-zkvm
-
-      - name: Checkout benchmark harness
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          repository: ${{ env.SE_REPO }}
-          ref: ${{ env.SE_REF }}
-          path: harness
 
       - name: Resolve the ZisK version zesu-zkvm builds against
         id: zisk
@@ -221,11 +248,76 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "ZisK $v"
 
+      # The scripts come from the default branch, never from the PR: otherwise
+      # a PR could rewrite the script that renders its own verdict.
+      - name: Checkout scripts
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          path: trusted
+
+      # Part of every cache key that depends on which blocks were sampled.
+      - name: Hash the sampler
+        id: sampler
+        run: echo "hash=$(sha256sum trusted/.github/scripts/bench_sample.py | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Plan the shards
+        id: shards
+        run: |
+          list=$(python3 -c "import json,os; n=int(os.environ['TIER_SHARDS']); print(json.dumps(['corpus']+[f'tier-{i}' for i in range(1,n+1)]))")
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "$list"
+
+  build:
+    name: Build (${{ matrix.key }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: rv64im
+            build_step: rv64im-object
+            obj_file: zesu.o
+          - key: zisk
+            build_step: zisk-object
+            obj_file: zesu-zisk.o
+
+    steps:
+      - name: Checkout zesu (PR head)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.prepare.outputs.head }}
+          path: head
+
+      - name: Checkout zesu (merge-base)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.prepare.outputs.base }}
+          path: base
+
+      - name: Checkout zesu-zkvm
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: Consensys-Incorporated/zesu-zkvm
+          ref: ${{ needs.prepare.outputs.zkvm }}
+          path: zesu-zkvm
+
+      - name: Checkout benchmark harness
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ${{ env.SE_REPO }}
+          ref: ${{ env.SE_REF }}
+          path: harness
+
       - name: Checkout zisk
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: 0xPolygonHermez/zisk
-          ref: v${{ steps.zisk.outputs.version }}
+          ref: v${{ needs.prepare.outputs.zisk }}
           path: zisk
 
       - name: Setup Zig
@@ -241,7 +333,7 @@ jobs:
 
       - name: Install cargo-zisk
         env:
-          ZISK_VERSION: ${{ steps.zisk.outputs.version }}
+          ZISK_VERSION: ${{ needs.prepare.outputs.zisk }}
         run: |
           ZISK_BIN_DIR="${HOME}/.config/.zisk/bin"
           mkdir -p "$ZISK_BIN_DIR"
@@ -262,7 +354,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: zesu-zkvm/zisk/lib/libziskos_staticlib.a
-          key: libziskos-staticlib-${{ steps.zisk.outputs.version }}-${{ runner.os }}
+          key: libziskos-staticlib-${{ needs.prepare.outputs.zisk }}-${{ runner.os }}
 
       - name: Build libziskos_staticlib.a
         if: steps.cache-libziskos.outputs.cache-hit != 'true'
@@ -281,8 +373,8 @@ jobs:
           # Keyed by matrix.key too: rv64im-object and zisk-object are different
           # ELFs for the same base sha and must never share a cache entry.
           key: >-
-            benchelf-${{ matrix.key }}-${{ steps.shas.outputs.base }}-${{ steps.zisk.outputs.version }}-${{
-            steps.shas.outputs.zkvm }}-${{ runner.os }}
+            benchelf-${{ matrix.key }}-${{ needs.prepare.outputs.base }}-${{ needs.prepare.outputs.zisk }}-${{
+            needs.prepare.outputs.zkvm }}-${{ runner.os }}
 
       - name: Build merge-base ELF
         id: base-elf
@@ -329,10 +421,69 @@ jobs:
           cp zesu-zkvm/zisk/zig-out/bin/zesu-zisk elf-head
           ls -l elf-base elf-head
 
-      - name: Fetch corpus blocks
+      - name: Build the harness
         if: steps.base-elf.outputs.no_base != 'true'
+        working-directory: harness
+        run: go build -o "$GITHUB_WORKSPACE/bench" ./bench
+
+      # Detail pass: one extra execution per build (~10s each) buys the
+      # per-opcode, FROPS, memory-by-type and per-function tables. `--save-stats`
+      # then lets ziskemu diff the two snapshots itself, with no further run.
+      # Uses the in-repo vector, which needs no SSZ encoding — so it says what
+      # moved, while the corpus and tier say how much.
+      - name: Detail pass
+        if: steps.base-elf.outputs.no_base != 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p detail
+          vector=$(find zesu-zkvm/vectors -name '*.bin' | sort | head -1)
+          test -n "$vector"
+          for v in base head; do
+            ziskemu -e "elf-$v" -i "$vector" -X -S --mem-stats \
+              --save-stats "detail/snap-$v.csv" > "detail/report-$v.txt"
+          done
+          ziskemu --diff-stats detail/snap-base.csv detail/snap-head.csv --color never \
+            > detail/opcode-diff.txt
+          ziskemu --diff-stats detail/snap-base.csv detail/snap-head.csv \
+            --html-report detail/bench-detail.html > /dev/null
+
+      # A marker file rather than a job output: matrix jobs share one set of
+      # outputs, so a per-variant flag has to travel with the variant's artifact.
+      - name: Mark a missing baseline
+        if: steps.base-elf.outputs.no_base == 'true'
+        run: touch no-base
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bin-${{ matrix.key }}
+          path: |
+            elf-base
+            elf-head
+            bench
+            no-base
+            detail/
+          if-no-files-found: error
+          retention-days: 1
+
+  inputs:
+    name: Inputs
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          path: trusted
+
+      - name: Fetch corpus blocks
         env:
-          BLOCKS: ${{ steps.req.outputs.blocks }}
+          BLOCKS: ${{ needs.prepare.outputs.blocks }}
         run: |
           set -euo pipefail
           blocks="$BLOCKS"
@@ -360,76 +511,292 @@ jobs:
           # more blocks than were asked for, and the archives also carry
           # .meta/manifest.json, which is not a fixture. sed, not head: head
           # exits early, and sort's next write would then fail on SIGPIPE.
-          mkdir -p corpus-run
+          mkdir -p inputs/corpus
           find corpus/blockchain_tests_engine -name '*.json' | sort | sed -n "1,${blocks}p" \
-            | xargs -I{} cp {} corpus-run/
-          ls corpus-run | wc -l
+            | xargs -I{} cp {} inputs/corpus/
+          ls inputs/corpus | wc -l
 
-      - name: Build the harness
-        if: steps.base-elf.outputs.no_base != 'true'
-        working-directory: harness
-        run: go build -o "$GITHUB_WORKSPACE/bench" ./bench
+      # Only the sample is cached: it is a few MB against the tier's 156 MB
+      # tarball, and it is fixed by the release and the sampler.
+      - name: Cache gas-tier sample
+        id: cache-tier
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: tier-sample
+          key: >-
+            tier-${{ env.TIER_RELEASE }}-${{ env.TIER_DIR }}-${{ env.TIER_PER_SUITE }}-${{
+            needs.prepare.outputs.sampler }}
 
-      - name: Run benchmark
-        if: steps.base-elf.outputs.no_base != 'true'
+      - name: Fetch and sample the gas tier
+        if: steps.cache-tier.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
+          tag=$(printf '%s' "$TIER_RELEASE" | sed 's/@/%40/')
+          tier=$(printf '%04dM' "${TIER%M}")
+          curl -fsSL -o tier.tar.gz \
+            "https://github.com/ethereum/execution-specs/releases/download/$tag/fixtures_zkevm-benchmark_$tier.tar.gz"
+          mkdir -p tier-full
+          tar -xzf tier.tar.gz -C tier-full
+          python3 trusted/.github/scripts/bench_sample.py \
+            "tier-full/fixtures/blockchain_tests/$TIER_DIR" tier-sample \
+            --per-suite "$TIER_PER_SUITE"
+          rm -rf tier-full tier.tar.gz
+
+      # Round-robin over the sorted files, keeping each file's suite directory
+      # so the harness's `suite` column matches an unsplit run.
+      - name: Split the tier sample
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, shutil
+          n = int(os.environ["TIER_SHARDS"])
+          files = sorted(
+              os.path.relpath(os.path.join(d, f), "tier-sample")
+              for d, _, fs in os.walk("tier-sample") for f in fs if f.endswith(".json"))
+          for i, rel in enumerate(files):
+              dst = os.path.join("inputs", f"tier-{i % n + 1}", rel)
+              os.makedirs(os.path.dirname(dst), exist_ok=True)
+              shutil.copy(os.path.join("tier-sample", rel), dst)
+          for s in range(n):
+              print(f"tier-{s + 1}: {len(files[s::n])} block(s)")
+          PY
+
+      - name: Upload inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: inputs
+          path: inputs/
+          if-no-files-found: error
+          retention-days: 1
+
+  run:
+    name: Run (${{ matrix.key }}, ${{ matrix.shard }})
+    needs: [prepare, build, inputs]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # A tier shard failing costs the tier table, not the whole comment.
+    continue-on-error: ${{ matrix.shard != 'corpus' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        key: [rv64im, zisk]
+        shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
+
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bin-${{ matrix.key }}
+
+      - name: Check for a baseline
+        id: base
+        run: |
+          if [ -e no-base ]; then
+            echo "No merge-base build for this variant; nothing to run."
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download inputs
+        if: steps.base.outputs.missing != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: inputs
+          path: inputs
+
+      - name: Install ziskemu runtime deps
+        if: steps.base.outputs.missing != 'true'
+        run: sudo apt-get install -y libomp5 libopenmpi3t64
+
+      - name: Install ziskemu
+        if: steps.base.outputs.missing != 'true'
+        env:
+          ZISK_VERSION: ${{ needs.prepare.outputs.zisk }}
+        run: |
+          ZISK_BIN_DIR="${HOME}/.config/.zisk/bin"
+          mkdir -p "$ZISK_BIN_DIR"
+          curl -fsSL "https://raw.githubusercontent.com/0xPolygonHermez/zisk/main/ziskup/ziskup" \
+            -o "$ZISK_BIN_DIR/ziskup"
+          chmod +x "$ZISK_BIN_DIR/ziskup"
+          "$ZISK_BIN_DIR/ziskup" -v "$ZISK_VERSION" --cpu --nokey
+          echo "$ZISK_BIN_DIR" >> $GITHUB_PATH
+          "$ZISK_BIN_DIR/ziskemu" --version
+
+      # Trace costs are deterministic, so the merge-base's results are a pure
+      # function of this key: every PR sharing a merge-base reuses them and runs
+      # only its own head. The key covers everything the CSV depends on — the
+      # ELF inputs, the harness, the blocks, the tier sample and its split.
+      - name: Cache merge-base results
+        id: cache-base-results
+        if: steps.base.outputs.missing != 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: base.csv
+          key: >-
+            benchres-${{ matrix.key }}-${{ matrix.shard }}-${{ needs.prepare.outputs.base }}-${{
+            needs.prepare.outputs.zisk }}-${{ needs.prepare.outputs.zkvm }}-${{ runner.os }}-${{
+            env.SE_REF }}-${{ env.CORPUS_START }}-${{ needs.prepare.outputs.blocks }}-${{
+            env.TIER_RELEASE }}-${{ env.TIER_DIR }}-${{ env.TIER_PER_SUITE }}-${{
+            needs.prepare.outputs.sampler }}-${{ env.TIER_SHARDS }}
+
+      # Base and head run side by side rather than one after the other: a
+      # shard's wall time is set by its slowest block, and this pays it once.
+      - name: Run benchmark
+        if: steps.base.outputs.missing != 'true'
+        env:
+          CACHED: ${{ steps.cache-base-results.outputs.cache-hit }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          # Artifacts do not keep the executable bit.
+          chmod +x bench elf-base elf-head
+          pids=()
           for v in base head; do
+            if [ "$v" = base ] && [ "$CACHED" = true ] && [ -s base.csv ]; then
+              echo "base.csv restored from cache"; continue
+            fi
             ./bench \
-              --fixtures corpus-run \
+              --fixtures "inputs/$SHARD" \
               --elf "elf-$v" \
               --zkvmPath ziskemu \
               --jobs "$(nproc)" \
-              --csv "$v.csv"
+              --csv "$v.csv" > "$v.log" 2>&1 &
+            pids+=("$!:$v")
           done
+          rc=0
+          for p in "${pids[@]}"; do
+            v="${p#*:}"
+            wait "${p%%:*}" || { echo "::error::$v run failed"; rc=1; }
+            echo "::group::$v log"; cat "$v.log"; echo "::endgroup::"
+          done
+          exit $rc
 
-      # Detail pass: one extra execution per variant (~10s each) buys the
-      # per-opcode, FROPS, memory-by-type and per-function tables. `--save-stats`
-      # then lets ziskemu diff the two snapshots itself, with no further run.
-      # Uses the in-repo vector, which needs no SSZ encoding — so it says what
-      # moved, while the corpus above says how much.
-      - name: Detail pass
-        id: detail
-        if: steps.base-elf.outputs.no_base != 'true'
+      - name: Upload results
+        if: steps.base.outputs.missing != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: csv-${{ matrix.key }}-${{ matrix.shard }}
+          path: |
+            base.csv
+            head.csv
+          if-no-files-found: error
+          retention-days: 1
+
+  report:
+    name: Report (${{ matrix.key }})
+    needs: [prepare, build, run]
+    # Runs after a failed tier shard too: that only drops the tier table.
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: rv64im
+            label: "rv64im (zkvm-standards baseline)"
+          - key: zisk
+            label: "ZisK (rv64im + Zbb + Zbs)"
+
+    steps:
+      # The reporting script comes from the default branch, never from the PR:
+      # otherwise a PR could rewrite the script that renders its own verdict.
+      - name: Checkout reporting script
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+          path: trusted
+
+      - name: Download binaries
         continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bin-${{ matrix.key }}
+          path: bin
+
+      - name: Download results
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: csv-${{ matrix.key }}-*
+          path: csv
+
+      # Joins the shards back into one CSV pair per section. The corpus is
+      # required; the tier table is rendered only if every tier shard came back,
+      # so a missing shard cannot quietly drop suites from it.
+      - name: Collect results
+        id: collect
+        env:
+          KEY: ${{ matrix.key }}
         run: |
           set -euo pipefail
-          vector=$(find zesu-zkvm/vectors -name '*.bin' | sort | head -1)
-          test -n "$vector"
-          for v in base head; do
-            ziskemu -e "elf-$v" -i "$vector" -X -S --mem-stats \
-              --save-stats "snap-$v.csv" > "report-$v.txt"
-          done
-          ziskemu --diff-stats snap-base.csv snap-head.csv --color never > opcode-diff.txt
-          ziskemu --diff-stats snap-base.csv snap-head.csv \
-            --html-report bench-detail.html > /dev/null
+          if [ -e bin/no-base ]; then
+            echo "no_base=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          cp bin/detail/* . 2>/dev/null || true
+          python3 - <<'PY'
+          import csv, os, sys
+          key, n = os.environ["KEY"], int(os.environ["TIER_SHARDS"])
+          def shard(s, v):
+              p = f"csv/csv-{key}-{s}/{v}.csv"
+              return p if os.path.exists(p) and os.path.getsize(p) else None
+          def join(paths, out):
+              w = None
+              with open(out, "w", newline="") as fh:
+                  for p in paths:
+                      with open(p, newline="") as src:
+                          r = csv.DictReader(src)
+                          if w is None:
+                              w = csv.DictWriter(fh, fieldnames=r.fieldnames)
+                              w.writeheader()
+                          w.writerows(r)
+          for v in ("base", "head"):
+              p = shard("corpus", v)
+              if not p:
+                  sys.exit(f"::error::no corpus {v} results for {key}")
+              join([p], f"{v}.csv")
+          tiers = {v: [shard(f"tier-{i}", v) for i in range(1, n + 1)] for v in ("base", "head")}
+          if all(all(ps) for ps in tiers.values()):
+              for v, ps in tiers.items():
+                  join(ps, f"tier-{v}.csv")
+          else:
+              print(f"::warning::a {key} tier shard is missing; the tier table is left out")
+          PY
 
       # A run takes minutes, so the PR can move under it. Read the head again
       # here and let the comment say so, rather than silently presenting the
       # numbers as current.
       - name: Re-read the PR head
         id: now
-        if: steps.base-elf.outputs.no_base != 'true'
+        if: steps.collect.outputs.no_base != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ steps.req.outputs.pr }}
+          PR: ${{ needs.prepare.outputs.pr }}
         run: |
           cur=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha || true)
           echo "head=$cur" >> "$GITHUB_OUTPUT"
 
       - name: Render comparison
         id: diff
-        if: steps.base-elf.outputs.no_base != 'true'
+        if: steps.collect.outputs.no_base != 'true'
         env:
-          BASE_SHA: ${{ steps.shas.outputs.base }}
-          HEAD_SHA: ${{ steps.shas.outputs.head }}
+          BASE_SHA: ${{ needs.prepare.outputs.base }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head }}
           CURRENT_HEAD: ${{ steps.now.outputs.head }}
           OBJECT_LABEL: ${{ matrix.label }}
         run: |
           set +e
           detail=""
           [ -n "$CURRENT_HEAD" ] && detail="--current-head $CURRENT_HEAD"
+          if [ -s tier-base.csv ] && [ -s tier-head.csv ]; then
+            detail="$detail --tier-base tier-base.csv --tier-head tier-head.csv --tier-name $TIER"
+          fi
           python3 trusted/.github/scripts/bench_diff.py \
             --base base.csv --head head.csv \
             --base-sha "$BASE_SHA" \
@@ -452,11 +819,11 @@ jobs:
           done
 
       - name: Post no-baseline notice
-        if: steps.base-elf.outputs.no_base == 'true'
+        if: steps.collect.outputs.no_base == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ steps.req.outputs.pr }}
+          PR: ${{ needs.prepare.outputs.pr }}
           MATRIX_KEY: ${{ matrix.key }}
           MATRIX_LABEL: ${{ matrix.label }}
         run: |
@@ -476,11 +843,11 @@ jobs:
           fi
 
       - name: Post result
-        if: steps.base-elf.outputs.no_base != 'true'
+        if: steps.diff.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ steps.req.outputs.pr }}
+          PR: ${{ needs.prepare.outputs.pr }}
           MATRIX_KEY: ${{ matrix.key }}
         run: |
           set -euo pipefail
@@ -513,7 +880,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ steps.req.outputs.pr }}
+          PR: ${{ needs.prepare.outputs.pr }}
         run: |
           # Create-then-add, because adding an unknown label is not reliably
           # self-creating. Both calls are idempotent.
@@ -531,10 +898,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: benchmark-${{ steps.req.outputs.pr }}-${{ steps.shas.outputs.head }}-${{ matrix.key }}
+          name: benchmark-${{ needs.prepare.outputs.pr }}-${{ needs.prepare.outputs.head }}-${{ matrix.key }}
           path: |
             base.csv
             head.csv
+            tier-base.csv
+            tier-head.csv
             report-base.txt
             report-head.txt
             snap-base.csv
@@ -550,3 +919,34 @@ jobs:
         run: |
           echo "Benchmark found a correctness divergence — see the PR comment."
           exit 1
+
+  # Swaps the 👀 on the request for 🚀 when every comment was posted cleanly,
+  # or 😕 when a report failed, so the outcome shows on the request itself.
+  # Skipped on cancellation: a newer /benchmark superseded this one.
+  finish:
+    name: Finish
+    needs: [prepare, report]
+    if: >
+      !cancelled() && inputs.comment_id != '' &&
+      needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: React with the outcome
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ inputs.comment_id }}
+          RESULT: ${{ needs.report.result }}
+        run: |
+          case "$COMMENT_ID" in ''|*[!0-9]*) echo "bad comment id"; exit 1 ;; esac
+          url="repos/$REPO/issues/comments/$COMMENT_ID/reactions"
+          for id in $(gh api "$url" \
+              --jq '.[] | select(.content == "eyes" and .user.login == "github-actions[bot]") | .id'); do
+            gh api -X DELETE "$url/$id" --silent || true
+          done
+          if [ "$RESULT" = success ]; then content=rocket; else content=confused; fi
+          gh api -X POST "$url" -f content="$content" --silent
