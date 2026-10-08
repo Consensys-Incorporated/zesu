@@ -333,7 +333,6 @@ pub fn refundNewAccountLifo(interp: *Interpreter, amount: u64) void {
 pub fn resumeCall(interp: *Interpreter, result: host_module.CallResult, ret_off: usize, ret_size: usize, new_account_state_gas: u64) void {
     interp.gas.remaining +|= result.gas_remaining;
     interp.gas.refunded += result.gas_refunded;
-    interp.gas.addStateGasFromChild(result.state_gas_used);
     // EIP-8037: restore the reservoir from the child (on success: child's remaining reservoir;
     // on failure: all child state gas + reservoir returned as state_gas_remaining).
     interp.gas.reservoir += result.state_gas_remaining;
@@ -371,7 +370,6 @@ pub fn resumeCall(interp: *Interpreter, result: host_module.CallResult, ret_off:
 pub fn resumeCreate(interp: *Interpreter, result: host_module.CreateResult) void {
     interp.gas.remaining +|= result.gas_remaining;
     interp.gas.refunded += result.gas_refunded;
-    interp.gas.addStateGasFromChild(result.state_gas_used);
     // EIP-8037: code-deposit state gas that spilled from the child's regular gas must be
     // tracked so a later halt/revert refill returns it to regular gas (burned on halt),
     // not the reservoir. Without this the spilled deposit inflates the parent reservoir.

@@ -162,45 +162,6 @@ pub const FrameResult = struct {
     }
 };
 
-/// Frame data for call/create operations
-pub const FrameData = struct {
-    /// Caller address
-    caller: primitives.Address,
-    /// Target address
-    target: primitives.Address,
-    /// Value being transferred
-    value: primitives.U256,
-    /// Input data
-    input: []const u8,
-    /// Gas limit
-    gas_limit: u64,
-    /// Is static call
-    is_static: bool,
-    /// Call scheme
-    scheme: interpreter.CallScheme,
-
-    /// Create new frame data
-    pub fn new(
-        caller: primitives.Address,
-        target: primitives.Address,
-        value: primitives.U256,
-        input: []const u8,
-        gas_limit: u64,
-        is_static: bool,
-        scheme: interpreter.CallScheme,
-    ) FrameData {
-        return FrameData{
-            .caller = caller,
-            .target = target,
-            .value = value,
-            .input = input,
-            .gas_limit = gas_limit,
-            .is_static = is_static,
-            .scheme = scheme,
-        };
-    }
-};
-
 /// Generic EVM parametrised over a DB type.
 /// `Evm = EvmFor(database.InMemoryDB)` is the default used throughout zevm.
 /// External users (zevm-stateless) can instantiate EvmFor(their_db) directly.
@@ -210,112 +171,29 @@ pub fn EvmFor(comptime DB: type) type {
         inspector: ?*Inspector,
         instructions: *Instructions,
         precompiles: *Precompiles,
-        frame_stack: *FrameStack,
 
         pub fn init(
             ctx: *context.Context(DB),
             inspector: ?*Inspector,
             instructions: *Instructions,
             precompiles: *Precompiles,
-            frame_stack: *FrameStack,
         ) @This() {
             return .{
                 .ctx = ctx,
                 .inspector = inspector,
                 .instructions = instructions,
                 .precompiles = precompiles,
-                .frame_stack = frame_stack,
             };
         }
 
         pub fn getContext(self: *@This()) *context.Context(DB) {
             return self.ctx;
         }
-
-        pub fn createFrame(self: *@This(), frame_data: FrameData) !Frame {
-            return Frame.init(frame_data, self.instructions, self.precompiles);
-        }
-
-        pub fn executeFrame(self: *@This(), frame: *Frame) !FrameResult {
-            return frame.execute(self.ctx);
-        }
     };
 }
 
 /// Default EVM for InMemoryDB — drop-in for all existing zevm code.
 pub const Evm = EvmFor(database.InMemoryDB);
-
-/// Frame for execution
-pub const Frame = struct {
-    /// Frame data
-    data: FrameData,
-    /// Instructions
-    instructions: *Instructions,
-    /// Precompiles
-    precompiles: *Precompiles,
-    /// Interpreter
-    interpreter: interpreter.Interpreter,
-
-    /// Create new frame
-    pub fn init(data: FrameData, instructions: *Instructions, precompiles: *Precompiles) Frame {
-        // Extract spec from instructions provider (configured for this hardfork)
-        const spec = instructions.spec;
-
-        return Frame{
-            .data = data,
-            .instructions = instructions,
-            .precompiles = precompiles,
-            .interpreter = interpreter.Interpreter.new(
-                interpreter.Memory.new(),
-                interpreter.ExtBytecode.new(bytecode.Bytecode.new()),
-                interpreter.InputsImpl.new(
-                    data.caller,
-                    data.target,
-                    data.value,
-                    @constCast(data.input),
-                    data.gas_limit,
-                    data.scheme,
-                    data.is_static,
-                    0,
-                ),
-                data.is_static,
-                spec, // Use spec from instructions instead of hardcoding
-                data.gas_limit,
-            ),
-        };
-    }
-
-    /// Free resources owned by this frame (interpreter stack + memory).
-    pub fn deinit(self: *Frame) void {
-        self.interpreter.deinit();
-    }
-
-    /// Execute frame with host access for full EVM semantics.
-    pub fn execute(self: *Frame, ctx: anytype) !FrameResult {
-        const DB = @TypeOf(ctx.*).DatabaseType;
-        var host = interpreter.Host.init(DB, ctx, &self.precompiles.precompiles);
-        defer host.releaseOutput();
-
-        _ = self.interpreter.runWithHost(&self.instructions.table, &host);
-
-        const gas_used = self.interpreter.gas.getSpent();
-        const gas_refunded = self.interpreter.gas.refunded;
-        const state_gas_used = self.interpreter.gas.state_gas_used;
-        const status: ExecutionStatus = switch (self.interpreter.result) {
-            .stop, .@"return", .selfdestruct => .Success,
-            .revert => .Revert,
-            else => .Halt,
-        };
-
-        var exec_result = ExecutionResult.new(status, gas_used);
-        exec_result.state_gas_used = state_gas_used;
-        return FrameResult.new(
-            exec_result,
-            self.interpreter.gas.remaining,
-            gas_refunded,
-        );
-    }
-};
 
 /// Instructions provider for EVM execution
 pub const Instructions = struct {
@@ -366,51 +244,6 @@ pub const Precompiles = struct {
     }
 };
 
-/// Frame stack
-pub const FrameStack = struct {
-    /// Stack of frames
-    frames: std.ArrayList(Frame),
-
-    /// Create new frame stack
-    pub fn new() FrameStack {
-        return FrameStack{
-            .frames = std.ArrayList(Frame){ .items = &[_]Frame{}, .capacity = 0 },
-        };
-    }
-
-    /// Create new frame stack with preallocated capacity
-    pub fn newPrealloc(capacity: usize) FrameStack {
-        var stack = FrameStack.new();
-        stack.frames.ensureTotalCapacity(alloc_mod.get(), capacity) catch {};
-        return stack;
-    }
-
-    /// Push frame
-    pub fn push(self: *FrameStack, frame: Frame) !void {
-        try self.frames.append(alloc_mod.get(), frame);
-    }
-
-    /// Pop frame
-    pub fn pop(self: *FrameStack) ?Frame {
-        if (self.frames.items.len == 0) {
-            return null;
-        }
-        return self.frames.pop();
-    }
-
-    /// Get frame count
-    pub fn len(self: *FrameStack) usize {
-        return self.frames.items.len;
-    }
-
-    /// Deinitialize frame stack
-    pub fn deinit(self: *FrameStack) void {
-        // ArrayList deinit requires allocator in Zig 0.15.1
-        // For now, just clear the items
-        self.frames.items = &[_]Frame{};
-    }
-};
-
 /// Inspector for execution monitoring
 pub const Inspector = struct {
     /// Inspect before execution
@@ -427,9 +260,6 @@ pub const Inspector = struct {
     }
 };
 
-// Import required modules
-const bytecode = @import("bytecode");
-
 // Placeholder for testing
 pub const testing = struct {
     pub fn testHandler() !void {
@@ -437,8 +267,6 @@ pub const testing = struct {
 
         // Test basic handler components
         try testExecutionResult();
-        try testFrameData();
-        try testFrameStack();
 
         // Test mainnet builder
         try mainnet_builder.testing.testMainnetBuilder();
@@ -454,60 +282,6 @@ pub const testing = struct {
         std.debug.assert(result.status == .Success);
         std.debug.assert(result.gas_used == 1000);
         std.debug.assert(result.logs.items.len == 0);
-    }
-
-    fn testFrameData() !void {
-        const caller = [_]u8{0x01} ** 20;
-        const target = [_]u8{0x02} ** 20;
-        const value = @as(primitives.U256, 100);
-        const input = "Hello, World!";
-        const gas_limit: u64 = 10000;
-
-        const frame_data = FrameData.new(
-            caller,
-            target,
-            value,
-            input,
-            gas_limit,
-            false,
-            .call,
-        );
-
-        std.debug.assert(std.mem.eql(u8, &frame_data.caller, &caller));
-        std.debug.assert(std.mem.eql(u8, &frame_data.target, &target));
-        std.debug.assert(frame_data.value == value);
-        std.debug.assert(std.mem.eql(u8, frame_data.input, input));
-        std.debug.assert(frame_data.gas_limit == gas_limit);
-        std.debug.assert(frame_data.is_static == false);
-        std.debug.assert(frame_data.scheme == .call);
-    }
-
-    fn testFrameStack() !void {
-        var stack = FrameStack.new();
-        defer stack.deinit();
-
-        std.debug.assert(stack.len() == 0);
-
-        const frame_data = FrameData.new(
-            [_]u8{0x01} ** 20,
-            [_]u8{0x02} ** 20,
-            @as(primitives.U256, 100),
-            "test",
-            1000,
-            false,
-            .call,
-        );
-
-        var instructions = Instructions.new(primitives.SpecId.prague);
-        var precompiles = Precompiles.new(primitives.SpecId.prague);
-        const frame = Frame.init(frame_data, &instructions, &precompiles);
-        try stack.push(frame);
-
-        std.debug.assert(stack.len() == 1);
-
-        const popped = stack.pop();
-        std.debug.assert(popped != null);
-        std.debug.assert(stack.len() == 0);
     }
 };
 
