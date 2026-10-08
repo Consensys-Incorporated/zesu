@@ -95,6 +95,10 @@ inline fn kmemoIndex(data: []const u8) usize {
 }
 
 pub inline fn keccak256(data: []const u8, output: *Hash32) void {
+    if (data.len == 0) {
+        output.* = primitives.KECCAK_EMPTY;
+        return;
+    }
     if (data.len == 20 or data.len == 32) {
         const idx = kmemoIndex(data);
         if (kmemo_len[idx] == data.len and std.mem.eql(u8, kmemo_key[idx][0..data.len], data)) {
