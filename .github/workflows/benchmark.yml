@@ -5,7 +5,7 @@
 # build.zig's `rv64im-object` / `zisk-object` steps), runs both over the same
 # Sepolia blocks, and posts a separate per-chip cost delta comment for each
 # variant. Each comment also carries a per-suite table for the 30M gas tier of
-# tests-zkevm-benchmark, sampled to a few gas-using blocks per suite.
+# tests-zkevm-benchmark, sampled to one measured block per fixture file.
 #
 # Worth doing here because ZisK trace costs are deterministic: the same ELF on
 # the same input always bills the same cells, so a 0.05% move is real signal
@@ -74,15 +74,15 @@ env:
   SE_REPO: Gabriel-Trintinalia/stateless-executor
   SE_REF: "c8bdd98c390c04b25841fd2b442710e0dd7ef20b"
   # Gas tier from tests-zkevm-benchmark. The full tier is ~1200 gas-using
-  # blocks at about a minute each, so bench_sample.py keeps TIER_PER_SUITE
-  # blocks per suite, each from a different file where the suite has them.
+  # blocks at about a minute each, so bench_sample.py keeps the measured (last)
+  # block of TIER_PER_FILE tests from each fixture file: 120 blocks at 1.
   TIER: 30M
   TIER_RELEASE: tests-zkevm-benchmark@v21.0.5
   TIER_DIR: for_amsterdam_at_0030M
-  TIER_PER_SUITE: "3"
+  TIER_PER_FILE: "1"
   # Runners the tier sample is split across: ~6-7 blocks each keeps a shard
-  # near the time of its slowest block. Raise it with TIER_PER_SUITE.
-  TIER_SHARDS: "12"
+  # near the time of its slowest block. Raise it with TIER_PER_FILE.
+  TIER_SHARDS: "18"
 
 jobs:
   trigger:
@@ -524,7 +524,7 @@ jobs:
         with:
           path: tier-sample
           key: >-
-            tier-${{ env.TIER_RELEASE }}-${{ env.TIER_DIR }}-${{ env.TIER_PER_SUITE }}-${{
+            tier-${{ env.TIER_RELEASE }}-${{ env.TIER_DIR }}-${{ env.TIER_PER_FILE }}-${{
             needs.prepare.outputs.sampler }}
 
       - name: Fetch and sample the gas tier
@@ -539,7 +539,7 @@ jobs:
           tar -xzf tier.tar.gz -C tier-full
           python3 trusted/.github/scripts/bench_sample.py \
             "tier-full/fixtures/blockchain_tests/$TIER_DIR" tier-sample \
-            --per-suite "$TIER_PER_SUITE"
+            --per-file "$TIER_PER_FILE"
           rm -rf tier-full tier.tar.gz
 
       # Round-robin over the sorted files, keeping each file's suite directory
@@ -635,7 +635,7 @@ jobs:
             benchres-${{ matrix.key }}-${{ matrix.shard }}-${{ needs.prepare.outputs.base }}-${{
             needs.prepare.outputs.zisk }}-${{ needs.prepare.outputs.zkvm }}-${{ runner.os }}-${{
             env.SE_REF }}-${{ env.CORPUS_START }}-${{ needs.prepare.outputs.blocks }}-${{
-            env.TIER_RELEASE }}-${{ env.TIER_DIR }}-${{ env.TIER_PER_SUITE }}-${{
+            env.TIER_RELEASE }}-${{ env.TIER_DIR }}-${{ env.TIER_PER_FILE }}-${{
             needs.prepare.outputs.sampler }}-${{ env.TIER_SHARDS }}
 
       # Base and head run side by side rather than one after the other: a
