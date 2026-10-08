@@ -36,8 +36,6 @@ BANDS = (
     (2.0, "🟠"),
     (float("inf"), "🔴"),
 )
-LEGEND = ("🏆 ≤ −10% · ⭐ −10…−2% · 🟢 −2…−0.05% · ⚪ within ±0.05% · "
-          "🟡 +0.05…+0.5% · 🟠 +0.5…+2% · 🔴 ≥ +2%")
 
 
 def mark(delta):
@@ -228,8 +226,6 @@ def main():
             f"| {mark(d)} | {'**' + c + '**' if c == 'total' else c} "
             f"| {sb:,} | {sh:,} | {cell} |"
         )
-    out.append("")
-    out.append(f"<sub>{LEGEND}</sub>")
     out.append("")
 
     if deltas:
