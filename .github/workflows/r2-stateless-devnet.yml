@@ -46,9 +46,9 @@ jobs:
       CATALOG_URL: ${{ github.event.inputs.catalog_url || '' }}
       WINDOW_HOURS: ${{ github.event.inputs.window_hours || '2' }}
       STRICT_FLAG: ${{ github.event.inputs.strict == 'true' && '--strict' || '' }}
-      # Devnet assumptions for the batch estimate (need not be exact).
+      # Catalog assumptions for the batch estimate (need not be exact).
       BLOCK_TIME_SECONDS: "12" # Ethereum slot time
-      BATCH_SIZE: "10" # blocks per R2 batch
+      BATCH_SIZE: "100" # blocks per R2 batch (Sepolia catalog)
       SUMMARY_DIR: target/r2-stateless-devnet
 
     steps:

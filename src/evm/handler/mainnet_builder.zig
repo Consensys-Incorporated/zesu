@@ -366,14 +366,10 @@ pub const MainnetHandler = struct {
         // EIP-8037 (Amsterdam+): split exec_gas into regular and state reservoir.
         // regular_gas_budget = TX_MAX_GAS_LIMIT - intrinsic (the intrinsic is entirely regular
         // gas post-EIP-2780). Any excess exec_gas above regular_gas_budget goes to the reservoir.
-        const tx_regular_exec_gas: u64 = if (primitives.isEnabledIn(spec, .amsterdam)) blk: {
-            const regular_budget = interpreter_mod.gas_costs.TX_MAX_GAS_LIMIT -| initial_gas;
-            break :blk @min(regular_budget, exec_gas);
-        } else exec_gas;
-        const tx_reservoir: u64 = if (primitives.isEnabledIn(spec, .amsterdam))
-            exec_gas - tx_regular_exec_gas
-        else
-            0;
+        // System calls bypass the split with a fixed grant and reservoir (reference
+        // process_unchecked_system_transaction).
+        const tx_reservoir = txReservoir(ctx, initial_gas);
+        const tx_regular_exec_gas: u64 = if (ctx.cfg.system_call_gas) |g| g.execution else exec_gas - tx_reservoir;
 
         const DB = @TypeOf(ctx.*).DatabaseType;
         var host = interpreter_mod.Host.init(DB, ctx, &evm.precompiles.precompiles);
@@ -444,16 +440,13 @@ pub const MainnetHandler = struct {
                             }
                         }
                         const ir = try executeIterative(root_interp, &host, &return_data_buf);
-                        var cr = host.finalizeCreate(s.checkpoint, s.new_addr, ir.raw_result, ir.gas_remaining, ir.gas_refunded, ir.return_data, spec, false, ir.reservoir_remaining);
-                        if (cr.success) {
-                            cr.state_gas_used += ir.state_gas_used;
-                        }
+                        const cr = host.finalizeCreate(s.checkpoint, s.new_addr, ir.raw_result, ir.gas_remaining, ir.gas_refunded, ir.return_data, spec, false, ir.reservoir_remaining);
                         const cr_status: main.ExecutionStatus = if (cr.success) .Success else if (cr.is_revert) .Revert else .Halt;
                         var exec_result = main.ExecutionResult.new(cr_status, 0);
-                        exec_result.state_gas_used = cr.state_gas_used;
                         exec_result.return_data = alloc_mod.get().dupe(u8, cr.return_data) catch @constCast(&[_]u8{});
                         var fr = main.FrameResult.new(exec_result, cr.gas_remaining, cr.gas_refunded);
                         fr.reservoir_remaining = cr.state_gas_remaining;
+                        fr.state_gas_spilled = ir.state_gas_spilled + cr.state_gas_spilled;
                         // EIP-8037 (Amsterdam): on top-level CREATE-tx halt/revert the account
                         // was never created, so the frame rolls its state gas back to the
                         // baseline (reference restore_state_gas): the reservoir resets to the
@@ -462,8 +455,8 @@ pub const MainnetHandler = struct {
                         // gas — on revert it returns there, on halt it stays burned.
                         if (primitives.isEnabledIn(spec, .amsterdam) and !cr.success) {
                             fr.reservoir_remaining = tx_reservoir;
+                            fr.state_gas_spilled = 0;
                             if (cr_status == .Revert) fr.gas_remaining += ir.state_gas_spilled;
-                            fr.result.state_gas_used = 0;
                         }
                         return fr;
                     },
@@ -477,6 +470,9 @@ pub const MainnetHandler = struct {
                 // not load it either. On OOG: roll back the applied delegations and burn all gas.
                 var call_regular = tx_regular_exec_gas;
                 var call_reservoir = tx_reservoir;
+                // Committed with the delegations (reference commit_state_gas): survives a
+                // later execution failure.
+                var auth_spill: u64 = 0;
                 if (primitives.isEnabledIn(spec, .amsterdam)) {
                     // applyAuthList already decided whether set_delegation OOGs (auth_oog) and,
                     // if not, accumulated charges that fit within the top-frame gas.
@@ -495,9 +491,9 @@ pub const MainnetHandler = struct {
                         if (initial.auth_state_charge <= call_reservoir) {
                             call_reservoir -= initial.auth_state_charge;
                         } else {
-                            const spill = initial.auth_state_charge - call_reservoir;
+                            auth_spill = initial.auth_state_charge - call_reservoir;
                             call_reservoir = 0;
-                            call_regular -= spill;
+                            call_regular -= auth_spill;
                         }
                     }
                 }
@@ -569,11 +565,10 @@ pub const MainnetHandler = struct {
                     const xfer_err = try ctx.journaled_state.transfer(tx.caller, target, tx.value);
                     if (xfer_err != null) {
                         ctx.journaled_state.checkpointRevert(call_checkpoint);
-                        return main.FrameResult.new(
-                            main.ExecutionResult.new(.Fail, exec_gas),
-                            0,
-                            0,
-                        );
+                        var fr = main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
+                        fr.reservoir_remaining = call_reservoir;
+                        fr.state_gas_spilled = auth_spill;
+                        return fr;
                     }
                     // EIP-7708 (Amsterdam+): emit Transfer log for ETH sent via TX.
                     if (primitives.isEnabledIn(spec, .amsterdam) and
@@ -602,12 +597,14 @@ pub const MainnetHandler = struct {
                     // spilling into regular gas); replicate that arithmetic here.
                     var pc_reservoir = call_reservoir;
                     var pc_gas_remaining = call_regular;
+                    var pc_spill: u64 = 0;
                     if (top_new_account_state_gas > 0) {
                         if (top_new_account_state_gas <= pc_reservoir) {
                             pc_reservoir -= top_new_account_state_gas;
                         } else {
                             const spill = top_new_account_state_gas - pc_reservoir;
                             pc_reservoir = 0;
+                            pc_spill = spill;
                             if (pc_gas_remaining < spill) {
                                 ctx.journaled_state.checkpointRevert(initial.auth_checkpoint orelse call_checkpoint);
                                 var fr = main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
@@ -629,6 +626,7 @@ pub const MainnetHandler = struct {
                                 // so the state-gas reservoir is refilled (returned), not burned.
                                 var fr = main.FrameResult.new(main.ExecutionResult.new(.Revert, exec_gas), 0, 0);
                                 fr.reservoir_remaining = call_reservoir;
+                                fr.state_gas_spilled = auth_spill;
                                 return fr;
                             }
                             ctx.journaled_state.checkpointCommit();
@@ -638,6 +636,7 @@ pub const MainnetHandler = struct {
                                 0,
                             );
                             fr.reservoir_remaining = pc_reservoir;
+                            fr.state_gas_spilled = auth_spill + pc_spill;
                             return fr;
                         },
                         .err => {
@@ -646,6 +645,7 @@ pub const MainnetHandler = struct {
                             // state-gas reservoir (returned to the sender) rather than burning it.
                             var fr = main.FrameResult.new(main.ExecutionResult.new(.Fail, exec_gas), 0, 0);
                             fr.reservoir_remaining = call_reservoir;
+                            fr.state_gas_spilled = auth_spill;
                             return fr;
                         },
                     }
@@ -725,19 +725,19 @@ pub const MainnetHandler = struct {
                 // what the frame spent is voided with the state it was credited for. The spilled
                 // portion was drawn from regular gas: on revert it returns to regular gas
                 // (→ sender), on halt it stays burned.
-                var top_state_gas_used = ir.state_gas_used;
                 var top_reservoir = ir.reservoir_remaining;
                 var top_gas_remaining = ir.gas_remaining;
+                var top_spill = auth_spill + ir.state_gas_spilled;
                 if (primitives.isEnabledIn(spec, .amsterdam) and status != .Success) {
                     top_reservoir = call_reservoir;
                     if (status == .Revert) top_gas_remaining += ir.state_gas_spilled;
-                    top_state_gas_used = 0;
+                    top_spill = auth_spill;
                 }
                 var exec_result = main.ExecutionResult.new(status, 0);
-                exec_result.state_gas_used = top_state_gas_used;
                 exec_result.return_data = alloc_mod.get().dupe(u8, ir.return_data) catch @constCast(&[_]u8{});
                 var fr = main.FrameResult.new(exec_result, top_gas_remaining, ir.gas_refunded);
                 fr.reservoir_remaining = top_reservoir;
+                fr.state_gas_spilled = top_spill;
                 return fr;
             },
         }
@@ -786,6 +786,7 @@ pub const MainnetHandler = struct {
         // Per Yellow Paper: g* = gas_limit - gas_remaining_after_exec = total_gas_spent.
         var capped_refund = @min(raw_refund, total_gas_spent / quotient);
         var final_cost = total_gas_spent - capped_refund;
+        var calldata_floor: u64 = 0;
 
         if (primitives.isEnabledIn(spec, .prague) and !ctx.cfg.disable_eip7623 and initial_gas.floor_gas > 0) {
             // floor_total = floor_base + floor_exec_gas (validated: gas_limit >= floor_total).
@@ -796,6 +797,7 @@ pub const MainnetHandler = struct {
             else
                 21000;
             const floor_total = floor_base + initial_gas.floor_gas;
+            calldata_floor = floor_total;
             if (final_cost < floor_total) {
                 final_cost = floor_total;
                 capped_refund = 0;
@@ -839,26 +841,17 @@ pub const MainnetHandler = struct {
         js.commitTx();
 
         // 8. Update ExecutionResult with final accounting.
-        // EIP-7778 (Amsterdam+): block gas does NOT deduct refunds.
-        //   block_base = final_cost + capped_refund (= total_gas_spent when no floor,
-        //   = floor_total when floor applied since capped_refund=0 in that case).
-        // EIP-8037 (Amsterdam+):
-        //   - receipt cumulativeGasUsed = final_cost (= regular_after_refunds + state)
-        //   - block gasUsed = max(regular_before_refunds, state_gas) (no refunds deducted)
+        // EIP-7778 + EIP-8037 (Amsterdam+, reference settle_transaction_gas): the block counts two
+        // lanes, both pre-refund. The state lane is the net state gas the top frame consumed —
+        // reservoir drawn down plus the spill still owed (reference tx_state_gas_used) — which
+        // refunds can drive negative, so it is floored at 0. The execution lane is the rest,
+        // floored at the calldata floor.
         if (is_amsterdam) {
-            // block_base = final_cost + capped_refund. SSTORE refunds are NOT deducted per EIP-7778.
-            const block_base = final_cost + capped_refund;
-            if (result.result.status == .Success) {
-                // glamsterdam-devnet-6: block_gas_used is the 2D max(regular, state). The intrinsic
-                // is entirely regular gas post-EIP-2780 (no state-gas component), so only EXECUTION
-                // state gas (SSTORE etc., spent via spendStateGas) counts toward the state lane.
-                const regular_for_block = if (block_base > result.result.state_gas_used) block_base - result.result.state_gas_used else 0;
-                result.result.block_gas_used = @max(regular_for_block, result.result.state_gas_used);
-            } else {
-                // EIP-8037 (Amsterdam+): failed tx block gas capped at TX_MAX_GAS_LIMIT (1<<24).
-                // Txs with gas > TX_MAX are allowed but contribute at most TX_MAX to block capacity on failure.
-                result.result.block_gas_used = @min(block_base, interpreter_mod.gas_costs.TX_MAX_GAS_LIMIT);
-            }
+            const state_net: i128 = @as(i128, txReservoir(ctx, initial_gas.initial_gas)) -
+                @as(i128, result.reservoir_remaining) + @as(i128, result.state_gas_spilled);
+            const state_lane: u64 = @intCast(@max(0, state_net));
+            result.result.state_gas_used = state_lane;
+            result.result.block_gas_used = @max(total_gas_spent -| state_lane, calldata_floor);
         } else {
             result.result.block_gas_used = final_cost;
         }
@@ -874,14 +867,23 @@ pub const MainnetHandler = struct {
     }
 };
 
+/// EIP-8037 (Amsterdam+): the transaction's state-gas reservoir grant (reference
+/// `allocate_evm_gas`). The intrinsic is entirely regular gas, so execution gets at most
+/// TX_MAX_GAS_LIMIT - intrinsic and the rest goes to the reservoir. System calls use a fixed
+/// grant and reservoir (reference process_unchecked_system_transaction).
+fn txReservoir(ctx: anytype, initial_gas: u64) u64 {
+    if (ctx.cfg.system_call_gas) |g| return g.reservoir;
+    if (!primitives.isEnabledIn(ctx.cfg.spec, .amsterdam)) return 0;
+    const exec_gas = ctx.tx.gas_limit - initial_gas;
+    return exec_gas - @min(interpreter_mod.gas_costs.TX_MAX_GAS_LIMIT -| initial_gas, exec_gas);
+}
+
 /// Raw result from the iterative frame runner.
 const IterativeResult = struct {
     raw_result: interpreter_mod.InstructionResult,
     gas_remaining: u64,
     gas_refunded: i64,
     return_data: []const u8, // points into return_data_buf; valid until buf is cleared
-    /// EIP-8037 (Amsterdam+): total state gas charged across all frames.
-    state_gas_used: u64,
     /// EIP-8037 (Amsterdam+): state gas reservoir remaining in the root frame after execution.
     reservoir_remaining: u64,
     /// EIP-8037 (Amsterdam+): state gas that spilled into the root frame's regular gas.
@@ -995,7 +997,6 @@ fn executeIterative(
                 const raw = frame.interp.result;
                 const gas_rem = frame.interp.gas.remaining;
                 const gas_ref = frame.interp.gas.refunded;
-                const root_state_gas = frame.interp.gas.state_gas_used;
                 const root_reservoir = frame.interp.gas.reservoir;
                 const root_state_gas_spilled = frame.interp.gas.state_gas_spilled;
                 const rd_raw: []const u8 = if (raw.isSuccess() or raw == .revert)
@@ -1016,7 +1017,6 @@ fn executeIterative(
                     .gas_remaining = gas_rem,
                     .gas_refunded = gas_ref,
                     .return_data = return_data_buf.items,
-                    .state_gas_used = root_state_gas,
                     .reservoir_remaining = root_reservoir,
                     .state_gas_spilled = root_state_gas_spilled,
                 };

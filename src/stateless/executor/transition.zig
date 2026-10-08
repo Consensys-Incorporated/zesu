@@ -11,6 +11,7 @@ const bytecode_mod = @import("bytecode");
 const database_mod = @import("database");
 const context_mod = @import("context");
 const handler_mod = @import("handler");
+const interpreter_mod = @import("interpreter");
 
 const input = @import("executor_types");
 const bloom = @import("bloom.zig");
@@ -143,6 +144,8 @@ const BaTracker = struct {
     }
 
     fn detectAndRecord(self: *BaTracker, bai: u64, ctx: anytype, from_tx_id: usize) void {
+        // Every commit of index `bai` has happened by now; net the access log's slots over it.
+        ctx.journaled_state.inner.closeBalIndex();
         const a = self.alloc;
         // For bai > 0, skip accounts not touched since from_tx_id: their state hasn't
         // changed since the last detectAndRecord call, so nothing new to record.
@@ -600,7 +603,7 @@ pub fn transition(
     reward: i64,
 ) !TransitionResult {
     const db = try buildDb(pre_alloc_in, env.block_hashes);
-    return transitionWithDb(arena, db, pre_alloc_in, env, txs, spec, chain_id, reward, &.{});
+    return transitionWithDb(arena, db, pre_alloc_in, env, txs, spec, chain_id, reward);
 }
 
 /// Entry point for stateless execution: accepts any DB type (InMemoryDB for the stateful
@@ -618,11 +621,6 @@ pub fn transitionWithDb(
     spec: primitives.SpecId,
     chain_id: u64,
     reward: i64,
-    /// Pre-recovered secp256k1 public keys, one per tx in order (Amsterdam spec).
-    /// Each entry must be exactly 64 bytes (uncompressed, no 0x04 prefix).
-    /// When provided for tx i, sender = keccak256(pubkey)[12:] — avoids ecrecover.
-    /// Empty slice or entry shorter than 64 bytes falls back to ecrecover.
-    public_keys: []const []const u8,
 ) !TransitionResult {
     const DB = @TypeOf(db);
     var ctx = context_mod.Context(DB).new(db, spec);
@@ -631,7 +629,7 @@ pub fn transitionWithDb(
     ctx.block = buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
     ctx.cfg.disable_base_fee = (env.base_fee == null);
-    return transitionWithContext(arena, &ctx, pre_alloc_in, env, txs, spec, chain_id, reward, public_keys);
+    return transitionWithContext(arena, &ctx, pre_alloc_in, env, txs, spec, chain_id, reward);
 }
 
 /// Low-level entry point: executes block transition on a pre-built context.
@@ -647,7 +645,6 @@ pub fn transitionWithContext(
     spec: primitives.SpecId,
     chain_id: u64,
     reward: i64,
-    public_keys: []const []const u8,
 ) !TransitionResult {
     var instructions = handler_mod.Instructions.new(spec);
     var precompiles = handler_mod.Precompiles.new(spec);
@@ -687,7 +684,8 @@ pub fn transitionWithContext(
 
     var receipts = std.ArrayListUnmanaged(Receipt).empty;
     var accepted_txs = std.ArrayListUnmanaged(input.TxInput).empty;
-    var cumulative_gas: u64 = 0; // block gas (max(regular, state) per tx, for block header gasUsed)
+    var cumulative_gas: u64 = 0; // block gas: the execution lane on Amsterdam+
+    var block_state_gas: u64 = 0; // EIP-8037 (Amsterdam+): the block's state-gas lane
     var cumulative_receipt_gas: u64 = 0; // receipt gas (regular + state per tx, for cumulativeGasUsed)
     var block_bloom = bloom.ZERO;
     var total_blob_gas: u64 = 0;
@@ -710,20 +708,6 @@ pub fn transitionWithContext(
         // 1. Determine sender
         var sender: input.Address = undefined;
         const maybe_sender: ?input.Address = blk: {
-            // Use pre-recovered public key (Amsterdam spec optimization) when provided.
-            // bal-devnet-7 SSZ schema: ByteVector[65] = full uncompressed secp256k1 key
-            // (0x04 || X || Y). Older snapshots used 64 bytes (X || Y, no 0x04 prefix).
-            // sender = keccak256(X || Y)[12:] — peel the 0x04 prefix if present.
-            if (tx_idx < public_keys.len) {
-                const pk = public_keys[tx_idx];
-                const xy: ?[]const u8 = if (pk.len == 64) pk else if (pk.len == 65 and pk[0] == 0x04) pk[1..] else null;
-                if (xy) |bytes| {
-                    const h = rlp.keccak256(bytes);
-                    var addr: input.Address = undefined;
-                    @memcpy(&addr, h[12..32]);
-                    break :blk addr;
-                }
-            }
             if (tx.r != null and tx.s != null and (tx.r.? != 0 or tx.s.? != 0)) {
                 break :blk try tx_signing.recoverSender(arena, tx, chain_id);
             }
@@ -761,14 +745,16 @@ pub fn transitionWithContext(
         }
 
         // 1d. Transaction gas limit cannot exceed remaining block gas allowance.
-        // Pre-Amsterdam: tx.gas == block_gas_used, so this check is exact.
-        // Amsterdam+: tx.gas = regular + state, but block_gas_used = max(regular, state),
-        // which can be much smaller than tx.gas for state-dominant txs. Skip the
-        // pre-execution check here; the overflow is detected post-execution below (step 5).
-        if (!primitives.isEnabledIn(spec, .amsterdam)) {
-            if (tx.gas > env.gas_limit - cumulative_gas) {
+        // EIP-8037 (Amsterdam+, reference check_block_gas_capacity): each lane is checked against
+        // its own remaining budget, and one tx can use at most TX_MAX_GAS_LIMIT of the execution lane.
+        if (primitives.isEnabledIn(spec, .amsterdam)) {
+            if (@min(interpreter_mod.gas_costs.TX_MAX_GAS_LIMIT, tx.gas) > env.gas_limit - cumulative_gas or
+                tx.gas > env.gas_limit - block_state_gas)
+            {
                 return error.TxGasLimitExceedsBlockLimit;
             }
+        } else if (tx.gas > env.gas_limit - cumulative_gas) {
+            return error.TxGasLimitExceedsBlockLimit;
         }
 
         // 1e. Type-3 blob pre-checks (EIP-4844 / EIP-7594).
@@ -1138,13 +1124,7 @@ pub fn transitionWithContext(
 
         // 5. Build receipt
         cumulative_gas += exec_result.block_gas_used;
-        // Amsterdam+: block_gas_used = max(regular, state), which is only known
-        // post-execution. Reject the block immediately if this tx overflows the limit.
-        if (primitives.isEnabledIn(spec, .amsterdam)) {
-            if (cumulative_gas > env.gas_limit) {
-                return error.TxGasLimitExceedsBlockLimit;
-            }
-        }
+        if (primitives.isEnabledIn(spec, .amsterdam)) block_state_gas += exec_result.state_gas_used;
         cumulative_receipt_gas += exec_result.gas_used;
 
         const status: u8 = if (exec_result.status == .Success) 1 else 0;
@@ -1308,7 +1288,7 @@ pub fn transitionWithContext(
         .alloc = post_alloc,
         .deleted_accounts = try deleted.toOwnedSlice(arena),
         .receipts = try receipts.toOwnedSlice(arena),
-        .cumulative_gas = cumulative_gas,
+        .cumulative_gas = @max(cumulative_gas, block_state_gas),
         .block_bloom = block_bloom,
         .current_base_fee = env.base_fee,
         .excess_blob_gas = env.excess_blob_gas,
@@ -1378,7 +1358,7 @@ fn collectDeposits(arena: std.mem.Allocator, receipts: []const Receipt) error{In
 ///                || SHA256(0x04||builder_exits) )
 /// where each type is omitted if its data is empty. Types 0x03/0x04 are the
 /// EIP-8282 (Amsterdam+) builder execution requests.
-fn computeRequestsHash(
+pub fn computeRequestsHash(
     arena: std.mem.Allocator,
     deposits: []const u8,
     withdrawals: []const u8,

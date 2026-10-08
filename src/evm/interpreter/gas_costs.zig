@@ -77,6 +77,8 @@ pub const STATE_BYTES_PER_AUTH_BASE: u64 = 23;
 pub const SYSTEM_MAX_SSTORES_PER_CALL: u64 = 16;
 // EIP-7825: TX gas limit boundary for state gas reservoir split
 pub const TX_MAX_GAS_LIMIT: u64 = 1 << 24; // 16,777,216
+// EIP-8037: cap on a transaction's total gas limit (execution + state gas).
+pub const TX_MAX_TOTAL_GAS_LIMIT: u64 = (1 << 32) - 1; // 4,294,967,295
 
 /// EIP-8037: cost_per_state_byte. bal-devnet-7 pins this to a fixed 1530.
 pub fn costPerStateByte(block_gas_limit: u64) u64 {
