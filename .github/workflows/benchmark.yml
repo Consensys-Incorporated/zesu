@@ -17,8 +17,9 @@
 # numbers posted automatically on every push get ignored within a week.
 #
 # Jobs: prepare -> (build per variant, inputs) -> run per variant x shard ->
-# report per variant. The shards are the corpus plus TIER_SHARDS slices of the
-# tier sample, so a bigger sample costs more runners rather than more minutes.
+# report per variant -> finish. The shards are the corpus plus TIER_SHARDS
+# slices of the tier sample, so a bigger sample costs more runners rather than
+# more minutes.
 name: Benchmark
 
 on:
@@ -36,8 +37,9 @@ on:
         default: "10"
         type: string
 
-# Write access is granted per job: only prepare (the reaction) and report (the
-# comment and label) get it. The jobs that build and run PR code stay read-only.
+# Write access is granted per job: only prepare and finish (the reactions) and
+# report (the comment and label) get it. The jobs that build and run PR code
+# stay read-only.
 permissions:
   contents: read
 
@@ -78,9 +80,11 @@ jobs:
                 github.event.comment.author_association))
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Reacting to a comment on a PR needs pull-requests: write; issues: write
+    # alone is refused with a 403.
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
       issues: write
     outputs:
       pr: ${{ steps.req.outputs.pr }}
@@ -878,3 +882,33 @@ jobs:
         run: |
           echo "Benchmark found a correctness divergence — see the PR comment."
           exit 1
+
+  # Swaps the 👀 on the request for 🚀 when every comment was posted cleanly,
+  # or 😕 when a report failed, so the outcome shows on the request itself.
+  # Skipped on cancellation: a newer /benchmark superseded this one.
+  finish:
+    name: Finish
+    needs: [prepare, report]
+    if: >
+      !cancelled() && github.event_name == 'issue_comment' &&
+      needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: React with the outcome
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          RESULT: ${{ needs.report.result }}
+        run: |
+          url="repos/$REPO/issues/comments/$COMMENT_ID/reactions"
+          for id in $(gh api "$url" \
+              --jq '.[] | select(.content == "eyes" and .user.login == "github-actions[bot]") | .id'); do
+            gh api -X DELETE "$url/$id" --silent || true
+          done
+          if [ "$RESULT" = success ]; then content=rocket; else content=confused; fi
+          gh api -X POST "$url" -f content="$content" --silent
