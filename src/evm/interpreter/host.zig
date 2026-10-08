@@ -628,8 +628,10 @@ pub const Host = struct {
                 if (call_result.success) {
                     call_result.state_gas_remaining = sub_reservoir;
                 } else {
-                    // Restore the reservoir the call was given (see executeIterative).
+                    // Restore the reservoir the call was given; spill drawn from regular gas returns to
+                    // it on revert and stays burned on halt (see executeIterative).
                     call_result.state_gas_remaining = ((sub_reservoir +| sub_interp.gas.state_gas_spent) -| sub_interp.gas.state_gas_refunded) -| sub_interp.gas.state_gas_spilled;
+                    if (sub_interp.result == .revert) call_result.gas_remaining += sub_interp.gas.state_gas_spilled;
                 }
                 return call_result;
             },
@@ -674,8 +676,10 @@ pub const Host = struct {
                 const sub_reservoir = sub_interp.gas.reservoir;
                 var create_result = self.finalizeCreate(s.checkpoint, s.new_addr, sub_interp.result, sub_interp.gas.remaining, sub_interp.gas.refunded, rd_buf.items, spec_id, true, sub_reservoir);
                 if (!create_result.success) {
-                    // Restore the reservoir the call was given (see executeIterative).
+                    // Restore the reservoir the call was given; spill drawn from regular gas returns to
+                    // it on revert and stays burned on halt (see executeIterative).
                     create_result.state_gas_remaining = ((sub_reservoir +| sub_interp.gas.state_gas_spent) -| sub_interp.gas.state_gas_refunded) -| sub_interp.gas.state_gas_spilled;
+                    if (sub_interp.result == .revert) create_result.gas_remaining += sub_interp.gas.state_gas_spilled;
                 }
                 return create_result;
             },
