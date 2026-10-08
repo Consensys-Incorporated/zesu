@@ -335,6 +335,24 @@ jobs:
           cp zesu-zkvm/zisk/zig-out/bin/zesu-zisk elf-head
           ls -l elf-base elf-head
 
+      # Trace costs are deterministic, so the merge-base's results are a pure
+      # function of this key: every PR sharing a merge-base reuses them and runs
+      # only its own head. The key covers everything the CSVs depend on — the
+      # ELF inputs, the harness, the blocks and the tier sample.
+      - name: Cache merge-base results
+        id: cache-base-results
+        if: steps.base-elf.outputs.no_base != 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            base.csv
+            tier-base.csv
+          key: >-
+            benchres-${{ matrix.key }}-${{ steps.shas.outputs.base }}-${{ steps.zisk.outputs.version }}-${{
+            steps.shas.outputs.zkvm }}-${{ runner.os }}-${{ env.SE_REF }}-${{ env.CORPUS_START }}-${{
+            steps.req.outputs.blocks }}-${{ env.TIER_RELEASE }}-${{ env.TIER_DIR }}-${{
+            hashFiles('trusted/.github/scripts/bench_sample.py') }}
+
       - name: Fetch corpus blocks
         if: steps.base-elf.outputs.no_base != 'true'
         env:
@@ -378,9 +396,14 @@ jobs:
 
       - name: Run benchmark
         if: steps.base-elf.outputs.no_base != 'true'
+        env:
+          CACHED: ${{ steps.cache-base-results.outputs.cache-hit }}
         run: |
           set -euo pipefail
           for v in base head; do
+            if [ "$v" = base ] && [ "$CACHED" = true ] && [ -s base.csv ]; then
+              echo "base.csv restored from cache"; continue
+            fi
             ./bench \
               --fixtures corpus-run \
               --elf "elf-$v" \
@@ -420,9 +443,14 @@ jobs:
       - name: Run gas-tier benchmark
         if: steps.base-elf.outputs.no_base != 'true'
         continue-on-error: true
+        env:
+          CACHED: ${{ steps.cache-base-results.outputs.cache-hit }}
         run: |
           set -euo pipefail
           for v in base head; do
+            if [ "$v" = base ] && [ "$CACHED" = true ] && [ -s tier-base.csv ]; then
+              echo "tier-base.csv restored from cache"; continue
+            fi
             ./bench \
               --fixtures tier-sample \
               --elf "elf-$v" \
