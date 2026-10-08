@@ -1274,7 +1274,7 @@ pub fn transitionWithContext(
     const bal_hash: ?[32]u8 = if (tracker) |*t| try t.computeHash(arena, ctx, env.gas_limit) else null;
 
     // ── EIP-7685 requests_hash ────────────────────────────────────────────────
-    const deposits = if (primitives.isEnabledIn(spec, .prague)) try collectDeposits(arena, receipts.items) else &.{};
+    const deposits = if (primitives.isEnabledIn(spec, .prague)) try collectDeposits(arena, receipts.items, depositContractAddress(chain_id)) else &.{};
     const requests_hash = try computeRequestsHash(
         arena,
         deposits,
@@ -1303,14 +1303,27 @@ pub fn transitionWithContext(
 
 // ─── EIP-7685 requests_hash computation ──────────────────────────────────────
 
-/// EIP-6110 deposit contract address.
-const DEPOSIT_CONTRACT_ADDRESS: input.Address = .{
+/// EIP-6110 deposit contract address. Chain-specific: the stateless input only carries the
+/// chain id, so known testnets with their own contract are mapped here; every other chain
+/// uses mainnet's address.
+const MAINNET_DEPOSIT_CONTRACT: input.Address = .{
     0x00, 0x00, 0x00, 0x00, 0x21, 0x9a, 0xb5, 0x40, 0x35, 0x6c,
     0xbb, 0x83, 0x9c, 0xbe, 0x05, 0x30, 0x3d, 0x77, 0x05, 0xfa,
 };
+const SEPOLIA_DEPOSIT_CONTRACT: input.Address = .{
+    0x7f, 0x02, 0xc3, 0xe3, 0xc9, 0x8b, 0x13, 0x30, 0x55, 0xb8,
+    0xb3, 0x48, 0xb2, 0xac, 0x62, 0x56, 0x69, 0xed, 0x29, 0x5d,
+};
+
+pub fn depositContractAddress(chain_id: u64) input.Address {
+    return switch (chain_id) {
+        11155111 => SEPOLIA_DEPOSIT_CONTRACT,
+        else => MAINNET_DEPOSIT_CONTRACT,
+    };
+}
 
 /// keccak256("DepositEvent(bytes,bytes,bytes,bytes,bytes)")
-const DEPOSIT_EVENT_TOPIC: input.Hash = .{
+pub const DEPOSIT_EVENT_TOPIC: input.Hash = .{
     0x64, 0x9b, 0xbc, 0x62, 0xd0, 0xe3, 0x13, 0x42, 0xaf, 0xea,
     0x4e, 0x5c, 0xd8, 0x2d, 0x40, 0x49, 0xe7, 0xe1, 0xee, 0x91,
     0x2f, 0xc0, 0x88, 0x9a, 0xa7, 0x90, 0x80, 0x3b, 0xe3, 0x90,
@@ -1335,11 +1348,11 @@ fn depositFromLog(log: *const input.Log, out: *[192]u8) error{InvalidDepositEven
 /// Returns concatenated 192-byte deposit records (caller owns slice via arena).
 /// Only processes logs from the deposit contract that have the DepositEvent topic.
 /// Returns error.InvalidDepositEventLayout if such a log has the wrong data length.
-fn collectDeposits(arena: std.mem.Allocator, receipts: []const Receipt) error{InvalidDepositEventLayout}![]const u8 {
+pub fn collectDeposits(arena: std.mem.Allocator, receipts: []const Receipt, deposit_contract: input.Address) error{InvalidDepositEventLayout}![]const u8 {
     var buf = std.ArrayListUnmanaged(u8).empty;
     for (receipts) |*receipt| {
         for (receipt.logs) |*log| {
-            if (!std.mem.eql(u8, &log.address, &DEPOSIT_CONTRACT_ADDRESS)) continue;
+            if (!std.mem.eql(u8, &log.address, &deposit_contract)) continue;
             // Only process logs that carry the DepositEvent signature topic.
             // Other log types emitted by the deposit contract are ignored.
             if (log.topics.len == 0 or !std.mem.eql(u8, &log.topics[0], &DEPOSIT_EVENT_TOPIC)) continue;
