@@ -279,6 +279,34 @@ test "codeByHash returns contract bytecode from witness.codes" {
     try std.testing.expectEqualSlices(u8, contract_code, code.bytes());
 }
 
+test "codeByHash serves a delegation designator the block wrote, as a designator" {
+    // An EIP-7702 designator written in-block (set_delegation) is readable by hash, like
+    // CREATE-deployed code: another account delegated to the same target in pre-state
+    // shares the hash, and the witness need not carry it. It must come back as a
+    // designator, since sender checks and CALL resolution test isEip7702().
+    const w = input.StateWitness{
+        .state_root = [_]u8{0} ** 32,
+        .nodes = &.{},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
+    };
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
+
+    const delegate = [_]u8{0x63} ** 20;
+    const designator = bytecode.Bytecode{ .eip7702 = bytecode.Eip7702Bytecode.new(delegate) };
+    const code_hash = designator.hashSlow();
+    try std.testing.expectError(error.InvalidWitness, wdb.codeByHash(code_hash));
+
+    wdb.notifyCodeDeployed(code_hash, designator);
+    const code = try wdb.codeByHash(code_hash);
+    try std.testing.expect(code.isEip7702());
+    try std.testing.expectEqualSlices(u8, &delegate, &code.eip7702.address);
+}
+
 // ─── Test 6: storage — slot value found (flat pool) ───────────────────────────
 //
 // Both the account leaf and the storage leaf go into the same flat node pool.
