@@ -110,10 +110,9 @@ def render_tier(name, base, head):
     total_b = sum(num(base[k], "total") or 0 for k in keys)
     total_h = sum(num(head[k], "total") or 0 for k in keys)
     d = pct(total_b, total_h)
-    out = [f"#### {name} tier {mark(d)} {'—' if d is None else f'{d:+.3f}%'}", ""]
-    out.append(f"Median total cost by suite over {len(keys)} block(s) "
-               f"(empty blocks excluded).")
-    out.append("")
+    # Alerts stay outside the collapsed table: a correctness problem must not
+    # need a click to be seen.
+    out = []
     if mismatched:
         out.append(f"> [!CAUTION]")
         out.append(f"> **{len(mismatched)} {name} block(s) produced a different payload root "
@@ -127,6 +126,13 @@ def render_tier(name, base, head):
     # Drop the directory every suite shares (`compute/` today): it is on every
     # row and says nothing.
     common = os.path.commonpath(list(suites)) if len(suites) > 1 else ""
+    flag = " ⚠️" if failed or mismatched else ""
+    out.append(f"<details><summary><b>{name} tier</b> {mark(d)} "
+               f"{'—' if d is None else f'{d:+.3f}%'}{flag}</summary>")
+    out.append("")
+    out.append(f"Median total cost by suite over {len(keys)} block(s) "
+               f"(empty blocks excluded).")
+    out.append("")
     out.append("| suite | blocks | merge-base | this PR | delta |")
     out.append("|---|---:|---:|---:|---:|")
     for suite in sorted(suites):
@@ -135,6 +141,8 @@ def render_tier(name, base, head):
         sd = pct(mb, mh)
         out.append(f"| {mark(sd)} {os.path.relpath(suite, common) if common else suite} | {len(suites[suite])} | {mb:,} | {mh:,} "
                    f"| {'—' if sd is None else f'{sd:+.3f}%'} |")
+    out.append("")
+    out.append("</details>")
     out.append("")
     return out, failed, mismatched
 
