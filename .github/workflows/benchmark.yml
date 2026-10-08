@@ -16,8 +16,12 @@
 # `pull_request_target` gymnastics), nobody is blocked waiting on it, and
 # numbers posted automatically on every push get ignored within a week.
 #
-# Jobs: prepare -> (build per variant, inputs) -> run per variant x shard ->
-# report per variant -> finish. The shards are the corpus plus TIER_SHARDS
+# A `/benchmark` comment only runs `trigger`, which re-dispatches this workflow:
+# `issue_comment` runs can read the Actions cache but not write it, and the
+# merge-base caches below are worth nothing unless they get saved.
+#
+# Jobs: (trigger ->) prepare -> (build per variant, inputs) -> run per variant x
+# shard -> report per variant -> finish. The shards are the corpus plus TIER_SHARDS
 # slices of the tier sample, so a bigger sample costs more runners rather than
 # more minutes.
 name: Benchmark
@@ -36,15 +40,25 @@ on:
         required: false
         default: "10"
         type: string
+      comment_id:
+        description: "Comment to react to (set by /benchmark)"
+        required: false
+        default: ""
+        type: string
 
-# Write access is granted per job: only prepare and finish (the reactions) and
-# report (the comment and label) get it. The jobs that build and run PR code
+# Write access is granted per job: only trigger and finish (the reactions and the
+# dispatch) and report (the comment and label) get it. The jobs that build and run PR code
 # stay read-only.
 permissions:
   contents: read
 
+# The trigger runs get a group of their own, so the run they dispatch never
+# cancels them; a newer request still cancels an older run for the same PR.
 concurrency:
-  group: benchmark-${{ github.event.issue.number || inputs.pr }}
+  group: >-
+    ${{ github.event_name == 'issue_comment'
+        && format('benchmark-trigger-{0}', github.run_id)
+        || format('benchmark-{0}', inputs.pr) }}
   cancel-in-progress: true
 
 env:
@@ -68,45 +82,31 @@ env:
   TIER_SHARDS: "4"
 
 jobs:
-  prepare:
-    name: Prepare
-    # The author-association gate is required, not optional: this run checks
-    # out and builds PR code.
+  trigger:
+    name: Trigger
+    # The author-association gate is required, not optional: the dispatched run
+    # checks out and builds PR code.
     if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.issue.pull_request &&
-       startsWith(github.event.comment.body, '/benchmark') &&
-       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
-                github.event.comment.author_association))
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/benchmark') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+               github.event.comment.author_association)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     # Reacting to a comment on a PR needs pull-requests: write; issues: write
-    # alone is refused with a 403.
+    # alone is refused with a 403. actions: write is for the dispatch.
     permissions:
-      contents: read
+      actions: write
       pull-requests: write
       issues: write
-    outputs:
-      pr: ${{ steps.req.outputs.pr }}
-      blocks: ${{ steps.req.outputs.blocks }}
-      head: ${{ steps.shas.outputs.head }}
-      base: ${{ steps.shas.outputs.base }}
-      zkvm: ${{ steps.shas.outputs.zkvm }}
-      zisk: ${{ steps.zisk.outputs.version }}
-      sampler: ${{ steps.sampler.outputs.hash }}
-      shards: ${{ steps.shards.outputs.list }}
-
     steps:
       # `author_association` describes the commenter's relationship to the
       # *organisation*, not their access to this repo, so `MEMBER` admits
-      # read-only org members. This run builds PR code — and `zig build` runs
-      # `build.zig` — so the requester must actually hold write here. The `if:`
-      # above stays as a cheap pre-filter; this is the authority.
-      #
-      # Checked before any checkout, and only for comments: GitHub already
-      # requires write access to start a `workflow_dispatch` run.
+      # read-only org members. The run this dispatches builds PR code — and
+      # `zig build` runs `build.zig` — so the requester must actually hold write
+      # here. The `if:` above stays as a cheap pre-filter; this is the authority.
       - name: Verify the requester can write to this repo
-        if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -121,7 +121,6 @@ jobs:
           esac
 
       - name: Acknowledge the request
-        if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -134,26 +133,58 @@ jobs:
       # Every value below reaches bash through `env`, never through `${{ }}`
       # interpolation: the comment body is attacker-controlled text, and
       # substituting it into the script would let a quote or `$()` in a routine
-      # `/benchmark` note execute as shell.
+      # `/benchmark` note execute as shell. prepare validates both values again.
+      #
+      # A dispatch made with GITHUB_TOKEN does start a new run: workflow_dispatch
+      # is one of the two events exempt from that token's no-recursion rule.
+      - name: Dispatch the benchmark
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.event.repository.default_branch }}
+          PR: ${{ github.event.issue.number }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          # `/benchmark 20` -> 20; bare `/benchmark` -> prepare's default.
+          blocks=$(printf '%s' "$COMMENT_BODY" \
+            | head -1 | grep -oE '[0-9]+' | head -1 || true)
+          gh workflow run benchmark.yml -R "$REPO" --ref "$REF" \
+            -f pr="$PR" -f blocks="${blocks:-10}" -f comment_id="$COMMENT_ID"
+          echo "Dispatched the benchmark for PR #$PR"
+
+  prepare:
+    name: Prepare
+    # GitHub requires write access to start a workflow_dispatch run, and the
+    # trigger job checks it before dispatching on a commenter's behalf.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pr: ${{ steps.req.outputs.pr }}
+      blocks: ${{ steps.req.outputs.blocks }}
+      head: ${{ steps.shas.outputs.head }}
+      base: ${{ steps.shas.outputs.base }}
+      zkvm: ${{ steps.shas.outputs.zkvm }}
+      zisk: ${{ steps.zisk.outputs.version }}
+      sampler: ${{ steps.sampler.outputs.hash }}
+      shards: ${{ steps.shards.outputs.list }}
+
+    steps:
+      # Inputs reach bash through `env`, never through `${{ }}` interpolation.
       - name: Resolve request
         id: req
         env:
-          EVENT_NAME: ${{ github.event_name }}
           INPUT_PR: ${{ inputs.pr }}
           INPUT_BLOCKS: ${{ inputs.blocks }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            pr="$INPUT_PR"; blocks="$INPUT_BLOCKS"
-          else
-            pr="$ISSUE_NUMBER"
-            # `/benchmark 20` -> 20; bare `/benchmark` -> default.
-            blocks=$(printf '%s' "$COMMENT_BODY" \
-              | head -1 | grep -oE '[0-9]+' | head -1 || true)
-          fi
-          # Both paths are user-supplied, so accept digits only before the
-          # arithmetic comparisons below, which would otherwise error out.
+          pr="$INPUT_PR"; blocks="$INPUT_BLOCKS"
+          # Both are user-supplied, so accept digits only before the arithmetic
+          # comparisons below, which would otherwise error out.
           case "$pr" in ''|*[!0-9]*) echo "bad PR number"; exit 1 ;; esac
           case "$blocks" in *[!0-9]*) blocks="" ;; esac
           blocks="${blocks:-10}"
@@ -890,7 +921,7 @@ jobs:
     name: Finish
     needs: [prepare, report]
     if: >
-      !cancelled() && github.event_name == 'issue_comment' &&
+      !cancelled() && inputs.comment_id != '' &&
       needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -902,9 +933,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_ID: ${{ inputs.comment_id }}
           RESULT: ${{ needs.report.result }}
         run: |
+          case "$COMMENT_ID" in ''|*[!0-9]*) echo "bad comment id"; exit 1 ;; esac
           url="repos/$REPO/issues/comments/$COMMENT_ID/reactions"
           for id in $(gh api "$url" \
               --jq '.[] | select(.content == "eyes" and .user.login == "github-actions[bot]") | .id'); do
