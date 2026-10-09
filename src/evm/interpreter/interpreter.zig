@@ -562,6 +562,8 @@ fn runDispatch(
     const code = self.bytecode.bytes();
     // EIP-145. Loop-invariant: spec_id is fixed for the frame.
     const has_shifts = primitives.isEnabledIn(self.runtime_flags.spec_id, .constantinople);
+    // EIP-3855. Loop-invariant like has_shifts.
+    const has_push0 = primitives.isEnabledIn(self.runtime_flags.spec_id, .shanghai);
 
     // PC in a register for the length of the frame. It was in memory, so every
     // opcode paid a load, an add and a store to advance it, plus another load
@@ -848,11 +850,35 @@ fn runDispatch(
             if (self.bytecode.isNotEnd())
                 continue :sw opcodeAt(code, pc);
         },
+        0x5A => { // GAS
+            pc += 1;
+            if (!self.gas.spend(gas_costs.G_BASE)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            opcodes.opGas(ctx);
+            if (self.bytecode.isNotEnd())
+                continue :sw opcodeAt(code, pc);
+        },
+        0x5F => { // PUSH0 (EIP-3855, Shanghai)
+            pc += 1;
+            if (has_push0) {
+                if (!self.gas.spend(gas_costs.G_BASE)) {
+                    self.halt(.out_of_gas);
+                    return;
+                }
+                opcodes.opPush0(ctx);
+            } else if (!coldStep(self, table, ctx, 0x5F, &pc)) return;
+            if (self.bytecode.isNotEnd())
+                continue :sw opcodeAt(code, pc);
+        },
         // Cold path: table lookup + indirect call.
         // Fork-gated opcodes (PUSH0, TLOAD/TSTORE etc.) land here and are handled
         // correctly via the table — opUnknown on old forks, real handler on new
-        // forks. SHL/SHR/SAR reach it too whenever `has_shifts` is false.
-        else => |op| {
+        // forks. SHL/SHR/SAR and PUSH0 reach it too whenever their fork gate is closed.
+        // Naming every cold value explicitly (rather than using `else`) keeps the jump
+        // table dense over the whole u8 domain — no upper-bound compare needed.
+        0x04...0x0f, 0x12, 0x13, 0x1a, 0x1e, 0x1f, 0x20...0x4f, 0x54, 0x55, 0x58, 0x59, 0x5c...0x5e, 0xa0...0xff => |op| {
             pc += 1;
             if (!coldStep(self, table, ctx, op, &pc)) return;
             // Only the cold path can suspend the frame, so this is the one arm
