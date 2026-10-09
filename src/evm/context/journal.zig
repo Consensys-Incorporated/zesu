@@ -1317,7 +1317,7 @@ pub const JournalInner = struct {
                 // the account's first touch in it.
                 _ = existing.markWarmWithTransactionId(self.transaction_id);
                 if (primitives.isEnabledIn(self.spec, .amsterdam)) {
-                    self.tx_touched.append(alloc_mod.get(), address) catch {};
+                    self.tx_touched.append(alloc_mod.get(), address) catch @panic("out of memory");
                 }
                 if (existing.isSelfdestructedLocally()) {
                     // EIP-8246 (Amsterdam+): SELFDESTRUCT no longer burns. A selfdestructed
@@ -1366,7 +1366,7 @@ pub const JournalInner = struct {
             gop.value_ptr.* = new_account;
             // Inserted with transaction_id = current, so also a first touch.
             if (primitives.isEnabledIn(self.spec, .amsterdam)) {
-                self.tx_touched.append(alloc_mod.get(), address) catch {};
+                self.tx_touched.append(alloc_mod.get(), address) catch @panic("out of memory");
             }
             is_cold = acct_is_cold;
             account_ptr = gop.value_ptr;

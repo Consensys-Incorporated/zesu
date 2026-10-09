@@ -183,15 +183,15 @@ const BaTracker = struct {
             seen.ensureTotalCapacity(a, @intCast(touched.len)) catch {};
             cands.ensureTotalCapacity(a, touched.len) catch {};
             for (touched) |addr| {
-                const gop = seen.getOrPut(a, addr) catch continue;
+                const gop = seen.getOrPut(a, addr) catch @panic("out of memory");
                 if (gop.found_existing) continue;
                 const ptr = ctx.journaled_state.inner.evm_state.getPtr(addr) orelse continue;
-                cands.append(a, .{ .addr = addr, .acct = ptr }) catch {};
+                cands.append(a, .{ .addr = addr, .acct = ptr }) catch @panic("out of memory");
             }
         } else {
             var map_it = ctx.journaled_state.inner.evm_state.iterator();
             while (map_it.next()) |e| {
-                cands.append(a, .{ .addr = e.key_ptr.*, .acct = e.value_ptr }) catch {};
+                cands.append(a, .{ .addr = e.key_ptr.*, .acct = e.value_ptr }) catch @panic("out of memory");
             }
         }
 
