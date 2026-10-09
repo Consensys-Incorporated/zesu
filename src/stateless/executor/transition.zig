@@ -395,11 +395,46 @@ const BaTracker = struct {
             while (it.next()) |k| all_addrs.put(a, k.*, {}) catch @panic("out of memory");
         }
 
-        var entries = std.ArrayListUnmanaged(bal_mod.EncodeEntry).empty;
+        // Sort the addresses once, as big-endian words, and build the entries in that order.
+        // Sorting the ~200-byte EncodeEntry values afterwards moved whole structs per swap.
+        const AddrKey = struct {
+            hi: u64,
+            mid: u64,
+            lo: u32,
+            fn lessThan(_: void, x: @This(), y: @This()) bool {
+                if (x.hi != y.hi) return x.hi < y.hi;
+                if (x.mid != y.mid) return x.mid < y.mid;
+                return x.lo < y.lo;
+            }
+            fn of(addr: primitives.Address) @This() {
+                return .{
+                    .hi = std.mem.readInt(u64, addr[0..8], .big),
+                    .mid = std.mem.readInt(u64, addr[8..16], .big),
+                    .lo = std.mem.readInt(u32, addr[16..20], .big),
+                };
+            }
+            fn address(k: @This()) primitives.Address {
+                var out: primitives.Address = undefined;
+                std.mem.writeInt(u64, out[0..8], k.hi, .big);
+                std.mem.writeInt(u64, out[8..16], k.mid, .big);
+                std.mem.writeInt(u32, out[16..20], k.lo, .big);
+                return out;
+            }
+        };
+        const keys = try a.alloc(AddrKey, all_addrs.count());
+        {
+            var i: usize = 0;
+            var kit = all_addrs.keyIterator();
+            while (kit.next()) |k| : (i += 1) keys[i] = AddrKey.of(k.*);
+        }
+        // Addresses are unique (map keys), so stability is irrelevant.
+        std.mem.sortUnstable(AddrKey, keys, {}, AddrKey.lessThan);
 
-        var addr_it = all_addrs.keyIterator();
-        while (addr_it.next()) |addr_ptr| {
-            const addr = addr_ptr.*;
+        var entries = std.ArrayListUnmanaged(bal_mod.EncodeEntry).empty;
+        try entries.ensureTotalCapacity(a, keys.len);
+
+        for (keys) |key| {
+            const addr = key.address();
 
             // bal-devnet-7: SYSTEM_ADDRESS is included if a user tx touched it
             // (BALANCE/EXTCODE*/CALL etc.) OR if it has real state changes / storage
@@ -471,12 +506,6 @@ const BaTracker = struct {
                 .code_changes = cc_items,
             });
         }
-
-        std.mem.sort(bal_mod.EncodeEntry, entries.items, {}, struct {
-            pub fn lessThan(_: void, x: bal_mod.EncodeEntry, y: bal_mod.EncodeEntry) bool {
-                return std.mem.lessThan(u8, &x.address, &y.address);
-            }
-        }.lessThan);
 
         // EIP-7928: validate BAL item count <= gas_limit // GAS_BLOCK_ACCESS_LIST_ITEM (2000).
         // Each address and each unique storage slot counts as one item.
