@@ -127,6 +127,7 @@ pub const JournalVTable = struct {
     // Simple entries — operate on the type-erased journal pointer directly.
     isAddressCold: *const fn (*anyopaque, primitives.Address) bool,
     isStorageCold: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) bool,
+    sloadProbe: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) context_mod.SloadProbe,
     isAddressLoaded: *const fn (*anyopaque, primitives.Address) bool,
     accountInfo: *const fn (*anyopaque, primitives.Address) anyerror!context_mod.AccountInfoLoad,
     loadAccountWithCode: *const fn (*anyopaque, primitives.Address) anyerror!context_mod.StateLoad(*const state_mod.Account),
@@ -151,6 +152,7 @@ pub const JournalVTable = struct {
             const vtable: JournalVTable = .{
                 .isAddressCold = isAddressColdFn,
                 .isStorageCold = isStorageColdFn,
+                .sloadProbe = sloadProbeFn,
                 .isAddressLoaded = isAddressLoadedFn,
                 .accountInfo = accountInfoFn,
                 .loadAccountWithCode = loadAccountWithCodeFn,
@@ -177,6 +179,9 @@ pub const JournalVTable = struct {
             }
             fn isStorageColdFn(ptr: *anyopaque, addr: primitives.Address, key: primitives.StorageKey) bool {
                 return j(ptr).isStorageCold(addr, key);
+            }
+            fn sloadProbeFn(ptr: *anyopaque, addr: primitives.Address, key: primitives.StorageKey) context_mod.SloadProbe {
+                return j(ptr).sloadProbe(addr, key);
             }
             fn isAddressLoadedFn(ptr: *anyopaque, addr: primitives.Address) bool {
                 return j(ptr).isAddressLoaded(addr);
@@ -364,6 +369,11 @@ pub const Host = struct {
     /// Check whether an address is cold WITHOUT loading it from the database.
     pub fn isAddressCold(self: *Host, addr: primitives.Address) bool {
         return self.js_vtable.isAddressCold(self.js, addr);
+    }
+
+    /// SLOAD's pre-charge probe: the value of a warm loaded slot, or the slot's coldness.
+    pub fn sloadProbe(self: *Host, addr: primitives.Address, key: primitives.StorageKey) context_mod.SloadProbe {
+        return self.js_vtable.sloadProbe(self.js, addr, key);
     }
 
     /// Check whether a storage slot is cold WITHOUT loading it from the database.
