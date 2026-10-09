@@ -740,6 +740,13 @@ pub const JumpTable = struct {
     }
 };
 
+/// Bytes each opcode occupies: PUSH1..PUSH32 carry 1..32 immediates, everything else is one byte.
+const legacy_step: [256]u8 = blk: {
+    var t = [_]u8{1} ** 256;
+    for (0..32) |n| t[PUSH1 + n] = @intCast(n + 2);
+    break :blk t;
+};
+
 /// Analyzes the bytecode for use in LegacyAnalyzedBytecode.
 /// The jump table bit vector is heap-allocated to avoid dangling stack pointers.
 fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
@@ -756,34 +763,24 @@ fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
     const bit_vec = alloc_mod.get().alloc(u8, bit_vec_len) catch @panic("out of memory");
     @memset(bit_vec, 0);
 
-    var i: usize = 0;
-
     // Analyze bytecode to find JUMPDEST positions.
     //
     // Byte-serial by necessity: a PUSH carries immediates, so the next opcode's
     // position depends on this one. Anecdotally a SWAR fast path that skipped
     // whole words cost 9.4% on a real block because PUSH is roughly a quarter
     // of contract bytes, so an eight-byte window is clean only ~10% of the time
-    // and the probe is pure overhead on the rest.
-    while (i < bytecode.len) {
-        const opcode = bytecode[i];
-
+    // and the probe is pure overhead on the rest. The step table replaces the
+    // PUSH range test with one load, and the pointer walk drops the index add.
+    const base = bytecode.ptr;
+    const end = @intFromPtr(base) + bytecode.len;
+    var p = base;
+    while (@intFromPtr(p) < end) {
+        const opcode = p[0];
         if (opcode == JUMPDEST) {
-            const byte_idx = i >> 3;
-            const bit_idx = i & 7;
-            bit_vec[byte_idx] |= @as(u8, 1) << @intCast(bit_idx);
-            i += 1;
-        } else {
-            // Check if it's a PUSH instruction
-            const push_offset = opcode -% PUSH1;
-            if (push_offset < 32) {
-                // PUSH1 through PUSH32: skip opcode + immediate bytes
-                i += @as(usize, push_offset) + 2;
-            } else {
-                // Other opcodes: skip just the opcode
-                i += 1;
-            }
+            const i = @intFromPtr(p) - @intFromPtr(base);
+            bit_vec[i >> 3] |= @as(u8, 1) << @intCast(i & 7);
         }
+        p += legacy_step[opcode];
     }
 
     return LegacyAnalyzedBytecode{
