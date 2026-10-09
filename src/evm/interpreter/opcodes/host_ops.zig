@@ -288,7 +288,16 @@ pub fn opSload(ctx: *InstructionContext) void {
     // Dynamic gas for Berlin+ (static_gas is 0 for Berlin+).
     // Charge BEFORE loading to avoid a DB read on OOG (EIP-7928 BAL correctness).
     if (primitives.isEnabledIn(spec, .berlin)) {
-        const dyn_gas: u64 = if (h.isStorageCold(self_addr, key)) gas_costs.coldStorageAccess(spec) else gas_costs.WARM_SLOAD;
+        const probe = h.sloadProbe(self_addr, key);
+        if (probe.value) |value| {
+            if (!ctx.interpreter.gas.spend(gas_costs.WARM_SLOAD)) {
+                ctx.interpreter.halt(.out_of_gas);
+                return;
+            }
+            stack.setTopUnsafe().* = value;
+            return;
+        }
+        const dyn_gas: u64 = if (probe.is_cold) gas_costs.coldStorageAccess(spec) else gas_costs.WARM_SLOAD;
         if (!ctx.interpreter.gas.spend(dyn_gas)) {
             ctx.interpreter.halt(.out_of_gas);
             return;

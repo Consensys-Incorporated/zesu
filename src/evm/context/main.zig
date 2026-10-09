@@ -19,6 +19,7 @@ pub const JournalCheckpoint = @import("journal.zig").JournalCheckpoint;
 pub const StateLoad = @import("journal.zig").StateLoad;
 pub const AccountInfoLoad = @import("journal.zig").AccountInfoLoad;
 pub const SStoreResult = @import("journal.zig").SStoreResult;
+pub const SloadProbe = @import("journal.zig").SloadProbe;
 pub const SelfDestructResult = @import("journal.zig").SelfDestructResult;
 pub const TransferError = @import("journal.zig").TransferError;
 pub const AccountPreState = @import("journal.zig").AccountPreState;
