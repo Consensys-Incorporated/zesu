@@ -568,8 +568,11 @@ fn runDispatch(
     // to fetch the next one. The `defer` publishes it on every exit path,
     // including the out-of-gas returns and a CALL/CREATE suspend.
     //
-    // Handlers that read or write it — PUSH, PC, JUMP, JUMPI, and anything on
-    // the cold path — get it synced around the call; the rest never touch it.
+    // `self.bytecode.pc` is therefore STALE inside every arm below. The only
+    // handlers that read or write it are JUMP, JUMPI, PUSH (via `withPc`) and
+    // whatever the cold path reaches through the table, including PC (via
+    // `coldStep`). A handler that touches `bytecode.pc` must be reached through
+    // one of those two; never call it bare from an inlined arm.
     var pc = self.bytecode.pc;
     defer self.bytecode.pc = pc;
 
@@ -776,9 +779,7 @@ fn runDispatch(
                 self.halt(.out_of_gas);
                 return;
             }
-            self.bytecode.pc = pc;
-            opcodes.opJump(ctx);
-            pc = self.bytecode.pc;
+            withPc(self, &pc, opcodes.opJump, .{ctx});
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw opcodeAt(code, pc);
         },
@@ -788,9 +789,7 @@ fn runDispatch(
                 self.halt(.out_of_gas);
                 return;
             }
-            self.bytecode.pc = pc;
-            opcodes.opJumpi(ctx);
-            pc = self.bytecode.pc;
+            withPc(self, &pc, opcodes.opJumpi, .{ctx});
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw opcodeAt(code, pc);
         },
@@ -812,9 +811,7 @@ fn runDispatch(
                 self.halt(.out_of_gas);
                 return;
             }
-            self.bytecode.pc = pc;
-            opcodes.opPushNImpl(ctx, n);
-            pc = self.bytecode.pc;
+            withPc(self, &pc, opcodes.opPushNImpl, .{ ctx, n });
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
                 continue :sw opcodeAt(code, pc);
         },
@@ -857,9 +854,20 @@ fn runDispatch(
     }
 }
 
+/// Run `handler` with the register-held counter published to `bytecode.pc`,
+/// then read it back. For handlers that read or write `bytecode.pc` (JUMP,
+/// JUMPI, PUSH); see the note in `runDispatch`.
+inline fn withPc(self: *Interpreter, pc: *usize, comptime handler: anytype, args: anytype) void {
+    self.bytecode.pc = pc.*;
+    @call(.always_inline, handler, args);
+    pc.* = self.bytecode.pc;
+}
+
 /// The cold path: table load, static gas, indirect call. Returns false if the
 /// opcode halted the interpreter on gas, in which case the caller must return.
-/// `relativeJump` is the caller's responsibility, as in the inlined cases.
+/// The caller has already advanced `pc` past the opcode byte; this publishes it
+/// to `bytecode.pc` for the handler and reads it back, so it is safe for any
+/// table entry, including PC and the CALL/CREATE family that suspend the frame.
 inline fn coldStep(
     self: *Interpreter,
     table: *const InstructionTable,
