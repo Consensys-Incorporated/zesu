@@ -352,11 +352,7 @@ pub fn resumeCall(interp: *Interpreter, result: host_module.CallResult, ret_off:
     if (actual > 0) {
         const dst = interp.memory.buffer.items[ret_off .. ret_off + actual];
         const src = result.return_data[0..actual];
-        if (@intFromPtr(dst.ptr) <= @intFromPtr(src.ptr)) {
-            std.mem.copyForwards(u8, dst, src);
-        } else {
-            std.mem.copyBackwards(u8, dst, src);
-        }
+        @memmove(dst, src);
     }
     interp.return_data.data = @constCast(result.return_data);
 
