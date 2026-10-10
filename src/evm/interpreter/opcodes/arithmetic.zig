@@ -223,6 +223,7 @@ inline fn limbLowBits(a: [4]u64, sh: usize) [4]u64 {
 /// Returns 0 when n == 0 (per EVM spec).
 pub fn addmod(a: primitives.U256, b: primitives.U256, n: primitives.U256) primitives.U256 {
     if (n == 0) return 0;
+    if (comptime zisk_arith) return arith256Mod(a, 1, b, n);
     const al = toLimbs(a);
     const bl = toLimbs(b);
     const nl = toLimbs(n);
@@ -250,8 +251,22 @@ pub fn addmod(a: primitives.U256, b: primitives.U256, n: primitives.U256) primit
 /// Compute (a * b) % n using schoolbook 256x256→512 multiply + Knuth division.
 /// O(1) fixed operations. Uses only u64 hardware division via div128by64.
 /// Returns 0 when n == 0 (per EVM spec).
+/// ZisK guest only (zisk-object): MULMOD and ADDMOD run on the arith256_mod precompile,
+/// which proves d = (a * b + c) mod m in one operation. Operands need not be reduced.
+const zisk_arith = @import("interp_options").zisk_arith;
+const Arith256ModParams = extern struct { a: *const u256, b: *const u256, c: *const u256, m: *const u256, d: *u256 };
+extern fn syscall_arith256_mod(params: *Arith256ModParams) void;
+
+inline fn arith256Mod(a: u256, b: u256, c: u256, m: u256) u256 {
+    var d: u256 = undefined;
+    var p = Arith256ModParams{ .a = &a, .b = &b, .c = &c, .m = &m, .d = &d };
+    syscall_arith256_mod(&p);
+    return d;
+}
+
 pub fn mulmod(a: primitives.U256, b: primitives.U256, n: primitives.U256) primitives.U256 {
     if (n == 0) return 0;
+    if (comptime zisk_arith) return arith256Mod(a, b, 0, n);
     if (a == 0 or b == 0) return 0;
     const nl = toLimbs(n);
     const product = mulFull(a, b);
