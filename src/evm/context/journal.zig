@@ -429,6 +429,9 @@ pub const JournaledAccount = struct {
     }
 };
 
+/// Result of `JournalInner.sloadProbe`.
+pub const SloadProbe = struct { value: ?primitives.StorageValue, is_cold: bool };
+
 /// Inner journal evm_state that contains journal and evm_state changes.
 ///
 /// Spec Id is a essential information for the Journal.
@@ -1417,6 +1420,18 @@ pub const JournalInner = struct {
         return !self.warm_addresses.isStorageWarm(address, key);
     }
 
+    /// SLOAD's pre-charge probe. A slot already loaded and warm in this transaction returns its
+    /// value: reading it has no side effects, so the caller skips `sload`. Otherwise `value` is
+    /// null and `is_cold` is what `isStorageCold` would return.
+    pub fn sloadProbe(self: *const JournalInner, address: primitives.Address, key: primitives.StorageKey) SloadProbe {
+        if (self.evm_state.getPtr(address)) |acct| {
+            if (acct.storage.getPtr(key)) |slot| {
+                if (!slot.isColdTransactionId(self.transaction_id)) return .{ .value = slot.present_value, .is_cold = false };
+            }
+        }
+        return .{ .value = null, .is_cold = !self.warm_addresses.isStorageWarm(address, key) };
+    }
+
     pub fn sload(self: *JournalInner, db: anytype, address: primitives.Address, key: primitives.StorageKey, skip_cold_load: bool) !StateLoad(primitives.StorageValue) {
         // assume acc is warm
         const account = self.evm_state.getPtr(address).?;
@@ -1578,6 +1593,10 @@ pub fn Journal(comptime DB: type) type {
 
         pub fn getDbMut(self: *@This()) *DB {
             return &self.database;
+        }
+
+        pub fn sloadProbe(self: *const @This(), address: primitives.Address, key: primitives.StorageKey) SloadProbe {
+            return self.inner.sloadProbe(address, key);
         }
 
         pub fn sload(self: *@This(), address: primitives.Address, key: primitives.StorageKey) !StateLoad(primitives.StorageValue) {
