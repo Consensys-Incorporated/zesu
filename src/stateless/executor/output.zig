@@ -136,12 +136,7 @@ pub fn computeStateRootDelta(
         // An account the block left as the witness proved it needs no trie update: re-encoding
         // it would only rebuild its path and re-hash witness nodes whose hashes are known.
         if (pre_storage_roots.originalAccount(addr)) |o| {
-            const unchanged = if (o.exists)
-                !is_empty and o.nonce == acct.nonce and o.balance == acct.balance and
-                    std.mem.eql(u8, &o.code_hash, &code_hash) and std.mem.eql(u8, &o.storage_root, &storage_root)
-            else
-                is_empty;
-            if (unchanged) continue;
+            if (o.unchangedBy(acct.nonce, acct.balance, code_hash, storage_root, is_empty)) continue;
         }
 
         const addr_key = mpt_builder.keccak256(&addr);

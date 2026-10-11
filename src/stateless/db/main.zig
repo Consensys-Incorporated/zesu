@@ -57,7 +57,7 @@ pub const WitnessDatabase = struct {
     /// trie walks in storage() and in the post-execution batch update (storageRootFor), and
     /// lets that update skip accounts the block left unchanged (originalAccount). Accounts
     /// absent from pre-state are cached with exists = false and EMPTY_TRIE_HASH.
-    storage_root_cache: std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80),
+    original_accounts: std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80),
 
     /// Pre-state account fields as proven by the witness.
     pub const OriginalAccount = struct {
@@ -70,6 +70,27 @@ pub const WitnessDatabase = struct {
         fn of(as: ?mpt.AccountState) OriginalAccount {
             const a = as orelse return .{ .storage_root = EMPTY_TRIE_HASH };
             return .{ .storage_root = a.storage_root, .exists = true, .nonce = a.nonce, .balance = a.balance, .code_hash = a.code_hash };
+        }
+
+        /// True when writing the post-state account back would leave the trie as the witness
+        /// proved it, so the batch update can leave it out. `post_is_empty` is the EIP-161
+        /// emptiness of the post-state account (zero nonce/balance, no code, empty storage).
+        pub fn unchangedBy(
+            self: OriginalAccount,
+            nonce: u64,
+            balance: u256,
+            code_hash: primitives.Hash,
+            storage_root: primitives.Hash,
+            post_is_empty: bool,
+        ) bool {
+            // Absent before: still empty means nothing to insert.
+            if (!self.exists) return post_is_empty;
+            // Present before but empty now: EIP-161 clearing must delete it, even if its
+            // pre-state fields happen to match (a pre-existing empty account).
+            if (post_is_empty) return false;
+            return self.nonce == nonce and self.balance == balance and
+                std.mem.eql(u8, &self.code_hash, &code_hash) and
+                std.mem.eql(u8, &self.storage_root, &storage_root);
         }
     };
 
@@ -94,7 +115,7 @@ pub const WitnessDatabase = struct {
             .witness_codes = witness_codes,
             .block_hashes = block_hashes,
             .deployed_codes = std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80).init(alloc),
-            .storage_root_cache = std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80).init(alloc),
+            .original_accounts = std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80).init(alloc),
         };
     }
 
@@ -103,7 +124,7 @@ pub const WitnessDatabase = struct {
         var bc_it = self.deployed_codes.valueIterator();
         while (bc_it.next()) |bc| bc.deinit();
         self.deployed_codes.deinit();
-        self.storage_root_cache.deinit();
+        self.original_accounts.deinit();
     }
 
     /// Called by the journal to register code the block itself writes: bytecodes deployed
@@ -158,7 +179,7 @@ pub const WitnessDatabase = struct {
         // `catch { ctx_error = .database_error }` wrappers in context.zig/host.zig
         // can't tell OOM apart from DbError.InvalidWitness, so it would misreport a
         // host allocator failure as "the witness is incomplete". Panic on OOM instead.
-        self.storage_root_cache.put(address, OriginalAccount.of(account_state)) catch @panic("out of memory");
+        self.original_accounts.put(address, OriginalAccount.of(account_state)) catch @panic("out of memory");
         const as = account_state orelse return null;
         return state.AccountInfo{
             .balance = as.balance,
@@ -195,7 +216,7 @@ pub const WitnessDatabase = struct {
         address: primitives.Address,
         index: primitives.StorageKey,
     ) !primitives.StorageValue {
-        const storage_root = if (self.storage_root_cache.get(address)) |o| o.storage_root else blk: {
+        const storage_root = if (self.original_accounts.get(address)) |o| o.storage_root else blk: {
             const account_state = mpt.verifyAccountIndexed(
                 self.pre_state_root,
                 address,
@@ -212,7 +233,7 @@ pub const WitnessDatabase = struct {
             };
             const orig = OriginalAccount.of(account_state);
             // OOM panics rather than propagates: see basic()'s comment above for why.
-            self.storage_root_cache.put(address, orig) catch @panic("out of memory");
+            self.original_accounts.put(address, orig) catch @panic("out of memory");
             break :blk orig.storage_root;
         };
         const slot = u256ToHash(index);
@@ -236,7 +257,7 @@ pub const WitnessDatabase = struct {
     /// result from an incomplete witness. A genuinely absent account still
     /// resolves to null (valid non-inclusion) and returns false without error.
     pub fn hasNonZeroStorageForAddress(self: *const Self, address: primitives.Address) !bool {
-        if (self.storage_root_cache.get(address)) |o| {
+        if (self.original_accounts.get(address)) |o| {
             return !std.mem.eql(u8, &o.storage_root, &EMPTY_TRIE_HASH);
         }
         const account_state = mpt.verifyAccountIndexed(
@@ -264,12 +285,12 @@ pub const WitnessDatabase = struct {
     /// Returns null for accounts not loaded during execution; batch update falls back to
     /// building the storage trie from scratch (correct for new accounts with no pre-state).
     pub fn storageRootFor(self: *const Self, address: primitives.Address) ?primitives.Hash {
-        return if (self.storage_root_cache.get(address)) |o| o.storage_root else null;
+        return if (self.original_accounts.get(address)) |o| o.storage_root else null;
     }
 
     /// Pre-state account as loaded during execution, or null if it was never loaded.
     pub fn originalAccount(self: *const Self, address: primitives.Address) ?OriginalAccount {
-        return self.storage_root_cache.get(address);
+        return self.original_accounts.get(address);
     }
 };
 
