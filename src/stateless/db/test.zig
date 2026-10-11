@@ -413,13 +413,13 @@ test "blockHash returns InvalidWitness for missing hash" {
 
 // ─── Regression: storage-root cache must not be silently dropped ──────────────
 
-// `storageRootFor()` is a bare `storage_root_cache.get()`, so a missing entry is
+// `storageRootFor()` is a bare `original_accounts.get()`, so a missing entry is
 // indistinguishable from "this account was never loaded". The post-execution
 // batch trie update (executor/output.zig) reads that as "no pre-state
 // storage" and rebuilds the trie from only the touched slots, silently dropping
 // every untouched slot -- a wrong state root reported as success.
 //
-// db/main.zig's `storage_root_cache.put(...)` sites panic on OOM rather than
+// db/main.zig's `original_accounts.put(...)` sites panic on OOM rather than
 // drop the entry or propagate an error (which would be indistinguishable
 // upstream from DbError.InvalidWitness), so the invariant
 //
@@ -635,4 +635,57 @@ test "storage must fail when the account's storage root cannot be proven" {
         );
         return error.UnprovableAccountStorageReadAsZero;
     } else |_| {}
+}
+
+// ─── OriginalAccount.unchangedBy: the state-root skip predicate ───────────────
+
+// computeStateRootDelta omits an account from the batch trie update when this returns
+// true, so a false positive silently produces a wrong state root. Each case below pins
+// one boundary of the rule.
+const OriginalAccount = db_mod.WitnessDatabase.OriginalAccount;
+
+const ROOT_A: primitives.Hash = @splat(0x5a);
+const ROOT_B: primitives.Hash = @splat(0x5b);
+const CODE_A: primitives.Hash = @splat(0xc1);
+const CODE_B: primitives.Hash = @splat(0xc2);
+
+fn existing(nonce: u64, balance: u256, code_hash: primitives.Hash, storage_root: primitives.Hash) OriginalAccount {
+    return .{ .storage_root = storage_root, .exists = true, .nonce = nonce, .balance = balance, .code_hash = code_hash };
+}
+
+test "unchangedBy: identical existing account is skipped" {
+    const o = existing(3, 1000, CODE_A, ROOT_A);
+    try std.testing.expect(o.unchangedBy(3, 1000, CODE_A, ROOT_A, false));
+}
+
+test "unchangedBy: any single changed field is not skipped" {
+    const o = existing(3, 1000, CODE_A, ROOT_A);
+    try std.testing.expect(!o.unchangedBy(4, 1000, CODE_A, ROOT_A, false));
+    try std.testing.expect(!o.unchangedBy(3, 1001, CODE_A, ROOT_A, false));
+    try std.testing.expect(!o.unchangedBy(3, 1000, CODE_B, ROOT_A, false));
+    try std.testing.expect(!o.unchangedBy(3, 1000, CODE_A, ROOT_B, false));
+}
+
+test "unchangedBy: existing account emptied by EIP-161 is not skipped" {
+    const o = existing(1, 0, KECCAK_EMPTY, EMPTY_TRIE_HASH);
+    try std.testing.expect(!o.unchangedBy(0, 0, KECCAK_EMPTY, EMPTY_TRIE_HASH, true));
+}
+
+test "unchangedBy: pre-existing empty account that is still empty is not skipped" {
+    // Its leaf is in the trie; EIP-161 clearing has to delete it.
+    const o = existing(0, 0, KECCAK_EMPTY, EMPTY_TRIE_HASH);
+    try std.testing.expect(!o.unchangedBy(0, 0, KECCAK_EMPTY, EMPTY_TRIE_HASH, true));
+}
+
+test "unchangedBy: absent account that stays empty is skipped" {
+    const o: OriginalAccount = .{ .storage_root = EMPTY_TRIE_HASH };
+    try std.testing.expect(o.unchangedBy(0, 0, KECCAK_EMPTY, EMPTY_TRIE_HASH, true));
+}
+
+test "unchangedBy: absent account that was created is not skipped" {
+    const o: OriginalAccount = .{ .storage_root = EMPTY_TRIE_HASH };
+    try std.testing.expect(!o.unchangedBy(1, 0, KECCAK_EMPTY, EMPTY_TRIE_HASH, false));
+    try std.testing.expect(!o.unchangedBy(0, 5, KECCAK_EMPTY, EMPTY_TRIE_HASH, false));
+    try std.testing.expect(!o.unchangedBy(0, 0, CODE_A, EMPTY_TRIE_HASH, false));
+    try std.testing.expect(!o.unchangedBy(0, 0, KECCAK_EMPTY, ROOT_A, false));
 }
