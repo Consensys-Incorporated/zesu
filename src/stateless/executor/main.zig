@@ -142,184 +142,6 @@ const SYSTEM_ADDRESS = primitives.SYSTEM_ADDRESS;
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/// Build a sorted slice of AccessedEntry from the WitnessDatabase access log
-/// and the post-execution alloc delta.  The result is sorted ascending by address.
-pub fn buildAccessedEntries(
-    alloc: std.mem.Allocator,
-    access_log: context_mod.AccessLog,
-    post_alloc: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
-    deleted_accounts: []const types.Address,
-    system_address_user_touched: bool,
-) ![]types.AccessedEntry {
-    var entries = std.ArrayListUnmanaged(types.AccessedEntry).empty;
-
-    var addr_iter = access_log.accounts.iterator();
-    while (addr_iter.next()) |acc_kv| {
-        const address = acc_kv.key_ptr.*;
-        // EIP-7928 (bal-devnet-7): SYSTEM_ADDRESS only appears in the BAL if a user
-        // tx touched it OR it received ETH (balance change). Pre/post-block system
-        // calls warm SYSTEM_ADDRESS (it is the caller) but those touches alone do
-        // NOT belong in the BAL.
-        if (std.mem.eql(u8, &address, &SYSTEM_ADDRESS) and !system_address_user_touched) {
-            const pre_bal = acc_kv.value_ptr.*.balance;
-            const post_bal = if (post_alloc.get(address)) |p| p.balance else pre_bal;
-            if (pre_bal == post_bal) continue;
-        }
-        const pre = acc_kv.value_ptr.*;
-
-        const post_acct = post_alloc.get(address);
-
-        // Selfdestructed accounts are removed from post_alloc by extractPostState.
-        // For EIP-7928 BAL purposes their post-state is effectively empty (balance=0,
-        // nonce unchanged, code cleared, storage cleared).  Fall back to 0/empty
-        // rather than pre-state values so we correctly detect the balance change.
-        const is_deleted = for (deleted_accounts) |da| {
-            if (std.mem.eql(u8, &da, &address)) break true;
-        } else false;
-
-        const post_nonce = if (post_acct) |p| p.nonce else pre.nonce;
-        const post_balance: u256 = if (post_acct) |p| p.balance else if (is_deleted) 0 else pre.balance;
-        const post_code_hash: types.Hash = if (post_acct) |p| blk: {
-            if (p.code_hash) |ch| break :blk ch;
-            if (p.code.len > 0) break :blk mpt.keccak256(p.code);
-            break :blk primitives.KECCAK_EMPTY;
-        } else if (is_deleted) primitives.KECCAK_EMPTY else pre.code_hash;
-
-        var storage_changes = std.ArrayListUnmanaged(types.StorageChange).empty;
-        var storage_reads = std.ArrayListUnmanaged(types.Hash).empty;
-
-        const witness_storage = access_log.storage.get(address);
-        if (witness_storage) |inner| {
-            var slot_map = inner;
-            var slot_iter = slot_map.iterator();
-            while (slot_iter.next()) |slot_kv| {
-                const slot_key = slot_kv.key_ptr.*;
-                const pre_val = slot_kv.value_ptr.*;
-                const post_val = if (post_acct) |p| p.storage.get(slot_key) orelse pre_val else if (is_deleted) 0 else pre_val;
-                const slot_hash = u256ToHashLocal(slot_key);
-                // EIP-7928: a slot is a storageChange if its final value differs from the
-                // pre-block value, OR if it was committed to a different value at any tx
-                // boundary (cross-tx net-zero write: 0→X committed in tx1, X→0 in tx2).
-                // Within-tx net-zero writes (0→X→0 all in one tx) are storageReads since
-                // the tx-level committed value never left the pre-block value.
-                const was_cross_tx_changed = if (access_log.committed_changed.get(address)) |slots|
-                    slots.contains(slot_key)
-                else
-                    false;
-                if (post_val != pre_val or was_cross_tx_changed) {
-                    try storage_changes.append(alloc, .{ .slot = slot_hash, .post_value = post_val });
-                } else {
-                    try storage_reads.append(alloc, slot_hash);
-                }
-            }
-        }
-
-        // Also capture storage changes that weren't routed through WitnessDatabase.
-        // This happens for newly-created contracts: zevm's sload() returns 0 for
-        // `is_newly_created` accounts without calling db.storage(), so those slots
-        // are absent from witness_storage.  For these slots pre_val is always 0.
-        if (post_acct) |p| {
-            var post_iter = p.storage.iterator();
-            while (post_iter.next()) |post_kv| {
-                const slot_key = post_kv.key_ptr.*;
-                const post_val = post_kv.value_ptr.*;
-                // Skip zero-value slots: pre_val is always 0 for newly-created accounts,
-                // so post_val == 0 means no net change (net-zero write or just zero).
-                if (post_val == 0) continue;
-                const already_tracked = if (witness_storage) |ws| ws.get(slot_key) != null else false;
-                if (already_tracked) continue;
-                const slot_hash = u256ToHashLocal(slot_key);
-                try storage_changes.append(alloc, .{ .slot = slot_hash, .post_value = post_val });
-            }
-        }
-
-        std.mem.sort(types.StorageChange, storage_changes.items, {}, struct {
-            pub fn lessThan(_: void, a: types.StorageChange, b: types.StorageChange) bool {
-                return std.mem.lessThan(u8, &a.slot, &b.slot);
-            }
-        }.lessThan);
-        std.mem.sort(types.Hash, storage_reads.items, {}, struct {
-            pub fn lessThan(_: void, a: types.Hash, b: types.Hash) bool {
-                return std.mem.lessThan(u8, &a, &b);
-            }
-        }.lessThan);
-
-        try entries.append(alloc, .{
-            .address = address,
-            .pre_nonce = pre.nonce,
-            .pre_balance = pre.balance,
-            .pre_code_hash = pre.code_hash,
-            .post_nonce = post_nonce,
-            .post_balance = post_balance,
-            .post_code_hash = post_code_hash,
-            .storage_changes = try storage_changes.toOwnedSlice(alloc),
-            .storage_reads = try storage_reads.toOwnedSlice(alloc),
-        });
-    }
-
-    // Also include accounts that appear in post_alloc but were NOT tracked via
-    // WitnessDatabase.basic() (e.g., SELFDESTRUCT beneficiary that returned InvalidProof
-    // because its non-existence proof was absent from the witness — still a real access).
-    var post_iter2 = post_alloc.iterator();
-    while (post_iter2.next()) |kv| {
-        const address = kv.key_ptr.*;
-        if (access_log.accounts.contains(address)) continue; // already handled above
-        // Skip addresses that aren't real state changes (coinbase zero-balance etc.)
-        const p = kv.value_ptr.*;
-        // Empty pre-state for accounts not in the access log.
-        const pre_empty = context_mod.AccountPreState{};
-        const is_deleted = for (deleted_accounts) |da| {
-            if (std.mem.eql(u8, &da, &address)) break true;
-        } else false;
-        const post_balance: u256 = if (is_deleted) 0 else p.balance;
-        const post_code_hash: types.Hash = if (p.code_hash) |ch| ch else if (p.code.len > 0) mpt.keccak256(p.code) else primitives.KECCAK_EMPTY;
-        // Skip if no actual change from empty pre-state.
-        if (post_balance == 0 and p.nonce == 0 and
-            std.mem.eql(u8, &post_code_hash, &primitives.KECCAK_EMPTY) and
-            p.storage.count() == 0 and !is_deleted) continue;
-
-        var storage_changes2 = std.ArrayListUnmanaged(types.StorageChange).empty;
-        var post_storage_iter = p.storage.iterator();
-        while (post_storage_iter.next()) |slot_kv| {
-            const slot_key = slot_kv.key_ptr.*;
-            const post_val = slot_kv.value_ptr.*;
-            if (post_val == 0) continue;
-            try storage_changes2.append(alloc, .{ .slot = u256ToHashLocal(slot_key), .post_value = post_val });
-        }
-        std.mem.sort(types.StorageChange, storage_changes2.items, {}, struct {
-            pub fn lessThan(_: void, a: types.StorageChange, b: types.StorageChange) bool {
-                return std.mem.lessThan(u8, &a.slot, &b.slot);
-            }
-        }.lessThan);
-
-        try entries.append(alloc, .{
-            .address = address,
-            .pre_nonce = pre_empty.nonce,
-            .pre_balance = pre_empty.balance,
-            .pre_code_hash = pre_empty.code_hash,
-            .post_nonce = p.nonce,
-            .post_balance = post_balance,
-            .post_code_hash = post_code_hash,
-            .storage_changes = try storage_changes2.toOwnedSlice(alloc),
-            .storage_reads = &.{},
-        });
-    }
-
-    const SortEntry = struct { addr: [20]u8, idx: u32 };
-    const sort_buf = try alloc.alloc(SortEntry, entries.items.len);
-    defer alloc.free(sort_buf);
-    for (entries.items, 0..) |e, i| sort_buf[i] = .{ .addr = e.address, .idx = @intCast(i) };
-    std.mem.sort(SortEntry, sort_buf, {}, struct {
-        fn lt(_: void, a: SortEntry, b: SortEntry) bool {
-            return std.mem.lessThan(u8, &a.addr, &b.addr);
-        }
-    }.lt);
-    const sorted = try alloc.alloc(types.AccessedEntry, entries.items.len);
-    for (sort_buf, 0..) |sb, j| sorted[j] = entries.items[sb.idx];
-    entries.deinit(alloc);
-    return sorted;
-}
-
 pub const ExecuteBlockResult = struct {
     post_state_root: [32]u8,
     receipts_root: [32]u8,
@@ -340,7 +162,7 @@ pub fn executeBlockFromAlloc(
 ) !ExecuteBlockResult {
     try block_validation.validateBlock(env, spec);
     const result = try transition_mod.transition(alloc, pre_alloc, env, txs, spec, chain_id, reward);
-    try block_validation.validatePostExecution(alloc, env, spec, result.cumulative_gas, result.blob_gas_used, &.{}, &.{}, null);
+    try block_validation.validatePostExecution(env, spec, result.cumulative_gas, result.blob_gas_used, null, null);
     const post_state_root = try output_mod.computeStateRoot(alloc, result.alloc, &.{});
     const receipts_root = try output_mod.computeReceiptsRoot(alloc, result.receipts);
     return .{
@@ -413,30 +235,17 @@ pub fn executeBlockStateless(
     // withdrawals, post-block system calls) -- transitionWithContext only bails
     // out early on ctx_error while looping over transactions.
     if (ctx.ctx_error != .ok) return error.InvalidWitness;
-    // EIP-7928 (Amsterdam+): the block access list is only validated on Amsterdam+
-    // (validatePostExecution gates the comparison). Pre-Amsterdam, skip draining the
-    // access log and building the accessed entries entirely; validatePostExecution
-    // still runs its all-fork gas/blob checks with an empty accessed slice.
-    var access_log = if (primitives.isEnabledIn(spec, .amsterdam)) ctx.journaled_state.takeAccessLog() else null;
-    defer if (access_log) |*al| al.deinit();
-    const accessed: []const types.AccessedEntry = if (access_log) |al|
-        try buildAccessedEntries(alloc, al, result.alloc, result.deleted_accounts, result.system_address_user_touched)
-    else
-        &.{};
     // Compute the commitments first so validatePostExecution can validate them
     // against the payload alongside its gas/blob/BAL checks — giving every caller
     // one authoritative verdict instead of re-comparing the roots itself.
     const proof = try finalizeOutput(alloc, pre_state_root, result, node_index, spec, ctx.getDb());
-    try block_validation.validatePostExecution(alloc, env, spec, result.cumulative_gas, result.blob_gas_used, ep.block_access_list, accessed, .{
+    try block_validation.validatePostExecution(env, spec, result.cumulative_gas, result.blob_gas_used, if (result.bal_hash) |h| .{ .computed = h, .expected = block_access_list_hash } else null, .{
         .computed_state_root = proof.post_state_root,
         .expected_state_root = ep.state_root,
         .computed_receipts_root = proof.receipts_root,
         .expected_receipts_root = ep.receipts_root,
     });
     if (primitives.isEnabledIn(spec, .prague) and !std.mem.eql(u8, &requests_hash, &result.requests_hash)) return error.InvalidRequests;
-    if (result.bal_hash) |h| {
-        if (!std.mem.eql(u8, &block_access_list_hash, &h)) return error.InvalidBlockAccessList;
-    }
     return proof;
 }
 

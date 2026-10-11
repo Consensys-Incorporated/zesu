@@ -53,11 +53,6 @@ pub const TransitionResult = struct {
     chain_id: u64,
     bal_hash: ?[32]u8 = null,
     requests_hash: [32]u8 = [_]u8{0} ** 32,
-    /// EIP-7928 (bal-devnet-7): true iff a user tx touched SYSTEM_ADDRESS
-    /// (BALANCE / CALL / EXTCODE* etc.). buildAccessedEntries uses this to
-    /// decide whether SYSTEM_ADDRESS belongs in the BAL — pre/post-block
-    /// system-call touches alone must NOT pull it in.
-    system_address_user_touched: bool = false,
 };
 
 // ─── Dummy block hash ─────────────────────────────────────────────────────────
@@ -151,8 +146,6 @@ const BaTracker = struct {
     };
 
     fn detectAndRecord(self: *BaTracker, bai: u64, ctx: anytype, from_tx_id: usize) void {
-        // Every commit of index `bai` has happened by now; net the access log's slots over it.
-        ctx.journaled_state.inner.closeBalIndex();
         const a = self.alloc;
         // For bai > 0, skip accounts not touched since from_tx_id: their state hasn't
         // changed since the last detectAndRecord call, so nothing new to record.
@@ -658,7 +651,7 @@ pub fn transition(
 /// Builds the EVM context internally and owns its full lifecycle: the journal is freed before
 /// this function returns and the returned TransitionResult's code slices are arena-owned.
 /// Use transitionWithContext when you need access to the context (and its DB or journal)
-/// after execution — e.g., to call witness_db.takeAccessLog() or ctx.journaled_state.takeAccessLog().
+/// after execution — e.g., to read its database through ctx.getDb().
 pub fn transitionWithDb(
     arena: std.mem.Allocator,
     db: anytype,
@@ -682,7 +675,7 @@ pub fn transitionWithDb(
 /// Low-level entry point: executes block transition on a pre-built context.
 /// The caller owns the context — including its journal (alloc_mod.get() allocations) — and
 /// must call ctx.journaled_state.deinit() when done. The context and its DB remain accessible
-/// after return (e.g., for ctx.journaled_state.takeAccessLog() or ctx.getDb()).
+/// after return (e.g., for ctx.getDb()).
 pub fn transitionWithContext(
     arena: std.mem.Allocator,
     ctx: anytype,
@@ -703,13 +696,6 @@ pub fn transitionWithContext(
     // Upper bound: all pre-state accounts plus a few new accounts per tx.
     const account_hint: u32 = @intCast(pre_alloc_in.count() + txs.len * 4);
     try ctx.journaled_state.inner.evm_state.ensureTotalCapacity(account_hint);
-    // EIP-7928 BAL maps are only populated/consumed on Amsterdam+; pre-Amsterdam they
-    // stay empty (recorders gated), so skip pre-sizing them — it only touches RAM
-    // (proving-cost footprint) for buckets never used.
-    if (primitives.isEnabledIn(spec, .amsterdam)) {
-        try ctx.journaled_state.inner.bal_pre_accounts.ensureTotalCapacity(account_hint);
-        try ctx.journaled_state.inner.bal_pending_accounts.ensureTotalCapacity(account_hint);
-    }
     // commitTx and discardTx both clear the journal, so it only ever holds one transaction's
     // entries and is sized for the heaviest transaction rather than for the whole block. At the ~64
     // entries an average transaction produces, 4096 absorbs all but a negligible amount of regrowth
@@ -1344,7 +1330,6 @@ pub fn transitionWithContext(
         .chain_id = chain_id,
         .bal_hash = bal_hash,
         .requests_hash = requests_hash,
-        .system_address_user_touched = if (tracker) |t| t.system_address_user_touched else false,
     };
 }
 
