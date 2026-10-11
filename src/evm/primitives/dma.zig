@@ -6,16 +6,14 @@
 //!   csrs 0x813, src ; add  x0, dst, reg(count)  -> dma_memcpy   count via memory
 //!   csrs 0x813, src ; addi x0, dst, imm(count)  -> dma_xmemcpy  count in the instruction
 //!
-//! The extended form costs `DMA_MEMCPY_COST` (46) plus two instructions, with no
-//! parameter traffic. A 32-byte copy emitted as four load/store pairs costs eight
-//! instructions (~544) and eight memory accesses.
-//!
-//! An earlier attempt used the non-extended op and came out flat: main fell
-//! 7.75% but memory rose 5.69% — the parameter store and read were two extra
-//! accesses against the eight the copy itself needs. The immediate form has neither.
+//! The extended form needs no parameter store or read, so a 32-byte copy costs
+//! `DMA_MEMCPY_COST` plus two instructions, against eight instructions and eight
+//! memory accesses for four load/store pairs.
 //!
 //! Both instructions must be in one `asm` block: the transpiler matches the
 //! `csrs`/`addi` pair, and anything scheduled between them breaks recognition.
+//! The count must also be a literal (`"i"` constraint): a register count would
+//! silently select the slower non-extended op.
 
 const std = @import("std");
 const build_options = @import("build_options");

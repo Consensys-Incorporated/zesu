@@ -191,6 +191,7 @@ pub const Stack = struct {
 
     /// Duplicate a value without bounds checking
     pub fn dupUnsafe(self: *Stack, n: usize) void {
+        // Read `length` once — see pushUnsafe.
         const sp = self.length;
         primitives.dma.copyFixed(
             32,
@@ -507,6 +508,44 @@ test "swapUnsafe" {
     try expectEqual(@as(U, 10), stack.peekUnsafe(0));
     try expectEqual(@as(U, 20), stack.peekUnsafe(1));
     try expectEqual(@as(U, 30), stack.peekUnsafe(2));
+}
+
+test "dupUnsafe and swapUnsafe at maximum depth keep every word intact" {
+    var stack = Stack.new();
+    defer stack.deinit();
+    // Distinct words with non-zero bytes in every limb, so a partial or
+    // misplaced copy cannot pass.
+    const base: U = 0x0102030405060708_1112131415161718_2122232425262728_3132333435363738;
+    var i: usize = 0;
+    while (i < 17) : (i += 1) stack.pushUnsafe(base +% @as(U, i) *% 0x1_0000_0000_0000_0001);
+
+    const deep = stack.peekUnsafe(15);
+    stack.dupUnsafe(16);
+    try expectEqual(@as(usize, 18), stack.len());
+    try expectEqual(deep, stack.peekUnsafe(0));
+    try expectEqual(deep, stack.peekUnsafe(16));
+
+    const top = stack.peekUnsafe(0);
+    const other = stack.peekUnsafe(16);
+    stack.pushUnsafe(base ^ 0xFF);
+    const new_top = stack.peekUnsafe(0);
+    const swapped = stack.peekUnsafe(16);
+    stack.swapUnsafe(16);
+    try expectEqual(swapped, stack.peekUnsafe(0));
+    try expectEqual(new_top, stack.peekUnsafe(16));
+    // The words in between are untouched.
+    try expectEqual(top, stack.peekUnsafe(1));
+    try expectEqual(other, stack.peekUnsafe(17));
+}
+
+test "copyFixed copies exactly N bytes and leaves neighbours alone" {
+    var src: [32]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast(i * 7 + 1);
+    var buf = [_]u8{0xAA} ** 34;
+    primitives.dma.copyFixed(32, buf[1..33], &src);
+    try std.testing.expectEqual(@as(u8, 0xAA), buf[0]);
+    try std.testing.expectEqualSlices(u8, &src, buf[1..33]);
+    try std.testing.expectEqual(@as(u8, 0xAA), buf[33]);
 }
 
 test "shrinkUnsafe" {
