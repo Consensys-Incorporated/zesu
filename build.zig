@@ -58,6 +58,7 @@ fn buildModules(
     crypto_prefix: []const u8,
     crypto_backend: CryptoBackend,
     guest: bool,
+    has_dma: bool,
 ) ModuleSet {
     const use_extern = crypto_backend == .@"extern";
 
@@ -74,11 +75,15 @@ fn buildModules(
         .optimize = optimize,
     });
 
+    const primitives_opts = b.addOptions();
+    primitives_opts.addOption(bool, "has_dma", has_dma);
+
     const primitives = mkmod(b, expose, "primitives", .{
         .root_source_file = b.path("src/evm/primitives/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    primitives.addOptions("build_options", primitives_opts);
 
     // accel_impl is a private leaf: native crypto (default.zig) or the zkvm-standards extern
     // bridge (extern_bridge.zig, whose zkvm_* symbols the host resolves at link).
@@ -466,6 +471,7 @@ fn addRv64imObjectStep(
     step_name: []const u8,
     step_desc: []const u8,
     install_name: []const u8,
+    has_dma: bool,
 ) void {
     const rv64im_target = b.resolveTargetQuery(.{
         .cpu_arch = .riscv64,
@@ -476,7 +482,7 @@ fn addRv64imObjectStep(
         .abi = .none,
     });
 
-    const obj_mods = buildModules(b, rv64im_target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), crypto_prefix, .@"extern", true);
+    const obj_mods = buildModules(b, rv64im_target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), crypto_prefix, .@"extern", true, has_dma);
 
     const rv64_obj = b.addObject(.{
         .name = "zesu",
@@ -523,7 +529,7 @@ pub fn build(b: *std.Build) void {
     const libmcl_path = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
 
     // ── Module graph (exposed via addModule; backend selected by option) ──────
-    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend, false);
+    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend, false, false);
     const block_rlp_size_test_step = b.step("test-block-rlp-size", "Run block RLP size unit tests");
     const block_rlp_size_test = b.addTest(.{ .root_module = mods.block_rlp_size });
     const run_block_rlp_size_test = b.addRunArtifact(block_rlp_size_test);
@@ -756,8 +762,8 @@ pub fn build(b: *std.Build) void {
     //
     // Build with: zig build rv64im-object | zig build zisk-object
     // Verify undefined refs: llvm-nm zig-out/lib/<name> | grep ' U '
-    addRv64imObjectStep(b, optimize, crypto_prefix, &.{ .m, .zicclsm, .unaligned_scalar_mem }, "rv64im-object", "Build relocatable rv64im ELF object (zesu.o)", "lib/zesu.o");
-    addRv64imObjectStep(b, optimize, crypto_prefix, &.{ .m, .zicclsm, .unaligned_scalar_mem, .zbb, .zbs }, "zisk-object", "Build relocatable rv64im+Zbb+Zbs ELF object for the ZisK guest (zesu-zisk.o)", "lib/zesu-zisk.o");
+    addRv64imObjectStep(b, optimize, crypto_prefix, &.{ .m, .zicclsm, .unaligned_scalar_mem }, "rv64im-object", "Build relocatable rv64im ELF object (zesu.o)", "lib/zesu.o", false);
+    addRv64imObjectStep(b, optimize, crypto_prefix, &.{ .m, .zicclsm, .unaligned_scalar_mem, .zbb, .zbs }, "zisk-object", "Build relocatable rv64im+Zbb+Zbs ELF object for the ZisK guest (zesu-zisk.o)", "lib/zesu-zisk.o", true);
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
     const spec_test_version = "tests@v21.0.0";
