@@ -138,6 +138,13 @@ pub const Validation = struct {
             }
         }
 
+        // EIP-8037 (Amsterdam+): the total gas limit is capped (reference validate_transaction).
+        if (primitives.isEnabledIn(spec, .amsterdam)) {
+            if (tx.gas_limit > interpreter_mod.gas_costs.TX_MAX_TOTAL_GAS_LIMIT) {
+                return ValidationError.GasLimitExceedsCap;
+            }
+        }
+
         // Calculate initial gas cost
         const initial_gas = calculateInitialGas(tx, spec, ctx.block.gas_limit);
 

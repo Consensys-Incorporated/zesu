@@ -1,6 +1,11 @@
 const std = @import("std");
 const primitives = @import("primitives");
 
+pub const SystemCallGas = struct {
+    execution: u64,
+    reservoir: u64,
+};
+
 /// EVM configuration
 pub const CfgEnv = struct {
     /// Chain ID of the EVM. Used in CHAINID opcode and transaction's chain ID check.
@@ -98,6 +103,9 @@ pub const CfgEnv = struct {
     /// This is useful because some chains (e.g. Arbitrum) do not enforce this check.
     /// By default, it is set to `false`.
     disable_priority_fee_check: bool,
+    /// EIP-8037 (Amsterdam+): fixed execution grant and state-gas reservoir for a system call,
+    /// replacing the TX_MAX_GAS_LIMIT split of the tx gas limit. Null for ordinary transactions.
+    system_call_gas: ?SystemCallGas = null,
     /// Disables fee charging for transactions.
     /// This is useful when executing `eth_call` for example, on OP-chains where setting the base fee
     /// to 0 isn't sufficient.

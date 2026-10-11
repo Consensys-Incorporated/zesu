@@ -477,3 +477,64 @@ test "SIGNEXTEND: index >= 31 returns value unchanged" {
     opSignextend(&ctx);
     try expectEqual(@as(U, 0xABCD), interp.stack.popUnsafe());
 }
+
+// --- Differential fuzz against native u256/u512 arithmetic ---
+//
+// The div/mod fast paths are exactly the kind of code that returns a plausible
+// wrong answer rather than crashing, so every one of them is checked against the
+// compiler's own arithmetic. `drawOperand` is biased toward the shapes the fast
+// paths key on — powers of two, single-word values, limb boundaries, 2**k - 1 —
+// because uniform random u256 draws essentially never hit them.
+
+fn refSdiv(a: primitives.U256, b: primitives.U256) primitives.U256 {
+    if (b == 0) return 0;
+    const sa: i256 = @bitCast(a);
+    const sb: i256 = @bitCast(b);
+    if (sa == std.math.minInt(i256) and sb == -1) return a;
+    return @bitCast(@divTrunc(sa, sb));
+}
+
+fn refSmod(a: primitives.U256, b: primitives.U256) primitives.U256 {
+    if (b == 0) return 0;
+    const sa: i256 = @bitCast(a);
+    const sb: i256 = @bitCast(b);
+    if (sa == std.math.minInt(i256) and sb == -1) return 0;
+    return @bitCast(@rem(sa, sb));
+}
+
+fn drawOperand(r: std.Random) primitives.U256 {
+    return switch (r.uintLessThan(u8, 10)) {
+        0 => 0,
+        1 => 1,
+        2 => @as(primitives.U256, 1) << r.int(u8),
+        3 => (@as(primitives.U256, 1) << r.int(u8)) -% 1,
+        4 => r.int(u64),
+        5 => r.int(u63),
+        6 => @as(primitives.U256, r.int(u64)) << 64,
+        7 => @as(primitives.U256, 1) << 255,
+        8 => std.math.maxInt(primitives.U256),
+        else => r.int(primitives.U256),
+    };
+}
+
+test "div/mod/addmod/mulmod match native arithmetic on fast-path shapes" {
+    var prng = std.Random.DefaultPrng.init(0xA17F00D);
+    const r = prng.random();
+
+    for (0..200_000) |_| {
+        const a = drawOperand(r);
+        const b = drawOperand(r);
+        const n = drawOperand(r);
+
+        try std.testing.expectEqual(if (b == 0) 0 else a / b, arithmetic.divU256(a, b));
+        try std.testing.expectEqual(if (b == 0) 0 else a % b, arithmetic.modU256(a, b));
+        try std.testing.expectEqual(refSdiv(a, b), arithmetic.sdiv(a, b));
+        try std.testing.expectEqual(refSmod(a, b), arithmetic.smod(a, b));
+
+        const want_addmod: primitives.U256 = if (n == 0) 0 else @intCast((@as(u512, a) + b) % n);
+        try std.testing.expectEqual(want_addmod, arithmetic.addmod(a, b, n));
+
+        const want_mulmod: primitives.U256 = if (n == 0) 0 else @intCast((@as(u512, a) * b) % n);
+        try std.testing.expectEqual(want_mulmod, arithmetic.mulmod(a, b, n));
+    }
+}

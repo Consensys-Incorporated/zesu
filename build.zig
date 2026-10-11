@@ -31,6 +31,7 @@ const ModuleSet = struct {
     ssz_decode: *std.Build.Module,
     ssz_output: *std.Build.Module,
     db: *std.Build.Module,
+    block_rlp_size: *std.Build.Module,
     executor: *std.Build.Module,
     runner: *std.Build.Module,
     zkvm_io: *std.Build.Module,
@@ -273,12 +274,21 @@ fn buildModules(
     db.addImport("mpt", mpt);
     db.addImport("executor_types", executor_types);
 
+    const block_rlp_size = mkmod(b, expose, "block_rlp_size", .{
+        .root_source_file = b.path("src/stateless/executor/block_rlp_size.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    block_rlp_size.addImport("primitives", primitives);
+    block_rlp_size.addImport("input", input);
+
     const executor = mkmod(b, expose, "executor", .{
         .root_source_file = b.path("src/stateless/executor/main.zig"),
         .target = target,
         .optimize = optimize,
     });
     executor.addImport("executor_types", executor_types);
+    executor.addImport("block_rlp_size", block_rlp_size);
     executor.addImport("zesu_allocator", zesu_allocator);
     executor.addImport("primitives", primitives);
     executor.addImport("input", input);
@@ -354,6 +364,7 @@ fn buildModules(
         .ssz_decode = ssz_decode,
         .ssz_output = ssz_output,
         .db = db,
+        .block_rlp_size = block_rlp_size,
         .executor = executor,
         .runner = runner,
         .zkvm_io = zkvm_io,
@@ -402,6 +413,49 @@ fn addRunStep(
     cmd.addArgs(fixed_args);
     if (bb.args) |args| cmd.addArgs(args);
     step.dependOn(&cmd.step);
+}
+
+/// tests-zkevm-benchmark ships one tarball per gas value, so fetch and run one tier at a time:
+///   zig build zkevm-benchmark -Dbench-gas=60M
+fn addZkevmBenchmarkSteps(b: *std.Build, runner: *std.Build.Step.Compile) void {
+    const version = "tests-zkevm-benchmark@v21.0.5";
+    const gas = b.option([]const u8, "bench-gas", "zkevm benchmark gas tier: 30M, 60M, 100M, 150M or 200M (default 30M)") orelse "30M";
+    const fetch = b.step("fetch-zkevm-benchmark-fixtures", "Download one " ++ version ++ " gas tier (-Dbench-gas)");
+    const run = b.step("zkevm-benchmark", "Run one " ++ version ++ " gas tier (-Dbench-gas)");
+
+    const tier = for ([_]u32{ 30, 60, 100, 150, 200 }) |g| {
+        if (std.mem.eql(u8, gas, b.fmt("{d}M", .{g}))) break b.fmt("{d:0>4}M", .{g});
+    } else {
+        const fail = b.addFail(b.fmt("-Dbench-gas={s}: expected 30M, 60M, 100M, 150M or 200M", .{gas}));
+        fetch.dependOn(&fail.step);
+        run.dependOn(&fail.step);
+        return;
+    };
+
+    const dir = b.fmt("spec-tests/fixtures/zkevm-benchmark/{s}", .{tier});
+    const download = b.addSystemCommand(&.{
+        "sh", "-c",
+        b.fmt("marker={[dir]s}/.fixtures-{[version]s} && " ++
+            "[ -f \"$marker\" ] && echo 'Fixtures already up to date.' && exit 0; " ++
+            "echo 'Downloading {[version]s} {[tier]s} fixtures...' && " ++
+            "rm -rf {[dir]s} && mkdir -p {[dir]s} && " ++
+            "curl -fL \"https://github.com/ethereum/execution-specs/releases/download/{[encoded]s}/fixtures_zkevm-benchmark_{[tier]s}.tar.gz\" " ++
+            "| tar xz --strip-components=1 -C {[dir]s}/ && " ++
+            "touch \"$marker\"", .{
+            .dir = dir,
+            .version = version,
+            .encoded = "tests-zkevm-benchmark%40v21.0.5",
+            .tier = tier,
+        }),
+    });
+    fetch.dependOn(&download.step);
+
+    const cmd = b.addRunArtifact(runner);
+    cmd.step.dependOn(b.getInstallStep());
+    cmd.step.dependOn(&download.step);
+    cmd.addArgs(&.{ "--fixtures", b.fmt("{s}/blockchain_tests", .{dir}) });
+    if (b.args) |args| cmd.addArgs(args);
+    run.dependOn(&cmd.step);
 }
 
 /// Build a relocatable rv64im ELF guest object (zkvm-standards ABI: IO, crypto, heap and
@@ -476,6 +530,10 @@ pub fn build(b: *std.Build) void {
 
     // ── Module graph (exposed via addModule; backend selected by option) ──────
     const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend, false, false);
+    const block_rlp_size_test_step = b.step("test-block-rlp-size", "Run block RLP size unit tests");
+    const block_rlp_size_test = b.addTest(.{ .root_module = mods.block_rlp_size });
+    const run_block_rlp_size_test = b.addRunArtifact(block_rlp_size_test);
+    block_rlp_size_test_step.dependOn(&run_block_rlp_size_test.step);
 
     // ── Host artifacts ────────────────────────────────────────────────────────
     //
@@ -614,6 +672,7 @@ pub fn build(b: *std.Build) void {
         addCryptoLibraries(zkevm_test_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
         b.installArtifact(zkevm_test_exe);
         addRunStep(b, "zkevm-tests", "Run zkevm blockchain test fixtures", zkevm_test_exe, &.{ "--fixtures", "spec-tests/fixtures/zkevm/blockchain_tests" });
+        addZkevmBenchmarkSteps(b, zkevm_test_exe);
 
         // ── hive-rlp: Hive consume-rlp execution client ───────────────────────
         const hive_exe = b.addExecutable(.{
@@ -634,6 +693,7 @@ pub fn build(b: *std.Build) void {
 
         // ── Tests ─────────────────────────────────────────────────────────────
         const test_step = b.step("test", "Run all unit tests");
+        test_step.dependOn(&run_block_rlp_size_test.step);
 
         for ([_]struct { m: *std.Build.Module, name: []const u8 }{
             .{ .m = mods.precompile, .name = "precompile" },
@@ -648,7 +708,8 @@ pub fn build(b: *std.Build) void {
             const tst = b.addTest(.{ .root_module = t.m });
             _ = t.name;
             addCryptoLibraries(tst, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
-            test_step.dependOn(&b.addRunArtifact(tst).step);
+            const run_tst = b.addRunArtifact(tst);
+            test_step.dependOn(&run_tst.step);
         }
 
         // MPT integration tests
@@ -705,7 +766,7 @@ pub fn build(b: *std.Build) void {
     addRv64imObjectStep(b, optimize, crypto_prefix, &.{ .m, .zicclsm, .unaligned_scalar_mem, .zbb, .zbs }, "zisk-object", "Build relocatable rv64im+Zbb+Zbs ELF object for the ZisK guest (zesu-zisk.o)", "lib/zesu-zisk.o", true);
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
-    const spec_test_version = "tests-glamsterdam-devnet@v8.1.4";
+    const spec_test_version = "tests@v21.0.0";
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-specs " ++ spec_test_version ++ " fixtures");
     fetch_fixtures_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
@@ -714,13 +775,13 @@ pub fn build(b: *std.Build) void {
             "echo 'Downloading execution-specs " ++ spec_test_version ++ " fixtures...' && " ++
             "rm -rf spec-tests/fixtures && mkdir -p spec-tests/fixtures && " ++
             "encoded=$(printf '%s' '" ++ spec_test_version ++ "' | sed 's/@/%40/g') && " ++
-            "curl -fL \"https://github.com/ethereum/execution-specs/releases/download/${encoded}/fixtures_glamsterdam-devnet.tar.gz\" " ++
+            "curl -fL \"https://github.com/ethereum/execution-specs/releases/download/${encoded}/fixtures.tar.gz\" " ++
             "| tar xz --strip-components=1 -C spec-tests/fixtures/ && " ++
             "touch \"$marker\" && " ++
             "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
     }).step);
 
-    const zkevm_version = "tests-zkevm@v0.8.4";
+    const zkevm_version = "tests-zkevm@v21.0.5";
     const fetch_zkevm_step = b.step("fetch-zkevm-fixtures", "Download " ++ zkevm_version ++ " execution-specs fixtures");
     fetch_zkevm_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
@@ -737,7 +798,7 @@ pub fn build(b: *std.Build) void {
     // The catalog URL is defined here (single source of truth) and baked into
     // the tool as its default; the tool still accepts a runtime --catalog override.
     if (crypto_backend == .default) {
-        const r2_catalog_url = "https://pub-df22334654034ebab51bc096137a59d8.r2.dev/devnets/glamsterdam-devnet-7";
+        const r2_catalog_url = "https://pub-afa6b160acfb4919bda1d0e2a00b5b77.r2.dev/testnets/sepolia";
         const r2_options = b.addOptions();
         r2_options.addOption([]const u8, "catalog_url", r2_catalog_url);
 

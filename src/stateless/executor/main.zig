@@ -25,7 +25,8 @@ const types = @import("executor_types");
 const db_mod = @import("db");
 const context_mod = @import("context");
 const block_validation = @import("./block_validation.zig");
-const block_rlp_size = @import("./block_rlp_size.zig");
+const block_hash = @import("./block_hash.zig");
+const block_rlp_size = @import("block_rlp_size");
 
 /// Re-export so callers can use these types without importing executor_types directly.
 pub const BlockHashEntry = types.BlockHashEntry;
@@ -50,6 +51,9 @@ test {
     // every declaration through semantic analysis, so a signature change that
     // misses a call site fails `zig build test`.
     std.testing.refAllDecls(@This());
+    // transition_tests.zig is a leaf test file nothing else imports, so it must be
+    // referenced explicitly to be pulled into the test graph.
+    _ = @import("./transition_tests.zig");
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
@@ -366,14 +370,13 @@ pub fn executeBlockStateless(
     parent_header: ?rlp_decode.ParentHeader,
     fork_name: ?[]const u8,
     chain_id: u64,
-    public_keys: []const []const u8,
+    /// The payload's requests and block access list hashes, which execution must reproduce
+    /// (fork.py `execute_block`).
+    requests_hash: [32]u8,
+    block_access_list_hash: [32]u8,
 ) !output.ProofOutput {
     const ep = &req.execution_payload;
-
-    const spec = if (fork_name) |name|
-        fork_mod.specForBlock(name, ep.timestamp) orelse fork_mod.mainnetSpec(ep.block_number, ep.timestamp)
-    else
-        fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
+    const spec = resolveSpec(ep, fork_name);
 
     const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals), parent_header, spec);
     try block_validation.validateBlock(env, spec);
@@ -405,8 +408,10 @@ pub fn executeBlockStateless(
         spec,
         chain_id,
         fork_mod.blockReward(spec),
-        public_keys,
     );
+    // Backstop for a database error raised after the per-tx loop (mining reward,
+    // withdrawals, post-block system calls) -- transitionWithContext only bails
+    // out early on ctx_error while looping over transactions.
     if (ctx.ctx_error != .ok) return error.InvalidWitness;
     // EIP-7928 (Amsterdam+): the block access list is only validated on Amsterdam+
     // (validatePostExecution gates the comparison). Pre-Amsterdam, skip draining the
@@ -428,7 +433,26 @@ pub fn executeBlockStateless(
         .computed_receipts_root = proof.receipts_root,
         .expected_receipts_root = ep.receipts_root,
     });
+    if (primitives.isEnabledIn(spec, .prague) and !std.mem.eql(u8, &requests_hash, &result.requests_hash)) return error.InvalidRequests;
+    if (result.bal_hash) |h| {
+        if (!std.mem.eql(u8, &block_access_list_hash, &h)) return error.InvalidBlockAccessList;
+    }
     return proof;
+}
+
+/// Decode the payload's opaque transaction bytes. The SSZ decoder leaves them
+/// undecoded: a transaction that fails to decode invalidates the block, not the input.
+fn decodePayloadTransactions(alloc: std.mem.Allocator, ep: *input.ExecutionPayload) !void {
+    const transactions = try alloc.alloc(input.Transaction, ep.raw_transactions.len);
+    for (ep.raw_transactions, transactions) |raw, *tx| tx.* = try rlp_decode.decodeSingleTx(alloc, raw);
+    ep.transactions = transactions;
+}
+
+fn resolveSpec(ep: *const input.ExecutionPayload, fork_name: ?[]const u8) primitives.SpecId {
+    if (fork_name) |name| {
+        if (fork_mod.specForBlock(name, ep.timestamp)) |spec| return spec;
+    }
+    return fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
 }
 
 /// High-level stateless execution from a fully-decoded StatelessInput.
@@ -437,10 +461,18 @@ pub fn executeBlockStateless(
 /// fork override.
 pub fn executeStatelessInput(
     alloc: std.mem.Allocator,
-    si: input.StatelessInput,
+    si_in: input.StatelessInput,
     fork_name: ?[]const u8,
 ) !output.ProofOutput {
+    var si = si_in;
     const ep = &si.new_payload_request.execution_payload;
+
+    const er = si.new_payload_request.execution_requests;
+    const requests_hash = try transition_mod.computeRequestsHash(alloc, er.deposits, er.withdrawals, er.consolidations, er.builder_deposits, er.builder_exits);
+    const block_access_list_hash = mpt.keccak256(ep.block_access_list);
+    try block_hash.validate(alloc, si.new_payload_request, resolveSpec(ep, fork_name), requests_hash, block_access_list_hash);
+
+    try decodePayloadTransactions(alloc, ep);
 
     // EIP-4844 / engine API: the payload's versioned hashes must equal the blob
     // hashes of its blob transactions, concatenated in transaction order
@@ -534,6 +566,7 @@ pub fn executeStatelessInput(
         parent_header,
         fork_name,
         si.chain_config.chain_id,
-        si.public_keys,
+        requests_hash,
+        block_access_list_hash,
     );
 }

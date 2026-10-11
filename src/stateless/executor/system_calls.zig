@@ -116,6 +116,13 @@ fn runSystemCallImpl(
     const saved_block_gas = ctx.cfg.disable_block_gas_limit;
     const saved_chain_id_check = ctx.cfg.tx_chain_id_check;
     const saved_cfg_chain_id = ctx.cfg.chain_id;
+    const saved_system_call_gas = ctx.cfg.system_call_gas;
+    if (primitives.isEnabledIn(ctx.cfg.spec, .amsterdam)) {
+        ctx.cfg.system_call_gas = .{
+            .execution = 30_000_000,
+            .reservoir = gas_costs.STATE_BYTES_PER_STORAGE_SET * gas_costs.costPerStateByte(0) * gas_costs.SYSTEM_MAX_SSTORES_PER_CALL,
+        };
+    }
     ctx.cfg.disable_nonce_check = true;
     ctx.cfg.disable_balance_check = true;
     ctx.cfg.disable_fee_charge = true;
@@ -131,6 +138,7 @@ fn runSystemCallImpl(
         ctx.cfg.disable_block_gas_limit = saved_block_gas;
         ctx.cfg.tx_chain_id_check = saved_chain_id_check;
         ctx.cfg.chain_id = saved_cfg_chain_id;
+        ctx.cfg.system_call_gas = saved_system_call_gas;
     }
 
     // Set up calldata (may be empty for post-block calls).

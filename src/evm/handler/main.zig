@@ -30,10 +30,10 @@ pub const ExecutionResult = struct {
     status: ExecutionStatus,
     /// Gas used for receipt cumulativeGasUsed (= regular + state for Amsterdam+).
     gas_used: u64,
-    /// EIP-8037 (Amsterdam+): gas used for block gas limit = max(regular, state).
+    /// EIP-8037 (Amsterdam+): the block's execution-gas lane (pre-refund, floored).
     /// Equals gas_used for pre-Amsterdam.
     block_gas_used: u64,
-    /// EIP-8037 (Amsterdam+): total state gas charged during execution.
+    /// EIP-8037 (Amsterdam+): the block's state-gas lane — net state gas consumed, floored at 0.
     state_gas_used: u64,
     /// Gas refunded (final capped refund, set in postExecution)
     gas_refunded: u64,
@@ -138,6 +138,9 @@ pub const FrameResult = struct {
     /// EIP-8037 (Amsterdam+): state gas reservoir remaining after execution.
     /// Used in gasUsed formula: gas_used = tx.gas_limit - gas_remaining - reservoir_remaining.
     reservoir_remaining: u64,
+    /// EIP-8037 (Amsterdam+): state gas the transaction drew from regular gas and still owes
+    /// (reference `state_gas_spilled` + `state_gas_committed_spill` of the top frame).
+    state_gas_spilled: u64 = 0,
     /// Memory
     memory: interpreter.Memory,
 

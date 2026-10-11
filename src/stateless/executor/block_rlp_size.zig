@@ -94,7 +94,7 @@ fn transactionsSize(raw_transactions: []const []const u8) usize {
         if (raw.len > 0 and raw[0] >= 0xc0) {
             payload += raw.len; // legacy: already an RLP list
         } else {
-            payload += stringSize(raw.len); // typed: wrapped as a byte-string
+            payload += bytesSize(raw); // typed: wrapped as a byte-string
         }
     }
     return listSize(payload);
@@ -180,9 +180,10 @@ test "headerSize: pre-Amsterdam drops the BAL hash and slot number" {
 }
 
 test "transactionsSize: typed transactions are wrapped, legacy inlined" {
+    const typed_single_byte: []const u8 = &.{0x04};
     const typed: []const u8 = &([_]u8{0x04} ++ [_]u8{0xaa} ** 99); // 100 bytes → 2 + 100
     const legacy: []const u8 = &([_]u8{0xf8} ++ [_]u8{0xbb} ** 99); // 100 bytes, inlined
-    try std.testing.expectEqual(@as(usize, listSize(102 + 100)), transactionsSize(&.{ typed, legacy }));
+    try std.testing.expectEqual(@as(usize, listSize(1 + 102 + 100)), transactionsSize(&.{ typed_single_byte, typed, legacy }));
 }
 
 test "withdrawalsSize: empty list and one entry" {
