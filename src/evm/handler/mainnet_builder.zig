@@ -539,7 +539,10 @@ pub const MainnetHandler = struct {
                     const del_addr = callee_code.eip7702.address;
                     if (ctx.journaled_state.loadAccountWithCode(del_addr)) |del_load| {
                         callee_code = if (del_load.data.info.code) |del_code| del_code else bytecode.Bytecode.new();
-                    } else |_| {
+                    } else |err| {
+                        // The delegate's code must be in the witness; running empty code instead
+                        // can leave no trace, e.g. when the delegate's code starts with STOP.
+                        if (err == error.InvalidWitness) ctx.ctx_error = .database_error;
                         callee_code = bytecode.Bytecode.new();
                     }
                 }
