@@ -833,14 +833,7 @@ jobs:
           body+="No baseline available: the merge-base predates the \`$MATRIX_KEY\` build step, "
           body+="so a like-for-like comparison cannot be produced."$'\n'
           body+="$marker"
-          existing=$(gh api --paginate \
-            "repos/$REPO/issues/$PR/comments" \
-            --jq "[.[] | select(.body | contains(\"$marker\"))] | last | .id // empty")
-          if [ -n "$existing" ]; then
-            gh api "repos/$REPO/issues/comments/$existing" -X PATCH -f body="$body"
-          else
-            gh api "repos/$REPO/issues/$PR/comments" -f body="$body"
-          fi
+          gh api "repos/$REPO/issues/$PR/comments" -f body="$body" --silent
 
       - name: Post result
         if: steps.diff.outcome == 'success'
@@ -851,22 +844,13 @@ jobs:
           MATRIX_KEY: ${{ matrix.key }}
         run: |
           set -euo pipefail
-          # Per-variant marker: rv64im and zisk each get their own comment,
-          # updated in place on repeat runs rather than overwriting each other.
+          # Always a new comment, one per variant per run, so earlier results
+          # stay on the PR for comparison (delete old ones if it gets noisy).
+          # The marker only identifies these as benchmark comments.
           marker="<!-- zesu-benchmark:$MATRIX_KEY -->"
           printf '%s\n' "$marker" >> comment.md
-          # Update in place so repeated runs don't bury the PR in comments.
-          existing=$(gh api --paginate \
-            "repos/$REPO/issues/$PR/comments" \
-            --jq "[.[] | select(.body | contains(\"$marker\"))] | last | .id // empty")
-          if [ -n "$existing" ]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$existing" \
-              -F body=@comment.md --silent
-          else
-            gh api -X POST \
-              "repos/$REPO/issues/$PR/comments" \
-              -F body=@comment.md --silent
-          fi
+          gh api -X POST "repos/$REPO/issues/$PR/comments" \
+            -F body=@comment.md --silent
 
       # Marks the PR as having benchmark data, so `label:benchmarked` works as a
       # filter. Deliberately not a verdict — ten blocks is a smoke signal, and a

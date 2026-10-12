@@ -6,10 +6,13 @@ name: Stateless Devnet Replay
 # from slot time with a buffer (over-fetching is harmless — idempotent).
 # Informational unless the `strict` input is set.
 #
-# Manual dispatch only: the run depends on live devnet data, so it must be
-# started deliberately against a catalog known to be current.
+# Runs every 2 hours against the default catalog (Sepolia, a live testnet, so
+# new batches keep arriving) and on manual dispatch.
 
 on:
+  schedule:
+    # Every 2 hours, matching the default window_hours.
+    - cron: "0 */2 * * *"
   workflow_dispatch:
     inputs:
       catalog_url:

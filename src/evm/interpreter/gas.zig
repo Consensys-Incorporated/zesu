@@ -9,8 +9,6 @@ pub const Gas = struct {
     remaining: u64,
     /// Refunded gas. This is used only at the end of execution.
     refunded: i64,
-    /// EIP-8037 (Amsterdam+): total state gas charged during this frame (net of refunds, saturating).
-    state_gas_used: u64,
     /// EIP-8037 (Amsterdam+): state gas reservoir (state_gas_left).
     /// State gas charges draw from here first, then spill into `remaining`.
     reservoir: u64,
@@ -35,7 +33,6 @@ pub const Gas = struct {
             .limit = limit,
             .remaining = limit,
             .refunded = 0,
-            .state_gas_used = 0,
             .reservoir = 0,
             .state_gas_spent = 0,
             .state_gas_refunded = 0,
@@ -48,7 +45,6 @@ pub const Gas = struct {
             .limit = limit,
             .remaining = 0,
             .refunded = 0,
-            .state_gas_used = 0,
             .reservoir = 0,
             .state_gas_spent = 0,
             .state_gas_refunded = 0,
@@ -105,14 +101,13 @@ pub const Gas = struct {
         } else {
             return false;
         }
-        self.state_gas_used +|= amount;
         self.state_gas_spent +|= amount;
         return true;
     }
 
     /// EIP-8037 (Amsterdam+): LIFO-route `amount` of previously-charged state gas back
     /// out — to `remaining` (regular gas) first, up to what previously spilled, then to
-    /// the reservoir — and drop it from state_gas_used. Mirrors the reference
+    /// the reservoir. Mirrors the reference
     /// credit_state_gas_refund routing so a spilled-then-refunded charge restores regular
     /// gas (affecting subsequent 63/64 forwarding); when nothing spilled it credits the
     /// reservoir. Callers apply their own tail counter (refunded credit vs spent unwind).
@@ -121,7 +116,6 @@ pub const Gas = struct {
         self.remaining += from_gas_left;
         self.state_gas_spilled -= from_gas_left;
         self.reservoir += amount - from_gas_left;
-        self.state_gas_used -|= amount;
     }
 
     /// EIP-8037 (Amsterdam+): Refund state gas (e.g. SSTORE clear) — LIFO-route it out
@@ -145,11 +139,6 @@ pub const Gas = struct {
         self.remaining += repayment;
         self.reservoir -= repayment;
         self.state_gas_spilled -= repayment;
-    }
-
-    /// EIP-8037: Add state gas from a successful sub-frame.
-    pub fn addStateGasFromChild(self: *Gas, child_state_gas: u64) void {
-        self.state_gas_used += child_state_gas;
     }
 
     /// Spend all remaining gas

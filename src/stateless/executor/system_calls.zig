@@ -163,9 +163,8 @@ fn runSystemCallImpl(
     ctx.tx.authorization_list = null;
     ctx.tx.chain_id = chain_id;
 
-    var frames = handler_mod.FrameStack.new();
     const EvmT = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType);
-    var evm = EvmT.init(ctx, null, instructions, precompiles, &frames);
+    var evm = EvmT.init(ctx, null, instructions, precompiles);
     var result = handler_mod.ExecuteEvm.execute(&evm) catch {
         ctx.journaled_state.discardTx();
         if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
