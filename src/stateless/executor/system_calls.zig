@@ -163,6 +163,21 @@ fn runSystemCallImpl(
     ctx.tx.authorization_list = null;
     ctx.tx.chain_id = chain_id;
 
+    // The reference never reads a system call's origin, so SYSTEM_ADDRESS may be absent
+    // from the witness. Allow that only for this call's own load of it, then drop the
+    // cached account so a later real read of SYSTEM_ADDRESS has to be proved.
+    const origin_was_loaded = ctx.journaled_state.inner.evm_state.contains(SYSTEM_ADDRESS);
+    setSystemCallOrigin(ctx, true);
+    defer {
+        setSystemCallOrigin(ctx, false);
+        if (!origin_was_loaded) {
+            if (ctx.journaled_state.inner.evm_state.fetchRemove(SYSTEM_ADDRESS)) |kv| {
+                var acct = kv.value;
+                acct.storage.deinit();
+            }
+        }
+    }
+
     const EvmT = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType);
     var evm = EvmT.init(ctx, null, instructions, precompiles);
     var result = handler_mod.ExecuteEvm.execute(&evm) catch {
@@ -185,6 +200,14 @@ fn runSystemCallImpl(
     if (!capture) return;
     if (result.status != .Success) return error.SystemContractCallFailed;
     return if (result.return_data.len > 0) alloc.dupe(u8, result.return_data) catch &.{} else &.{};
+}
+
+/// Mark the witness database's reads as a system call's (see WitnessDatabase.system_call_origin).
+/// A no-op for databases without the flag.
+fn setSystemCallOrigin(ctx: anytype, on: bool) void {
+    if (@hasField(@TypeOf(ctx.journaled_state.database), "system_call_origin")) {
+        ctx.journaled_state.database.system_call_origin = on;
+    }
 }
 
 /// Fire-and-forget system call (pre-block: EIP-4788/EIP-2935). See runSystemCallImpl.
