@@ -93,6 +93,8 @@ pub fn computeReceiptsRoot(
 ///
 /// `pre_storage_roots` is the WitnessDatabase, used to look up pre-state storage roots
 /// for accounts that had storage before this block (avoids redundant trie walks).
+///
+/// Nodes inserted into `index` are allocated from `alloc`, so `alloc` must outlive `index`.
 pub fn computeStateRootDelta(
     alloc: std.mem.Allocator,
     pre_state_root: [32]u8,
@@ -105,12 +107,11 @@ pub fn computeStateRootDelta(
     if (total == 0) return pre_state_root;
 
     // Every RLP encoding and intermediate trie-node byte string produced while
-    // batch-applying these changes is scratch: only the returned root hash
-    // outlives this call, and nothing looks up `index` entries inserted during
-    // this computation again afterward (each batchUpdateIndexed traversal is
-    // self-contained — see mpt/main.zig's updNodeExImpl doc comment). Scope
-    // them to an arena so the whole batch is reclaimed in one free instead of
-    // leaking one allocation per touched trie node into the caller's allocator.
+    // batch-applying these changes is scratch, except the nodes inserted into
+    // `index`, which the caller may look up again (e.g. the next block over a
+    // shared index); those are copied into `alloc`. Scope the rest to an arena
+    // so the whole batch is reclaimed in one free instead of leaking one
+    // allocation per touched trie node into the caller's allocator.
     var scratch_arena = ScratchArena.init(alloc);
     defer scratch_arena.deinit();
     const scratch = scratch_arena.allocator();
@@ -125,7 +126,7 @@ pub fn computeStateRootDelta(
         const pre_storage_root: ?[32]u8 = acct.pre_storage_root orelse
             pre_storage_roots.storageRootFor(addr);
 
-        const storage_root = try computeStorageRootBatch(scratch, acct, pre_storage_root, index);
+        const storage_root = try computeStorageRootBatch(scratch, alloc, acct, pre_storage_root, index);
         const code_hash: [32]u8 = acct.code_hash orelse
             if (acct.code.len > 0) mpt_builder.keccak256(acct.code) else KECCAK_EMPTY;
 
@@ -160,7 +161,7 @@ pub fn computeStateRootDelta(
         }
     }.lt);
 
-    return mpt.batchUpdateIndexed(scratch, pre_state_root, changes[0..n], index);
+    return mpt.batchUpdateIndexed(scratch, alloc, pre_state_root, changes[0..n], index);
 }
 
 /// stateRoot: state trie, keys = keccak256(address), values = account RLP.
@@ -198,6 +199,7 @@ pub fn computeStateRoot(
 /// Replaces the old two-pass (inserts-then-deletes) sequential approach.
 fn computeStorageRootBatch(
     alloc: std.mem.Allocator,
+    persist: ?std.mem.Allocator,
     account: types.AllocAccount,
     pre_storage_root: ?[32]u8,
     index: *mpt.NodeIndex,
@@ -226,7 +228,7 @@ fn computeStorageRootBatch(
         }
     }.lt);
 
-    return mpt.batchUpdateIndexed(alloc, old_root, changes[0..n], index);
+    return mpt.batchUpdateIndexed(alloc, persist, old_root, changes[0..n], index);
 }
 
 /// Scratch-build storage root from all non-zero slots (no witness pool needed).
