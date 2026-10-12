@@ -18,6 +18,7 @@
 const std = @import("std");
 const primitives = @import("primitives");
 const input = @import("executor_types");
+const SystemContracts = @import("input").SystemContracts;
 const context_mod = @import("context");
 const handler_mod = @import("handler");
 const alloc_mod = @import("zesu_allocator");
@@ -35,27 +36,10 @@ fn systemCallGasLimit(spec: primitives.SpecId) u64 {
 
 // ─── Well-known addresses ─────────────────────────────────────────────────────
 
-const BEACON_ROOTS_ADDRESS: input.Address = .{
-    0x00, 0x0F, 0x3d, 0xf6, 0xD7, 0x32, 0x80, 0x7E, 0xf1, 0x31,
-    0x9f, 0xB7, 0xB8, 0xBb, 0x85, 0x22, 0xd0, 0xBe, 0xac, 0x02,
-};
-
-const HISTORY_STORAGE_ADDRESS: input.Address = .{
-    0x00, 0x00, 0xf9, 0x08, 0x27, 0xf1, 0xc5, 0x3a, 0x10, 0xcb,
-    0x7a, 0x02, 0x33, 0x5b, 0x17, 0x53, 0x20, 0x00, 0x29, 0x35,
-};
+// The EIP-4788/2935/7002/7251 contract addresses are chain configuration
+// (input.SystemContracts) and are passed in by the caller.
 
 const SYSTEM_ADDRESS = primitives.SYSTEM_ADDRESS;
-
-const EIP7002_ADDRESS: input.Address = .{
-    0x00, 0x00, 0x09, 0x61, 0xef, 0x48, 0x0e, 0xb5, 0x5e, 0x80,
-    0xd1, 0x9a, 0xd8, 0x35, 0x79, 0xa6, 0x4c, 0x00, 0x70, 0x02,
-};
-
-const EIP7251_ADDRESS: input.Address = .{
-    0x00, 0x00, 0xbb, 0xdd, 0xc7, 0xce, 0x48, 0x86, 0x42, 0xfb,
-    0x57, 0x9f, 0x8b, 0x00, 0xf3, 0xa5, 0x90, 0x00, 0x72, 0x51,
-};
 
 // EIP-8282 (Amsterdam+): builder execution requests system contracts.
 // glamsterdam-devnet-7 updated these predeploy addresses.
@@ -211,15 +195,16 @@ pub fn applyPreBlockCalls(
     env: input.Env,
     spec: primitives.SpecId,
     chain_id: u64,
+    contracts: SystemContracts,
 ) void {
     if (primitives.isEnabledIn(spec, .cancun)) {
         if (env.parent_beacon_block_root) |root| {
-            runSystemCall(ctx, instructions, precompiles, BEACON_ROOTS_ADDRESS, &root, chain_id);
+            runSystemCall(ctx, instructions, precompiles, contracts.beacon_roots, &root, chain_id);
         }
     }
     if (primitives.isEnabledIn(spec, .prague)) {
         if (env.parent_hash) |parent_hash| {
-            runSystemCall(ctx, instructions, precompiles, HISTORY_STORAGE_ADDRESS, &parent_hash, chain_id);
+            runSystemCall(ctx, instructions, precompiles, contracts.history_storage, &parent_hash, chain_id);
         }
     }
 }
@@ -250,11 +235,12 @@ pub fn applyPostBlockCallsCapture(
     precompiles: *handler_mod.Precompiles,
     spec: primitives.SpecId,
     chain_id: u64,
+    contracts: SystemContracts,
 ) error{SystemContractCallFailed}!PostBlockRequestBytes {
     if (!primitives.isEnabledIn(spec, .prague)) return .{ .withdrawal_requests = &.{}, .consolidation_requests = &.{} };
     var out: PostBlockRequestBytes = .{
-        .withdrawal_requests = try runSystemCallCapture(alloc, ctx, instructions, precompiles, EIP7002_ADDRESS, &.{}, chain_id),
-        .consolidation_requests = try runSystemCallCapture(alloc, ctx, instructions, precompiles, EIP7251_ADDRESS, &.{}, chain_id),
+        .withdrawal_requests = try runSystemCallCapture(alloc, ctx, instructions, precompiles, contracts.withdrawal_request, &.{}, chain_id),
+        .consolidation_requests = try runSystemCallCapture(alloc, ctx, instructions, precompiles, contracts.consolidation_request, &.{}, chain_id),
     };
     // EIP-8282 (Amsterdam+): builder deposit (type 0x03) and builder exit (type 0x04)
     // requests. Called after the withdrawal/consolidation contracts so all post-block

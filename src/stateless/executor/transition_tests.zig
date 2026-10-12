@@ -8,6 +8,9 @@ const bytecode_mod = @import("bytecode");
 const context_mod = @import("context");
 const input = @import("executor_types");
 
+const database_mod = @import("database");
+const SystemContracts = @import("input").SystemContracts;
+
 const transition_mod = @import("./transition.zig");
 const transitionWithContext = transition_mod.transitionWithContext;
 const TransitionResult = transition_mod.TransitionResult;
@@ -64,6 +67,7 @@ fn runTestBlock(arena: std.mem.Allocator, ctx: anytype, txs: []input.TxInput) !T
         txs,
         primitives.SpecId.shanghai,
         1,
+        SystemContracts.forChainId(1),
         0,
     );
 }
@@ -144,7 +148,7 @@ test "deposit requests come from the chain's own deposit contract" {
     var data: [576]u8 = @splat(0);
     data[192] = 0xaa; // first pubkey byte
     var log = input.Log{
-        .address = transition_mod.depositContractAddress(sepolia),
+        .address = SystemContracts.forChainId(sepolia).deposit,
         .topics = &topics,
         .data = &data,
         .block_number = 0,
@@ -159,11 +163,81 @@ test "deposit requests come from the chain's own deposit contract" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const on_sepolia = try transition_mod.collectDeposits(a, &receipts, transition_mod.depositContractAddress(sepolia));
+    const on_sepolia = try transition_mod.collectDeposits(a, &receipts, SystemContracts.forChainId(sepolia).deposit);
     try std.testing.expectEqual(@as(usize, 192), on_sepolia.len);
     try std.testing.expectEqual(@as(u8, 0xaa), on_sepolia[0]);
 
     // The same log on mainnet comes from a contract other than mainnet's, so it is no deposit.
-    const on_mainnet = try transition_mod.collectDeposits(a, &receipts, transition_mod.depositContractAddress(1));
+    const on_mainnet = try transition_mod.collectDeposits(a, &receipts, SystemContracts.forChainId(1).deposit);
     try std.testing.expectEqual(@as(usize, 0), on_mainnet.len);
+}
+
+test "a configured deposit contract replaces the chain-id default" {
+    const custom: input.Address = @splat(0x3a);
+    var topics = [_]input.Hash{transition_mod.DEPOSIT_EVENT_TOPIC};
+    var data: [576]u8 = @splat(0);
+    var log = input.Log{
+        .address = custom,
+        .topics = &topics,
+        .data = &data,
+        .block_number = 0,
+        .tx_hash = @splat(0),
+        .tx_index = 0,
+        .block_hash = @splat(0),
+        .log_index = 0,
+    };
+    const receipts = [_]input.Receipt{depositReceipt(&log)};
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const contracts: SystemContracts = .{ .deposit = custom };
+    try std.testing.expectEqual(@as(usize, 192), (try transition_mod.collectDeposits(a, &receipts, contracts.deposit)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try transition_mod.collectDeposits(a, &receipts, SystemContracts.forChainId(1).deposit)).len);
+}
+
+/// Runs an empty Prague block over a pre-state holding a single contract at `deployed_at`
+/// whose code returns 76 zero bytes (one EIP-7002 withdrawal request), with the given
+/// system-contract addresses.
+fn runPragueBlockWithRequestContract(arena: std.mem.Allocator, deployed_at: input.Address, contracts: SystemContracts) !TransitionResult {
+    // PUSH1 76, PUSH1 0, RETURN
+    const code = [_]u8{ 0x60, 0x4c, 0x60, 0x00, 0xf3 };
+    var db = database_mod.InMemoryDB.init(std.testing.allocator);
+    const bc = bytecode_mod.Bytecode.newLegacy(&code);
+    const code_hash = bc.hashSlow();
+    try db.insertCode(code_hash, bc);
+    try db.insertAccount(deployed_at, .{ .balance = 0, .nonce = 1, .code_hash = code_hash, .code = null });
+
+    const spec = primitives.SpecId.prague;
+    var ctx = context_mod.Context(database_mod.InMemoryDB).new(db, spec);
+    defer ctx.journaled_state.database.deinit();
+    defer ctx.journaled_state.deinit();
+    const env = testEnv();
+    ctx.block = transition_mod.buildBlockEnv(env, spec);
+    ctx.cfg.chain_id = 1;
+
+    var pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) = .{};
+    try pre_alloc.put(arena, deployed_at, .{ .nonce = 1, .code = &code });
+    return transitionWithContext(arena, &ctx, pre_alloc, env, &.{}, spec, 1, contracts, 0);
+}
+
+test "withdrawal requests are read from the configured EIP-7002 contract" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const custom: input.Address = @splat(0x9a);
+    const one_request: [76]u8 = @splat(0);
+    const expected = try transition_mod.computeRequestsHash(a, &.{}, &one_request, &.{}, &.{}, &.{});
+    const no_requests = try transition_mod.computeRequestsHash(a, &.{}, &.{}, &.{}, &.{}, &.{});
+
+    // Configured to the address the contract lives at: its output is a withdrawal request.
+    const configured = try runPragueBlockWithRequestContract(a, custom, .{ .withdrawal_request = custom });
+    try std.testing.expectEqualSlices(u8, &expected, &configured.requests_hash);
+
+    // Mainnet defaults: the call targets the canonical address, which holds no code here,
+    // so the block yields no requests.
+    const defaults = try runPragueBlockWithRequestContract(a, custom, .{});
+    try std.testing.expectEqualSlices(u8, &no_requests, &defaults.requests_hash);
 }
