@@ -63,6 +63,7 @@ test {
     _ = @import("opcodes/keccak_tests.zig");
     _ = @import("opcodes/memory_tests.zig");
     _ = @import("opcodes/stack_tests.zig");
+    _ = @import("dispatch_pc_tests.zig");
 }
 
 /// Main interpreter module for EVM bytecode execution

@@ -9,10 +9,10 @@ const main = @import("main.zig");
 const alloc_mod = @import("zesu_allocator");
 const validation = @import("validation.zig");
 
-/// Mainnet EVM — heap-allocated wrapper that owns its Instructions, Precompiles, and FrameStack.
+/// Mainnet EVM — heap-allocated wrapper that owns its Instructions and Precompiles.
 ///
 /// `buildMainnet` / `buildMainnetWithInspector` return `*MainnetEvm`.  Because the struct is
-/// heap-allocated the addresses of `instructions`, `precompiles`, and `frame_stack` are stable
+/// heap-allocated the addresses of `instructions` and `precompiles` are stable
 /// for the lifetime of the object, so the internal `Evm` can hold `&self.instructions` etc.
 /// without dangling pointers.
 ///
@@ -21,23 +21,12 @@ pub const MainnetEvm = struct {
     /// Owned instruction table and precompile set (stable addresses — do NOT move this struct).
     instructions: main.Instructions,
     precompiles: main.Precompiles,
-    frame_stack: main.FrameStack,
-    /// Inner Evm whose `instructions`/`precompiles`/`frame_stack` pointers reference the fields above.
+    /// Inner Evm whose `instructions`/`precompiles` pointers reference the fields above.
     evm: main.Evm,
 
     /// Get the execution context.
     pub fn getContext(self: *MainnetEvm) *context.DefaultContext {
         return self.evm.ctx;
-    }
-
-    /// Create an execution frame.
-    pub fn createFrame(self: *MainnetEvm, frame_data: main.FrameData) !main.Frame {
-        return self.evm.createFrame(frame_data);
-    }
-
-    /// Execute a frame (delegates to the inner Evm).
-    pub fn executeFrame(self: *MainnetEvm, frame: *main.Frame) !main.FrameResult {
-        return self.evm.executeFrame(frame);
     }
 
     /// Execute a full transaction through validate → pre-exec → exec → post-exec.
@@ -64,8 +53,7 @@ pub const MainBuilder = struct {
         const owned = alloc_mod.get().create(MainnetEvm) catch @panic("OOM in buildMainnet");
         owned.instructions = main.Instructions.new(spec);
         owned.precompiles = main.Precompiles.new(spec);
-        owned.frame_stack = main.FrameStack.newPrealloc(8);
-        owned.evm = main.Evm.init(self, null, &owned.instructions, &owned.precompiles, &owned.frame_stack);
+        owned.evm = main.Evm.init(self, null, &owned.instructions, &owned.precompiles);
         // EIP-2929: precompiles are always warm — set once per block at construction.
         self.journaled_state.inner.warm_addresses.setPrecompileBitset(owned.precompiles.precompiles.precompile_bitset);
         return owned;
@@ -78,8 +66,7 @@ pub const MainBuilder = struct {
         const owned = alloc_mod.get().create(MainnetEvm) catch @panic("OOM in buildMainnetWithInspector");
         owned.instructions = main.Instructions.new(spec);
         owned.precompiles = main.Precompiles.new(spec);
-        owned.frame_stack = main.FrameStack.newPrealloc(8);
-        owned.evm = main.Evm.init(self, inspector, &owned.instructions, &owned.precompiles, &owned.frame_stack);
+        owned.evm = main.Evm.init(self, inspector, &owned.instructions, &owned.precompiles);
         // EIP-2929: precompiles are always warm — set once per block at construction.
         self.journaled_state.inner.warm_addresses.setPrecompileBitset(owned.precompiles.precompiles.precompile_bitset);
         return owned;
@@ -1026,7 +1013,6 @@ fn executeIterative(
             const sub_result = frame.interp.result;
             const sub_gas_rem = frame.interp.gas.remaining;
             const sub_gas_ref = frame.interp.gas.refunded;
-            const sub_state_gas = frame.interp.gas.state_gas_used;
             const sub_reservoir = frame.interp.gas.reservoir;
             const sub_state_spent = frame.interp.gas.state_gas_spent;
             const sub_state_refunded = frame.interp.gas.state_gas_refunded;
@@ -1063,14 +1049,13 @@ fn executeIterative(
             switch (cause) {
                 .call => |pc| {
                     var r = host.finalizeCall(pc.checkpoint, sub_result, pc.inputs.gas_limit, sub_gas_rem, sub_gas_ref, return_data_buf.items);
-                    // EIP-8037: on success, propagate child's state gas and remaining reservoir.
+                    // EIP-8037: on success, take the child's remaining reservoir.
                     // On any failure, state is rolled back so state gas returns to parent reservoir,
                     // MINUS any state_gas_refunded — SSTORE-clear credits from the rolled-back subtree
                     // must be discarded (the underlying SSTOREs are reverted via the journal).
                     // Exception: invalid_static — CREATE charges state gas before the static check
                     // fires, so that state gas is forfeited even though no account was created.
                     if (r.success) {
-                        r.state_gas_used = sub_state_gas;
                         r.state_gas_remaining = sub_reservoir;
                         parent.interp.gas.state_gas_spent += sub_state_spent;
                         parent.interp.gas.state_gas_refunded += sub_state_refunded;
@@ -1081,13 +1066,11 @@ fn executeIterative(
                         // invalid_static: opCreate charged state gas before the static check
                         // fires. State gas is forfeited (account was being created in a static
                         // context — invalid). reservoir is what was left when static triggered.
-                        r.state_gas_used = 0;
                         r.state_gas_remaining = sub_reservoir;
                     } else {
                         // Revert/halt: restore parent.reservoir to call_reservoir, but the spilled
                         // portion was drawn from regular gas — on revert it returns to regular gas
                         // (gas_remaining), on halt it stays burned (already consumed from remaining).
-                        r.state_gas_used = 0;
                         r.state_gas_remaining = sub_call_reservoir -| sub_spilled;
                         if (sub_result == .revert) r.gas_remaining += sub_spilled;
                     }
@@ -1095,13 +1078,9 @@ fn executeIterative(
                 },
                 .create => |pc| {
                     var r = host.finalizeCreate(pc.checkpoint, pc.new_addr, sub_result, sub_gas_rem, sub_gas_ref, return_data_buf.items, parent_spec, true, sub_reservoir);
-                    // EIP-8037: on success, add child's accumulated state gas (from nested ops in initcode).
+                    // EIP-8037: on success, take the child's remaining reservoir.
                     // On failure, return all child state gas + the new_account_state_gas charged in opCreate
                     // (the account was never created, so that state gas is released back to the reservoir).
-                    // Also unwind the new_account_state_gas from parent.state_gas_used: opCreate's
-                    // spendStateGas bumped it eagerly, but the account was never created, so it must
-                    // not appear in the parent's reported state-gas — otherwise create-chain reverts
-                    // double-count it when propagated upward via addStateGasFromChild.
                     if (r.success) {
                         // finalizeCreate's state_gas_used = code_deposit_state_gas (charged
                         // directly, not via child.spendStateGas). It must be added to
@@ -1109,7 +1088,6 @@ fn executeIterative(
                         // any later revert that would credit code_deposit back via the
                         // (sub_reservoir + sub_state_spent - sub_state_refunded) formula.
                         const code_deposit_state_gas = r.state_gas_used;
-                        r.state_gas_used += sub_state_gas;
                         parent.interp.gas.state_gas_spent += code_deposit_state_gas + sub_state_spent;
                         parent.interp.gas.state_gas_refunded += sub_state_refunded;
                         parent.interp.gas.state_gas_spilled += sub_spilled;
@@ -1133,7 +1111,6 @@ fn executeIterative(
                         parent.interp.gas.remaining += na_from_gas_left;
                         parent.interp.gas.state_gas_spilled -= na_from_gas_left;
                         parent.interp.gas.reservoir += pc.new_account_state_gas - na_from_gas_left;
-                        parent.interp.gas.state_gas_used -|= pc.new_account_state_gas;
                         parent.interp.gas.state_gas_spent -|= pc.new_account_state_gas;
                     }
                     call_ops.resumeCreate(parent.interp, r);

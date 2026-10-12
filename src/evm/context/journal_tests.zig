@@ -48,3 +48,62 @@ test "a DB without hasNonZeroStorageForAddress reports false" {
 
     try std.testing.expect(!(try j.hasNonZeroStorageForAddress(@splat(0x33))));
 }
+
+// Sepolia 11856546/11856547: a tx CREATEs a proxy, then EXTCODESIZEs an older proxy
+// with the same code, which the witness rightly omits.
+
+const bytecode = @import("bytecode");
+const state = @import("state");
+
+const proxy_code = [_]u8{ 0x60, 0x00, 0x56, 0x5b, 0x00 }; // PUSH1 0 JUMP JUMPDEST STOP
+
+// Knows Y and Z by code hash but cannot serve that code, like a witness without it.
+const NoCodeDb = struct {
+    code_hash: primitives.Hash,
+
+    pub const Y: primitives.Address = @splat(0xA1);
+    pub const Z: primitives.Address = @splat(0xA2);
+
+    pub fn basic(self: *@This(), address: primitives.Address) !?state.AccountInfo {
+        if (std.mem.eql(u8, &address, &Y) or std.mem.eql(u8, &address, &Z)) {
+            var info = state.AccountInfo.default();
+            info.nonce = 1;
+            info.code_hash = self.code_hash;
+            info.code = null;
+            return info;
+        }
+        return null;
+    }
+
+    pub fn codeByHash(_: *@This(), _: primitives.Hash) !bytecode.Bytecode {
+        return error.InvalidWitness;
+    }
+
+    pub fn storage(_: *@This(), _: primitives.Address, _: primitives.StorageKey) !primitives.StorageValue {
+        return 0;
+    }
+};
+
+test "code a CREATE deployed earlier in the tx is readable by hash until that CREATE reverts" {
+    var hash: primitives.Hash = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(&proxy_code, &hash, .{});
+    var j = Journal(NoCodeDb).new(.{ .code_hash = hash });
+    defer j.deinit();
+
+    const caller: primitives.Address = @splat(0xC0);
+    const created: primitives.Address = @splat(0xC1);
+    _ = try j.loadAccount(caller);
+    _ = try j.loadAccount(created);
+    const checkpoint = try j.createAccountCheckpoint(caller, created, 0, .amsterdam);
+    j.setCodeWithHash(created, bytecode.Bytecode.newRaw(&proxy_code), hash);
+
+    const y = try j.loadAccountWithCode(NoCodeDb.Y);
+    const y_code = y.data.info.code.?;
+    try std.testing.expectEqualSlices(u8, &proxy_code, y_code.originalBytes());
+    const creator_code = j.inner.evm_state.get(created).?.info.code.?;
+    try std.testing.expect(y_code.legacy_analyzed.jump_table.data.ptr != creator_code.legacy_analyzed.jump_table.data.ptr);
+
+    // Once the CREATE reverts, its code is no longer readable by hash.
+    j.checkpointRevert(checkpoint);
+    try std.testing.expectError(error.InvalidWitness, j.loadAccountWithCode(NoCodeDb.Z));
+}
