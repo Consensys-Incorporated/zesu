@@ -86,8 +86,8 @@ const BaTracker = struct {
     // Storage slots written then wiped by same-tx SELFDESTRUCT → appear as storage_reads, no changes.
     selfdestruct_reads: AddrMap(primitives.SlotMapUnmanaged(void)),
     // bal-devnet-7: SYSTEM_ADDRESS is included in BAL iff it was touched by USER tx code
-    // (BALANCE/EXTCODE*/CALL etc.). Touches solely from pre/post-block system calls must
-    // not pull it into the BAL. Set in detectAndRecord(bai) when bai is in user-tx range.
+    // (BALANCE/EXTCODE*/CALL etc.) or was a withdrawal recipient. Touches solely from
+    // pre/post-block system calls must not pull it into the BAL.
     system_address_user_touched: bool = false,
 
     fn initFromPreAlloc(a: std.mem.Allocator, pre: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount)) BaTracker {
@@ -1292,6 +1292,11 @@ pub fn transitionWithContext(
         // block is already doomed to rejection once ctx_error is set.
         if (ctx.ctx_error != context_mod.ContextError.ok) break;
         const amount_wei: primitives.U256 = @as(u256, wd.amount) * 1_000_000_000;
+        // A withdrawal touches its recipient even at amount 0, so SYSTEM_ADDRESS as a
+        // recipient belongs in the BAL like any user-tx touch.
+        if (tracker) |*t| {
+            if (std.mem.eql(u8, &wd.address, &SYSTEM_ADDRESS)) t.system_address_user_touched = true;
+        }
         ctx.journaled_state.inner.balanceIncr(
             &ctx.journaled_state.database,
             wd.address,
