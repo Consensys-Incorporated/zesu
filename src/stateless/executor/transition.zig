@@ -706,7 +706,7 @@ pub fn transitionWithDb(
 /// The caller owns the context — including its journal (alloc_mod.get() allocations) — and
 /// must call ctx.journaled_state.deinit() when done. The context and its DB remain accessible
 /// after return (e.g., for ctx.getDb()).
-/// `contracts` gives the chain's system-contract addresses (EIP-4788/2935/6110/7002/7251).
+/// `contracts` gives the chain's system-contract addresses (EIP-4788/2935/6110/7002/7251/8282).
 pub fn transitionWithContext(
     arena: std.mem.Allocator,
     ctx: anytype,

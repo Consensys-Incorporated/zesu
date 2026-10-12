@@ -36,24 +36,10 @@ fn systemCallGasLimit(spec: primitives.SpecId) u64 {
 
 // ─── Well-known addresses ─────────────────────────────────────────────────────
 
-// The EIP-4788/2935/7002/7251 contract addresses are chain configuration
-// (input.SystemContracts) and are passed in by the caller.
+// The system contract addresses (EIP-4788/2935/7002/7251/8282) are chain
+// configuration (input.SystemContracts) and are passed in by the caller.
 
 const SYSTEM_ADDRESS = primitives.SYSTEM_ADDRESS;
-
-// EIP-8282 (Amsterdam+): builder execution requests system contracts.
-// glamsterdam-devnet-7 updated these predeploy addresses.
-// Builder deposit requests (request type 0x03): 0x0000BFF46984E3725691FA540A8C7589300D8282
-const EIP8282_DEPOSIT_ADDRESS: input.Address = .{
-    0x00, 0x00, 0xbf, 0xf4, 0x69, 0x84, 0xe3, 0x72, 0x56, 0x91,
-    0xfa, 0x54, 0x0a, 0x8c, 0x75, 0x89, 0x30, 0x0d, 0x82, 0x82,
-};
-
-// Builder exit requests (request type 0x04): 0x000064D678505AD48F8CCB093BC65613800E8282
-const EIP8282_EXIT_ADDRESS: input.Address = .{
-    0x00, 0x00, 0x64, 0xd6, 0x78, 0x50, 0x5a, 0xd4, 0x8f, 0x8c,
-    0xcb, 0x09, 0x3b, 0xc6, 0x56, 0x13, 0x80, 0x0e, 0x82, 0x82,
-};
 
 // ─── Shared execution helper ──────────────────────────────────────────────────
 
@@ -246,8 +232,8 @@ pub fn applyPostBlockCallsCapture(
     // requests. Called after the withdrawal/consolidation contracts so all post-block
     // system calls land at the same block access index for the BAL.
     if (primitives.isEnabledIn(spec, .amsterdam)) {
-        out.builder_deposit_requests = try runSystemCallCapture(alloc, ctx, instructions, precompiles, EIP8282_DEPOSIT_ADDRESS, &.{}, chain_id);
-        out.builder_exit_requests = try runSystemCallCapture(alloc, ctx, instructions, precompiles, EIP8282_EXIT_ADDRESS, &.{}, chain_id);
+        out.builder_deposit_requests = try runSystemCallCapture(alloc, ctx, instructions, precompiles, contracts.builder_deposit_request, &.{}, chain_id);
+        out.builder_exit_requests = try runSystemCallCapture(alloc, ctx, instructions, precompiles, contracts.builder_exit_request, &.{}, chain_id);
     }
     return out;
 }

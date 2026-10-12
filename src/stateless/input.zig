@@ -191,6 +191,10 @@ pub const SystemContracts = struct {
     withdrawal_request: primitives.Address = MAINNET_WITHDRAWAL_REQUEST,
     /// EIP-7251 consolidation requests contract (post-block, Prague+).
     consolidation_request: primitives.Address = MAINNET_CONSOLIDATION_REQUEST,
+    /// EIP-8282 builder deposit requests contract (post-block, Amsterdam+).
+    builder_deposit_request: primitives.Address = MAINNET_BUILDER_DEPOSIT_REQUEST,
+    /// EIP-8282 builder exit requests contract (post-block, Amsterdam+).
+    builder_exit_request: primitives.Address = MAINNET_BUILDER_EXIT_REQUEST,
 
     /// Mainnet addresses, with the deposit contract of known public testnets that deploy
     /// their own (only Sepolia so far). Used when the chain config carries no override.
@@ -230,6 +234,16 @@ pub const SystemContracts = struct {
     pub const MAINNET_CONSOLIDATION_REQUEST: primitives.Address = .{
         0x00, 0x00, 0xbb, 0xdd, 0xc7, 0xce, 0x48, 0x86, 0x42, 0xfb,
         0x57, 0x9f, 0x8b, 0x00, 0xf3, 0xa5, 0x90, 0x00, 0x72, 0x51,
+    };
+    // 0x0000BFF46984E3725691FA540A8C7589300D8282 (glamsterdam-devnet-7 predeploy)
+    pub const MAINNET_BUILDER_DEPOSIT_REQUEST: primitives.Address = .{
+        0x00, 0x00, 0xbf, 0xf4, 0x69, 0x84, 0xe3, 0x72, 0x56, 0x91,
+        0xfa, 0x54, 0x0a, 0x8c, 0x75, 0x89, 0x30, 0x0d, 0x82, 0x82,
+    };
+    // 0x000064D678505AD48F8CCB093BC65613800E8282 (glamsterdam-devnet-7 predeploy)
+    pub const MAINNET_BUILDER_EXIT_REQUEST: primitives.Address = .{
+        0x00, 0x00, 0x64, 0xd6, 0x78, 0x50, 0x5a, 0xd4, 0x8f, 0x8c,
+        0xcb, 0x09, 0x3b, 0xc6, 0x56, 0x13, 0x80, 0x0e, 0x82, 0x82,
     };
 };
 

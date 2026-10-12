@@ -197,19 +197,18 @@ test "a configured deposit contract replaces the chain-id default" {
     try std.testing.expectEqual(@as(usize, 0), (try transition_mod.collectDeposits(a, &receipts, SystemContracts.forChainId(1).deposit)).len);
 }
 
-/// Runs an empty Prague block over a pre-state holding a single contract at `deployed_at`
-/// whose code returns 76 zero bytes (one EIP-7002 withdrawal request), with the given
-/// system-contract addresses.
-fn runPragueBlockWithRequestContract(arena: std.mem.Allocator, deployed_at: input.Address, contracts: SystemContracts) !TransitionResult {
-    // PUSH1 76, PUSH1 0, RETURN
-    const code = [_]u8{ 0x60, 0x4c, 0x60, 0x00, 0xf3 };
+/// Runs an empty block under `spec` over a pre-state holding a single contract at
+/// `deployed_at` whose code returns `ret_len` zero bytes, with the given system-contract
+/// addresses.
+fn runBlockWithRequestContract(arena: std.mem.Allocator, spec: primitives.SpecId, deployed_at: input.Address, ret_len: u8, contracts: SystemContracts) !TransitionResult {
+    // PUSH1 ret_len, PUSH1 0, RETURN
+    const code = [_]u8{ 0x60, ret_len, 0x60, 0x00, 0xf3 };
     var db = database_mod.InMemoryDB.init(std.testing.allocator);
     const bc = bytecode_mod.Bytecode.newLegacy(&code);
     const code_hash = bc.hashSlow();
     try db.insertCode(code_hash, bc);
     try db.insertAccount(deployed_at, .{ .balance = 0, .nonce = 1, .code_hash = code_hash, .code = null });
 
-    const spec = primitives.SpecId.prague;
     var ctx = context_mod.Context(database_mod.InMemoryDB).new(db, spec);
     defer ctx.journaled_state.database.deinit();
     defer ctx.journaled_state.deinit();
@@ -233,11 +232,28 @@ test "withdrawal requests are read from the configured EIP-7002 contract" {
     const no_requests = try transition_mod.computeRequestsHash(a, &.{}, &.{}, &.{}, &.{}, &.{});
 
     // Configured to the address the contract lives at: its output is a withdrawal request.
-    const configured = try runPragueBlockWithRequestContract(a, custom, .{ .withdrawal_request = custom });
+    const configured = try runBlockWithRequestContract(a, .prague, custom, 76, .{ .withdrawal_request = custom });
     try std.testing.expectEqualSlices(u8, &expected, &configured.requests_hash);
 
     // Mainnet defaults: the call targets the canonical address, which holds no code here,
     // so the block yields no requests.
-    const defaults = try runPragueBlockWithRequestContract(a, custom, .{});
+    const defaults = try runBlockWithRequestContract(a, .prague, custom, 76, .{});
+    try std.testing.expectEqualSlices(u8, &no_requests, &defaults.requests_hash);
+}
+
+test "builder exit requests are read from the configured EIP-8282 contract" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const custom: input.Address = @splat(0x82);
+    const one_exit: [68]u8 = @splat(0);
+    const expected = try transition_mod.computeRequestsHash(a, &.{}, &.{}, &.{}, &.{}, &one_exit);
+    const no_requests = try transition_mod.computeRequestsHash(a, &.{}, &.{}, &.{}, &.{}, &.{});
+
+    const configured = try runBlockWithRequestContract(a, .amsterdam, custom, 68, .{ .builder_exit_request = custom });
+    try std.testing.expectEqualSlices(u8, &expected, &configured.requests_hash);
+
+    const defaults = try runBlockWithRequestContract(a, .amsterdam, custom, 68, .{});
     try std.testing.expectEqualSlices(u8, &no_requests, &defaults.requests_hash);
 }
