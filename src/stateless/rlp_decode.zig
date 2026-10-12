@@ -12,7 +12,6 @@ const mpt = @import("mpt");
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// Number + state root extracted from a bare RLP block header.
-/// Used by findPreStateRoot to scan witness.headers.
 pub const MinimalHeader = struct {
     number: u64,
     state_root: [32]u8,
@@ -169,21 +168,8 @@ pub fn decodeParentHeader(raw: []const u8) error{InvalidBlock}!ParentHeader {
     };
 }
 
-/// Find the pre-execution state root for `block_number` by scanning `headers`
-/// (bare RLP-encoded block headers from the witness) for block number-1.
-/// Returns null if block_number is 0 or no matching header is found.
-pub fn findPreStateRoot(headers: []const []const u8, block_number: u64) ?[32]u8 {
-    if (block_number == 0) return null;
-    const parent_number = block_number - 1;
-    for (headers) |hdr_bytes| {
-        const hdr = decodeMinimalHeader(hdr_bytes) catch continue;
-        if (hdr.number == parent_number) return hdr.state_root;
-    }
-    return null;
-}
-
 /// Decode number and state root from a bare RLP block header.
-/// Used to scan witness.headers for the pre-execution state root.
+/// Used to read the pre-execution state root from the parent witness header.
 pub fn decodeMinimalHeader(raw: []const u8) error{InvalidBlock}!MinimalHeader {
     const hdr_r = mpt.rlp.decodeItem(raw) catch return error.InvalidBlock;
     const hdr_payload = switch (hdr_r.item) {

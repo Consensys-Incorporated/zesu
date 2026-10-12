@@ -180,8 +180,7 @@ pub fn executeBlockFromAlloc(
 ///
 /// `parent_header`: parent block's gas/basefee/blob-gas fields, decoded by the caller
 /// from the witness header whose hash equals `ep.parent_hash`. Used to enforce the
-/// EIP-1559 basefee and EIP-4844 excess-blob-gas checks. Pass `null` to skip them
-/// (e.g. when the parent is the genesis block and no header is in the witness).
+/// EIP-1559 basefee and EIP-4844 excess-blob-gas checks. Pass `null` to skip them.
 pub fn executeBlockStateless(
     alloc: std.mem.Allocator,
     pre_state_root: [32]u8,
@@ -299,16 +298,45 @@ pub fn executeStatelessInput(
         if (next != si.new_payload_request.versioned_hashes.len) return error.InvalidVersionedHashes;
     }
 
-    const pre_state_root_raw = rlp_decode.findPreStateRoot(si.witness.headers, ep.block_number);
-    const pre_state_root = pre_state_root_raw orelse ep.state_root;
-
     var node_index = try mpt.buildNodeIndex(alloc, si.witness.nodes);
     defer node_index.deinit();
+
+    const headers = try decodeWitnessHeaders(alloc, si.witness.headers, ep.parent_hash);
+
+    return executeBlockStateless(
+        alloc,
+        headers.pre_state_root,
+        &node_index,
+        si.new_payload_request,
+        si.witness.codes,
+        headers.block_hashes,
+        headers.parent,
+        fork_name,
+        si.chain_config.chain_id,
+        requests_hash,
+        block_access_list_hash,
+    );
+}
+
+/// The witness headers, validated as a chain ending at the payload's parent.
+const WitnessHeaders = struct {
+    block_hashes: []BlockHashEntry,
+    parent: rlp_decode.ParentHeader,
+    /// The parent's state root, which the block executes against.
+    pre_state_root: [32]u8,
+};
+
+/// Decode the witness headers and check that they form a chain (each header's hash is
+/// the next one's parent_hash) ending at the payload's parent. Like the reference
+/// (stateless.py), take the parent, and with it the pre-state root, from the last
+/// header, so a witness without headers is incomplete.
+fn decodeWitnessHeaders(alloc: std.mem.Allocator, headers_rlp: []const []const u8, payload_parent_hash: [32]u8) !WitnessHeaders {
+    if (headers_rlp.len == 0) return error.InvalidWitness;
 
     const HeaderInfo = struct { number: u64, parent_hash: [32]u8, hash: [32]u8 };
     var header_infos = std.ArrayListUnmanaged(HeaderInfo).empty;
     var block_hashes = std.ArrayListUnmanaged(BlockHashEntry).empty;
-    for (si.witness.headers) |hdr_rlp| {
+    for (headers_rlp) |hdr_rlp| {
         const hash = mpt.keccak256(hdr_rlp);
         const outer = mpt.rlp.decodeItem(hdr_rlp) catch return error.InvalidWitness;
         var rest = switch (outer.item) {
@@ -344,38 +372,55 @@ pub fn executeStatelessInput(
         try header_infos.append(alloc, .{ .number = number, .parent_hash = parent_hash, .hash = hash });
     }
 
-    // Validate header chain: headers must be provided in ascending block-number order
-    // (each header's keccak256 must equal the next header's parent_hash), and the
-    // last header's hash must match EP.parent_hash (chain anchor). Out-of-order
-    // headers (e.g. reversed) break the hash-linkage check and are rejected.
-    // After chain validation, the last header IS the parent block — decode its
-    // gas/basefee/blob-gas fields so ckStateless can populate Env.parent_*.
-    var parent_header: ?rlp_decode.ParentHeader = null;
-    if (header_infos.items.len > 0) {
-        for (0..header_infos.items.len - 1) |k| {
-            if (!std.mem.eql(u8, &header_infos.items[k].hash, &header_infos.items[k + 1].parent_hash)) {
-                return error.InvalidWitness;
-            }
-        }
-        const last = header_infos.items[header_infos.items.len - 1];
-        if (!std.mem.eql(u8, &last.hash, &ep.parent_hash)) {
+    for (0..header_infos.items.len - 1) |k| {
+        if (!std.mem.eql(u8, &header_infos.items[k].hash, &header_infos.items[k + 1].parent_hash)) {
             return error.InvalidWitness;
         }
-        parent_header = rlp_decode.decodeParentHeader(si.witness.headers[si.witness.headers.len - 1]) catch
-            return error.InvalidWitness;
     }
+    if (!std.mem.eql(u8, &header_infos.items[header_infos.items.len - 1].hash, &payload_parent_hash)) {
+        return error.InvalidWitness;
+    }
+    const parent_rlp = headers_rlp[headers_rlp.len - 1];
+    return .{
+        .block_hashes = block_hashes.items,
+        .parent = rlp_decode.decodeParentHeader(parent_rlp) catch return error.InvalidWitness,
+        .pre_state_root = (rlp_decode.decodeMinimalHeader(parent_rlp) catch return error.InvalidWitness).state_root,
+    };
+}
 
-    return executeBlockStateless(
-        alloc,
-        pre_state_root,
-        &node_index,
-        si.new_payload_request,
-        si.witness.codes,
-        block_hashes.items,
-        parent_header,
-        fork_name,
-        si.chain_config.chain_id,
-        requests_hash,
-        block_access_list_hash,
-    );
+/// A minimal header: the fields decodeMinimalHeader and decodeParentHeader read.
+fn testHeader(alloc: std.mem.Allocator, parent_hash: [32]u8, state_root: [32]u8, number: u64) ![]u8 {
+    const enc = executor_rlp_encode;
+    const zero: [32]u8 = @splat(0);
+    return enc.encodeList(alloc, &.{
+        try enc.encodeBytes(alloc, &parent_hash),
+        try enc.encodeBytes(alloc, &zero), // ommers_hash
+        try enc.encodeBytes(alloc, &([_]u8{0} ** 20)), // beneficiary
+        try enc.encodeBytes(alloc, &state_root),
+        try enc.encodeBytes(alloc, &zero), // transactions_root
+        try enc.encodeBytes(alloc, &zero), // receipts_root
+        try enc.encodeBytes(alloc, &([_]u8{0} ** 256)), // logs_bloom
+        try enc.encodeU64(alloc, 0), // difficulty
+        try enc.encodeU64(alloc, number),
+        try enc.encodeU64(alloc, 30_000_000), // gas_limit
+        try enc.encodeU64(alloc, 0), // gas_used
+        try enc.encodeU64(alloc, 1_700_000_000 + number), // timestamp
+    });
+}
+
+test "a witness without headers is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidWitness, decodeWitnessHeaders(arena.allocator(), &.{}, @splat(0)));
+}
+
+test "the pre-state root is the last witness header's state root" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const grandparent = try testHeader(a, @splat(0), @splat(0x11), 9);
+    const parent = try testHeader(a, mpt.keccak256(grandparent), @splat(0x22), 10);
+    const headers = try decodeWitnessHeaders(a, &.{ grandparent, parent }, mpt.keccak256(parent));
+    try std.testing.expectEqual(@as([32]u8, @splat(0x22)), headers.pre_state_root);
+    try std.testing.expectEqual(@as(usize, 2), headers.block_hashes.len);
 }
