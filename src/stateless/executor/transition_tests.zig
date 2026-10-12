@@ -55,6 +55,8 @@ fn makeTestCtx() context_mod.Context(PartialWitnessDb) {
 }
 
 fn runTestBlock(arena: std.mem.Allocator, ctx: anytype, txs: []input.TxInput) !TransitionResult {
+    // As executeBlockStateless does: the fee goes to the block's beneficiary.
+    ctx.block = transition_mod.buildBlockEnv(testEnv(), primitives.SpecId.shanghai);
     const pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) = .{};
     return transitionWithContext(
         arena,
@@ -166,4 +168,50 @@ test "deposit requests come from the chain's own deposit contract" {
     // The same log on mainnet comes from a contract other than mainnet's, so it is no deposit.
     const on_mainnet = try transition_mod.collectDeposits(a, &receipts, transition_mod.depositContractAddress(1));
     try std.testing.expectEqual(@as(usize, 0), on_mainnet.len);
+}
+
+// A witness that proves the accounts but not the recipient's code, which the top-level
+// call loads before it executes.
+const UnprovableCodeDb = struct {
+    const CODE_HASH: primitives.Hash = @splat(0xc0);
+
+    pub fn basic(_: *@This(), address: input.Address) !?state_mod.AccountInfo {
+        var info = state_mod.AccountInfo.default();
+        if (std.mem.eql(u8, &address, &TEST_SENDER) or std.mem.eql(u8, &address, &TEST_COINBASE)) {
+            info.balance = 1_000_000_000_000;
+        } else if (std.mem.eql(u8, &address, &TEST_RECIPIENT)) {
+            info.code_hash = CODE_HASH;
+            info.code = null; // loaded through codeByHash, as WitnessDatabase does
+        } else return null;
+        return info;
+    }
+
+    pub fn codeByHash(_: *@This(), _: primitives.Hash) !bytecode_mod.Bytecode {
+        return error.InvalidWitness;
+    }
+
+    pub fn storage(_: *@This(), _: primitives.Address, _: primitives.StorageKey) !primitives.StorageValue {
+        return 0;
+    }
+
+    pub fn blockHash(_: *@This(), _: u64) !primitives.Hash {
+        return @splat(0);
+    }
+};
+
+test "a transaction whose recipient code is absent from the witness marks the block invalid" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var txs = [_]input.TxInput{.{
+        .from = TEST_SENDER,
+        .to = TEST_RECIPIENT,
+        .nonce = 0,
+        .gas = 100_000,
+        .gas_price = 1,
+    }};
+    var ctx = context_mod.Context(UnprovableCodeDb).new(.{}, primitives.SpecId.shanghai);
+    _ = runTestBlock(arena_state.allocator(), &ctx, &txs) catch {};
+
+    try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
 }
