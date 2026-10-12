@@ -118,3 +118,52 @@ test "a block whose accounts are all provable is not marked invalid" {
 
     try std.testing.expectEqual(context_mod.ContextError.ok, ctx.ctx_error);
 }
+
+fn depositReceipt(log: *input.Log) input.Receipt {
+    return .{
+        .type = 2,
+        .tx_hash = @splat(0),
+        .tx_index = 0,
+        .block_hash = @splat(0),
+        .block_number = 0,
+        .from = TEST_SENDER,
+        .to = log.address,
+        .cumulative_gas_used = 0,
+        .gas_used = 0,
+        .contract_address = null,
+        .logs = @as(*[1]input.Log, log),
+        .logs_bloom = @splat(0),
+        .status = 1,
+        .effective_gas_price = 0,
+    };
+}
+
+test "deposit requests come from the chain's own deposit contract" {
+    const sepolia: u64 = 11155111;
+    var topics = [_]input.Hash{transition_mod.DEPOSIT_EVENT_TOPIC};
+    var data: [576]u8 = @splat(0);
+    data[192] = 0xaa; // first pubkey byte
+    var log = input.Log{
+        .address = transition_mod.depositContractAddress(sepolia),
+        .topics = &topics,
+        .data = &data,
+        .block_number = 0,
+        .tx_hash = @splat(0),
+        .tx_index = 0,
+        .block_hash = @splat(0),
+        .log_index = 0,
+    };
+    const receipts = [_]input.Receipt{depositReceipt(&log)};
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const on_sepolia = try transition_mod.collectDeposits(a, &receipts, transition_mod.depositContractAddress(sepolia));
+    try std.testing.expectEqual(@as(usize, 192), on_sepolia.len);
+    try std.testing.expectEqual(@as(u8, 0xaa), on_sepolia[0]);
+
+    // The same log on mainnet comes from a contract other than mainnet's, so it is no deposit.
+    const on_mainnet = try transition_mod.collectDeposits(a, &receipts, transition_mod.depositContractAddress(1));
+    try std.testing.expectEqual(@as(usize, 0), on_mainnet.len);
+}
