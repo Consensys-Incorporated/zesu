@@ -2099,7 +2099,7 @@ test "batchUpdateIndexed: shared NodeIndex stays valid after scratch is freed" {
     const leaf_b2 = try leafAt(alloc, key_b, "vb2");
     const root1 = try branchOf(alloc, &.{ .{ 2, leaf_b2 }, .{ 3, leaf_c } });
 
-    var index = try buildNodeIndex(alloc, &.{ root0, leaf_a, leaf_b1, leaf_c, root1, leaf_b2 });
+    var index = try buildNodeIndex(alloc, &.{ root0, leaf_a, leaf_b1, leaf_c, root1 });
     defer index.deinit();
 
     var scratch_buf: [16 * 1024]u8 = undefined;
