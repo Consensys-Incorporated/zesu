@@ -209,7 +209,7 @@ pub fn executeBlockStateless(
         spec,
     );
     // Both the journal (evm_state, BAL maps, logs, etc.) and the WitnessDatabase
-    // (witness_codes, deployed_codes, original_accounts) must be freed explicitly.
+    // (codes, original_accounts) must be freed explicitly.
     // Both defers are declared before the defers below so they run last — after
     // finalizeOutput and validatePostExecution have consumed all journal- and
     // database-owned memory. Database is declared first so it runs after the journal

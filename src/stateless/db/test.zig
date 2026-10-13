@@ -301,7 +301,7 @@ test "codeByHash serves a delegation designator the block wrote, as a designator
     const code_hash = designator.hashSlow();
     try std.testing.expectError(error.InvalidWitness, wdb.codeByHash(code_hash));
 
-    wdb.notifyCodeDeployed(code_hash, designator);
+    wdb.notifyCodeDeployed(code_hash, designator.originalBytes());
     const code = try wdb.codeByHash(code_hash);
     try std.testing.expect(code.isEip7702());
     try std.testing.expectEqualSlices(u8, &delegate, &code.eip7702.address);

@@ -1453,17 +1453,24 @@ pub fn Journal(comptime DB: type) type {
 
         pub fn setCodeWithHash(self: *@This(), address: primitives.Address, code: bytecode.Bytecode, hash: primitives.Hash) void {
             self.inner.setCodeWithHash(address, code, hash);
+            self.registerCode(hash, code);
         }
 
-        /// EIP-7702: install a delegation designator, as inner.setCode does. The reference
-        /// keys code by hash, so the designator is then readable by hash for the rest of the
-        /// block: an account delegated to the same target in pre-state reads this code
-        /// without it being in the witness.
-        pub fn setDelegation(self: *@This(), address: primitives.Address, code: bytecode.Bytecode) void {
+        /// Install code (an EIP-7702 designator, as inner.setCode does). Zero-address
+        /// delegations clear the code and register nothing.
+        pub fn setCode(self: *@This(), address: primitives.Address, code: bytecode.Bytecode) void {
             self.inner.setCode(address, code);
+            self.registerCode(self.inner.evm_state.get(address).?.info.code_hash, code);
+        }
+
+        /// Every code write funnels through here. The reference keys code by hash, so code
+        /// written in-block is readable by hash for the rest of the block. Content addressing
+        /// means a reverted write leaves only a harmless extra entry.
+        fn registerCode(self: *@This(), hash: primitives.Hash, code: bytecode.Bytecode) void {
             if (comptime @hasDecl(DB, "notifyCodeDeployed")) {
-                const info = self.inner.evm_state.get(address).?.info;
-                if (!info.isEmptyCodeHash()) self.database.notifyCodeDeployed(info.code_hash, code);
+                if (!std.mem.eql(u8, &hash, &primitives.KECCAK_EMPTY)) {
+                    self.database.notifyCodeDeployed(hash, code.originalBytes());
+                }
             }
         }
 
@@ -1489,26 +1496,6 @@ pub fn Journal(comptime DB: type) type {
         }
 
         pub fn commitTx(self: *@This()) void {
-            // Notify DB of bytecodes deployed by CREATE in this transaction. We scan
-            // the journal (O(tx ops)) rather than all of evm_state (O(loaded accounts)).
-            // Reverted AccountCreated entries are already removed from the journal by
-            // checkpointRevert, so only committed CREATEs appear here.
-            if (comptime @hasDecl(DB, "notifyCodeDeployed")) {
-                for (self.inner.journal.items) |entry| {
-                    switch (entry) {
-                        .AccountCreated => |data| {
-                            if (self.inner.evm_state.get(data.address)) |acct| {
-                                if (acct.info.code) |code| {
-                                    if (!acct.info.isEmptyCodeHash()) {
-                                        self.database.notifyCodeDeployed(acct.info.code_hash, code);
-                                    }
-                                }
-                            }
-                        },
-                        else => {},
-                    }
-                }
-            }
             self.inner.commitTx();
         }
 
