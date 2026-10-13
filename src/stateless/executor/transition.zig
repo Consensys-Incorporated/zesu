@@ -32,6 +32,7 @@ const bal_mod = @import("./bal.zig");
 
 const tx_signing = @import("tx_signing.zig");
 const system_calls = @import("system_calls.zig");
+const SystemContracts = @import("input").SystemContracts;
 
 // ─── Output types (re-exported from executor_types) ───────────────────────────
 
@@ -698,13 +699,14 @@ pub fn transitionWithDb(
     ctx.block = buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
     ctx.cfg.disable_base_fee = (env.base_fee == null);
-    return transitionWithContext(arena, &ctx, pre_alloc_in, env, txs, spec, chain_id, reward);
+    return transitionWithContext(arena, &ctx, pre_alloc_in, env, txs, spec, chain_id, SystemContracts.forChainId(chain_id), reward);
 }
 
 /// Low-level entry point: executes block transition on a pre-built context.
 /// The caller owns the context — including its journal (alloc_mod.get() allocations) — and
 /// must call ctx.journaled_state.deinit() when done. The context and its DB remain accessible
 /// after return (e.g., for ctx.getDb()).
+/// `contracts` gives the chain's system-contract addresses (EIP-4788/2935/6110/7002/7251/8282).
 pub fn transitionWithContext(
     arena: std.mem.Allocator,
     ctx: anytype,
@@ -713,6 +715,7 @@ pub fn transitionWithContext(
     txs: []input.TxInput,
     spec: primitives.SpecId,
     chain_id: u64,
+    contracts: SystemContracts,
     reward: i64,
 ) !TransitionResult {
     var instructions = handler_mod.Instructions.new(spec);
@@ -740,7 +743,7 @@ pub fn transitionWithContext(
         null;
 
     // ── Pre-block system calls (EIP-4788, EIP-2935) ───────────────────────────
-    system_calls.applyPreBlockCalls(ctx, &instructions, &precompiles, env, spec, chain_id);
+    system_calls.applyPreBlockCalls(ctx, &instructions, &precompiles, env, spec, chain_id, contracts);
 
     if (tracker) |*t| t.detectAndRecord(0, ctx, 0);
 
@@ -1312,7 +1315,7 @@ pub fn transitionWithContext(
 
     // ── Post-block system calls (EIP-7002, EIP-7251) ──────────────────────────
     // Capture return data for EIP-7685 requests_hash computation.
-    const post_block_reqs = try system_calls.applyPostBlockCallsCapture(arena, ctx, &instructions, &precompiles, spec, chain_id);
+    const post_block_reqs = try system_calls.applyPostBlockCallsCapture(arena, ctx, &instructions, &precompiles, spec, chain_id, contracts);
 
     // Detect changes from mining reward + withdrawals + post-block calls (all at BAI=N+1)
     if (tracker) |*t| t.detectAndRecord(txs.len + 1, ctx, txs.len);
@@ -1339,7 +1342,7 @@ pub fn transitionWithContext(
     const bal_hash: ?[32]u8 = if (tracker) |*t| try t.computeHash(arena, ctx, env.gas_limit) else null;
 
     // ── EIP-7685 requests_hash ────────────────────────────────────────────────
-    const deposits = if (primitives.isEnabledIn(spec, .prague)) try collectDeposits(arena, receipts.items, depositContractAddress(chain_id)) else &.{};
+    const deposits = if (primitives.isEnabledIn(spec, .prague)) try collectDeposits(arena, receipts.items, contracts.deposit) else &.{};
     const requests_hash = try computeRequestsHash(
         arena,
         deposits,
@@ -1366,25 +1369,6 @@ pub fn transitionWithContext(
 }
 
 // ─── EIP-7685 requests_hash computation ──────────────────────────────────────
-
-/// EIP-6110 deposit contract address. Chain-specific: the stateless input only carries the
-/// chain id, so known testnets with their own contract are mapped here; every other chain
-/// uses mainnet's address.
-const MAINNET_DEPOSIT_CONTRACT: input.Address = .{
-    0x00, 0x00, 0x00, 0x00, 0x21, 0x9a, 0xb5, 0x40, 0x35, 0x6c,
-    0xbb, 0x83, 0x9c, 0xbe, 0x05, 0x30, 0x3d, 0x77, 0x05, 0xfa,
-};
-const SEPOLIA_DEPOSIT_CONTRACT: input.Address = .{
-    0x7f, 0x02, 0xc3, 0xe3, 0xc9, 0x8b, 0x13, 0x30, 0x55, 0xb8,
-    0xb3, 0x48, 0xb2, 0xac, 0x62, 0x56, 0x69, 0xed, 0x29, 0x5d,
-};
-
-pub fn depositContractAddress(chain_id: u64) input.Address {
-    return switch (chain_id) {
-        11155111 => SEPOLIA_DEPOSIT_CONTRACT,
-        else => MAINNET_DEPOSIT_CONTRACT,
-    };
-}
 
 /// keccak256("DepositEvent(bytes,bytes,bytes,bytes,bytes)")
 pub const DEPOSIT_EVENT_TOPIC: input.Hash = .{
