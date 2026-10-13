@@ -11,8 +11,9 @@ const mpt = @import("mpt");
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-/// Number + state root extracted from a bare RLP block header.
+/// Parent hash, number and state root extracted from a bare RLP block header.
 pub const MinimalHeader = struct {
+    parent_hash: [32]u8,
     number: u64,
     state_root: [32]u8,
 };
@@ -168,8 +169,8 @@ pub fn decodeParentHeader(raw: []const u8) error{InvalidBlock}!ParentHeader {
     };
 }
 
-/// Decode number and state root from a bare RLP block header.
-/// Used to read the pre-execution state root from the parent witness header.
+/// Decode parent hash, number and state root from a bare RLP block header.
+/// Used to link and anchor the witness headers and read the pre-execution state root.
 pub fn decodeMinimalHeader(raw: []const u8) error{InvalidBlock}!MinimalHeader {
     const hdr_r = mpt.rlp.decodeItem(raw) catch return error.InvalidBlock;
     const hdr_payload = switch (hdr_r.item) {
@@ -178,6 +179,7 @@ pub fn decodeMinimalHeader(raw: []const u8) error{InvalidBlock}!MinimalHeader {
     };
 
     var rest = hdr_payload;
+    var parent_hash: [32]u8 = @splat(0);
     var state_root: [32]u8 = @splat(0);
     var number: u64 = 0;
     var i: usize = 0;
@@ -185,6 +187,14 @@ pub fn decodeMinimalHeader(raw: []const u8) error{InvalidBlock}!MinimalHeader {
         if (rest.len == 0) return error.InvalidBlock;
         const r = mpt.rlp.decodeItem(rest) catch return error.InvalidBlock;
         switch (i) {
+            0 => {
+                const b = switch (r.item) {
+                    .bytes => |bts| bts,
+                    .list => return error.InvalidBlock,
+                };
+                if (b.len != 32) return error.InvalidBlock;
+                @memcpy(&parent_hash, b);
+            },
             3 => {
                 const b = switch (r.item) {
                     .bytes => |bts| bts,
@@ -205,7 +215,7 @@ pub fn decodeMinimalHeader(raw: []const u8) error{InvalidBlock}!MinimalHeader {
         }
         rest = rest[r.consumed..];
     }
-    return MinimalHeader{ .number = number, .state_root = state_root };
+    return MinimalHeader{ .parent_hash = parent_hash, .number = number, .state_root = state_root };
 }
 
 /// Decode the withdrawals list RLP payload (EIP-4895, Shanghai+).
