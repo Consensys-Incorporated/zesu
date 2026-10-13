@@ -72,6 +72,22 @@ pub fn decodeItem(input: []const u8) error{InvalidRlp}!DecodeResult {
     }
 }
 
+/// decodeItem, but also rejecting the encodings canonical RLP forbids: a single byte below
+/// 0x80 wrapped as a one-byte string, and the long form, or a length with leading zero
+/// bytes, for a string or list of 55 bytes or fewer. For RLP no hash binds, such as a
+/// payload's transactions; hash-bound input (trie nodes, headers) needs no extra checks.
+pub fn decodeItemCanonical(input: []const u8) error{InvalidRlp}!DecodeResult {
+    const r = try decodeItem(input);
+    const first = input[0];
+    if (first == 0x81 and input[1] < 0x80) return error.InvalidRlp;
+    if ((first >= 0xb8 and first <= 0xbf) or first >= 0xf8) {
+        const len_len: usize = first - (if (first >= 0xf8) @as(u8, 0xf7) else @as(u8, 0xb7));
+        if (input[1] == 0) return error.InvalidRlp;
+        if (r.consumed - 1 - len_len <= 55) return error.InvalidRlp;
+    }
+    return r;
+}
+
 /// Read a big-endian unsigned integer from 1–8 bytes.
 fn readBigEndian(bytes: []const u8) error{Overflow}!usize {
     if (bytes.len == 0 or bytes.len > 8) return error.Overflow;
@@ -178,4 +194,19 @@ test "iterate list items" {
     }
     try std.testing.expectEqual(@as(usize, 3), count);
     try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x02, 0x03 }, &values);
+}
+
+test "decodeItemCanonical rejects non-canonical encodings" {
+    // A single byte below 0x80 wrapped as a one-byte string.
+    try std.testing.expectError(error.InvalidRlp, decodeItemCanonical(&.{ 0x81, 0x01 }));
+    // The long string form for a string of 55 bytes or fewer.
+    try std.testing.expectError(error.InvalidRlp, decodeItemCanonical(&.{ 0xb8, 0x01, 0x80 }));
+    // A long string length with a leading zero byte.
+    try std.testing.expectError(error.InvalidRlp, decodeItemCanonical(&([_]u8{ 0xb9, 0x00, 0x38 } ++ [_]u8{0} ** 56)));
+    // The long list form for a payload of 55 bytes or fewer.
+    try std.testing.expectError(error.InvalidRlp, decodeItemCanonical(&.{ 0xf8, 0x01, 0x80 }));
+    // Canonical forms decode as with decodeItem.
+    try std.testing.expectEqual(@as(usize, 1), (try decodeItemCanonical(&.{0x01})).consumed);
+    try std.testing.expectEqual(@as(usize, 2), (try decodeItemCanonical(&.{ 0x81, 0x80 })).consumed);
+    try std.testing.expectEqual(@as(usize, 58), (try decodeItemCanonical(&([_]u8{ 0xb8, 0x38 } ++ [_]u8{0} ** 56))).consumed);
 }
