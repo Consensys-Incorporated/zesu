@@ -54,6 +54,7 @@ test {
     // transition_tests.zig is a leaf test file nothing else imports, so it must be
     // referenced explicitly to be pulled into the test graph.
     _ = @import("./transition_tests.zig");
+    _ = @import("./main_tests.zig");
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
@@ -319,7 +320,7 @@ pub fn executeStatelessInput(
 }
 
 /// The witness headers, validated as a chain ending at the payload's parent.
-const WitnessHeaders = struct {
+pub const WitnessHeaders = struct {
     block_hashes: []BlockHashEntry,
     parent: rlp_decode.ParentHeader,
     /// The parent's state root, which the block executes against.
@@ -330,7 +331,7 @@ const WitnessHeaders = struct {
 /// the next one's parent_hash) ending at the payload's parent, whose number is one below
 /// the payload's. Like the reference (stateless.py), take the parent, and with it the
 /// pre-state root, from the last header, so a witness without headers is incomplete.
-fn decodeWitnessHeaders(
+pub fn decodeWitnessHeaders(
     alloc: std.mem.Allocator,
     headers_rlp: []const []const u8,
     payload_parent_hash: [32]u8,
@@ -364,73 +365,4 @@ fn decodeWitnessHeaders(
         .parent = rlp_decode.decodeParentHeader(headers_rlp[headers_rlp.len - 1]) catch return error.InvalidWitness,
         .pre_state_root = last.state_root,
     };
-}
-
-/// A minimal header: the fields decodeMinimalHeader and decodeParentHeader read.
-fn testHeader(alloc: std.mem.Allocator, parent_hash: [32]u8, state_root: [32]u8, number: u64) ![]u8 {
-    const enc = executor_rlp_encode;
-    const zero: [32]u8 = @splat(0);
-    return enc.encodeList(alloc, &.{
-        try enc.encodeBytes(alloc, &parent_hash),
-        try enc.encodeBytes(alloc, &zero), // ommers_hash
-        try enc.encodeBytes(alloc, &([_]u8{0} ** 20)), // beneficiary
-        try enc.encodeBytes(alloc, &state_root),
-        try enc.encodeBytes(alloc, &zero), // transactions_root
-        try enc.encodeBytes(alloc, &zero), // receipts_root
-        try enc.encodeBytes(alloc, &([_]u8{0} ** 256)), // logs_bloom
-        try enc.encodeU64(alloc, 0), // difficulty
-        try enc.encodeU64(alloc, number),
-        try enc.encodeU64(alloc, 30_000_000), // gas_limit
-        try enc.encodeU64(alloc, 0), // gas_used
-        try enc.encodeU64(alloc, 1_700_000_000 + number), // timestamp
-    });
-}
-
-test "a witness without headers is rejected" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    try std.testing.expectError(error.InvalidWitness, decodeWitnessHeaders(arena.allocator(), &.{}, @splat(0), 1));
-}
-
-test "the pre-state root is the last witness header's state root" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const grandparent = try testHeader(a, @splat(0), @splat(0x11), 9);
-    const parent = try testHeader(a, mpt.keccak256(grandparent), @splat(0x22), 10);
-    const headers = try decodeWitnessHeaders(a, &.{ grandparent, parent }, mpt.keccak256(parent), 11);
-    try std.testing.expectEqual(@as([32]u8, @splat(0x22)), headers.pre_state_root);
-    try std.testing.expectEqual(@as(usize, 2), headers.block_hashes.len);
-}
-
-test "a header chain with a broken link is rejected" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const grandparent = try testHeader(a, @splat(0), @splat(0x11), 9);
-    const parent = try testHeader(a, @splat(0xff), @splat(0x22), 10); // not grandparent's child
-    try std.testing.expectError(error.InvalidWitness, decodeWitnessHeaders(a, &.{ grandparent, parent }, mpt.keccak256(parent), 11));
-}
-
-test "a last header that is not the payload's parent is rejected" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const parent = try testHeader(a, @splat(0), @splat(0x22), 10);
-    try std.testing.expectError(error.InvalidWitness, decodeWitnessHeaders(a, &.{parent}, @splat(0xaa), 11));
-}
-
-test "a malformed header is rejected" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const junk: []const u8 = &.{ 0xc1, 0x01 };
-    try std.testing.expectError(error.InvalidWitness, decodeWitnessHeaders(arena.allocator(), &.{junk}, mpt.keccak256(junk), 1));
-}
-
-test "a payload whose number is not the parent's plus one is rejected" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const parent = try testHeader(a, @splat(0), @splat(0x22), 10);
-    try std.testing.expectError(error.InvalidBlockNumber, decodeWitnessHeaders(a, &.{parent}, mpt.keccak256(parent), 12));
 }
