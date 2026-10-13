@@ -107,3 +107,81 @@ test "code a CREATE deployed earlier in the tx is readable by hash until that CR
     j.checkpointRevert(checkpoint);
     try std.testing.expectError(error.InvalidWitness, j.loadAccountWithCode(NoCodeDb.Z));
 }
+
+// A witness that knows Y and Z by the hash of a delegation designator but lacks it. Like
+// WitnessDatabase, it serves the designator once the journal has registered it.
+const MarkerDb = struct {
+    code_hash: primitives.Hash,
+    registered: usize = 0,
+
+    pub const Y: primitives.Address = @splat(0xB1);
+    pub const Z: primitives.Address = @splat(0xB2);
+
+    pub fn basic(self: *@This(), address: primitives.Address) !?state.AccountInfo {
+        if (std.mem.eql(u8, &address, &Y) or std.mem.eql(u8, &address, &Z)) {
+            var info = state.AccountInfo.default();
+            info.code_hash = self.code_hash;
+            info.code = null;
+            return info;
+        }
+        return null;
+    }
+
+    pub fn codeByHash(self: *@This(), code_hash: primitives.Hash) !bytecode.Bytecode {
+        if (self.registered > 0 and std.mem.eql(u8, &code_hash, &self.code_hash))
+            return .{ .eip7702 = bytecode.Eip7702Bytecode.new(marker_target) };
+        return error.InvalidWitness;
+    }
+
+    pub fn storage(_: *@This(), _: primitives.Address, _: primitives.StorageKey) !primitives.StorageValue {
+        return 0;
+    }
+
+    pub fn notifyCodeDeployed(self: *@This(), code_hash: primitives.Hash, _: bytecode.Bytecode) void {
+        if (std.mem.eql(u8, &code_hash, &self.code_hash)) self.registered += 1;
+    }
+};
+
+const marker_target: primitives.Address = @splat(0xD0);
+
+fn markerJournal() Journal(MarkerDb) {
+    const marker = bytecode.Eip7702Bytecode.new(marker_target);
+    var hash: primitives.Hash = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(marker.raw(), &hash, .{});
+    return Journal(MarkerDb).new(.{ .code_hash = hash });
+}
+
+test "a delegation designator set in the tx is readable by hash until it is rolled back" {
+    var j = markerJournal();
+    defer j.deinit();
+
+    const alice: primitives.Address = @splat(0xA0);
+    _ = try j.loadAccount(alice);
+    const checkpoint = j.getCheckpoint();
+    j.setDelegation(alice, .{ .eip7702 = bytecode.Eip7702Bytecode.new(marker_target) });
+
+    const y = try j.loadAccountWithCode(MarkerDb.Y);
+    try std.testing.expect(y.data.info.code.?.isEip7702());
+
+    // Rolled back (for example, the top-frame preparation runs out of gas): the designator
+    // is no longer readable by hash, and the transaction does not register it.
+    j.checkpointRevert(checkpoint);
+    try std.testing.expectError(error.InvalidWitness, j.loadAccountWithCode(MarkerDb.Z));
+    j.commitTx();
+    try std.testing.expectEqual(@as(usize, 0), j.database.registered);
+}
+
+test "a designator the tx sets and then clears stays readable and is registered at commitTx" {
+    var j = markerJournal();
+    defer j.deinit();
+
+    const alice: primitives.Address = @splat(0xA0);
+    _ = try j.loadAccount(alice);
+    j.setDelegation(alice, .{ .eip7702 = bytecode.Eip7702Bytecode.new(marker_target) });
+    j.setDelegation(alice, bytecode.Bytecode.new()); // cleared again in the same tx
+
+    const y = try j.loadAccountWithCode(MarkerDb.Y);
+    try std.testing.expect(y.data.info.code.?.isEip7702());
+    j.commitTx();
+    try std.testing.expect(j.database.registered > 0);
+}
