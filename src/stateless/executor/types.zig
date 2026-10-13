@@ -60,6 +60,7 @@ pub const Env = struct {
     parent_difficulty: ?U256 = null,
     parent_base_fee: ?u64 = null,
     parent_gas_used: ?u64 = null,
+    parent_number: ?u64 = null,
     parent_gas_limit: ?u64 = null,
     parent_timestamp: ?u64 = null,
     parent_uncle_hash: ?Hash = null,
