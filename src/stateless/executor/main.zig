@@ -244,6 +244,8 @@ pub fn executeBlockStateless(
         .expected_state_root = ep.state_root,
         .computed_receipts_root = proof.receipts_root,
         .expected_receipts_root = ep.receipts_root,
+        .computed_logs_bloom = result.block_bloom,
+        .expected_logs_bloom = ep.logs_bloom,
     });
     if (primitives.isEnabledIn(spec, .prague) and !std.mem.eql(u8, &requests_hash, &result.requests_hash)) return error.InvalidRequests;
     return proof;
