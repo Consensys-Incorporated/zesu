@@ -774,7 +774,7 @@ pub fn transitionWithContext(
         var sender: input.Address = undefined;
         const maybe_sender: ?input.Address = blk: {
             if (tx.r != null and tx.s != null and (tx.r.? != 0 or tx.s.? != 0)) {
-                break :blk try tx_signing.recoverSender(arena, tx, chain_id);
+                break :blk try tx_signing.recoverSender(arena, tx, chain_id, spec);
             }
             break :blk tx.from;
         };
