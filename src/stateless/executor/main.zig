@@ -96,6 +96,7 @@ fn buildEnv(
         .block_rlp_size = block_rlp_size.compute(ep, spec),
         .gas_used_header = ep.gas_used,
         .blob_gas_used_header = ep.blob_gas_used,
+        .parent_number = if (parent) |p| p.number else null,
         .parent_gas_limit = if (parent) |p| p.gas_limit else null,
         .parent_gas_used = if (parent) |p| p.gas_used else null,
         .parent_timestamp = if (parent) |p| p.timestamp else null,

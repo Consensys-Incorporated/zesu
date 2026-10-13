@@ -22,6 +22,7 @@ pub const MinimalHeader = struct {
 /// (gas/basefee for EIP-1559 base-fee check, blob-gas pair for EIP-4844
 /// excess-blob-gas check). All optionals are `null` for pre-fork parents.
 pub const ParentHeader = struct {
+    number: u64,
     gas_limit: u64,
     gas_used: u64,
     timestamp: u64,
@@ -105,7 +106,7 @@ pub fn decodeBlockHeader(allocator: std.mem.Allocator, payload: []const u8) !inp
 }
 
 /// Decode the subset of header fields needed for Env.parent_* population
-/// (gas_limit, gas_used, timestamp, base_fee_per_gas, blob_gas_used,
+/// (number, gas_limit, gas_used, timestamp, base_fee_per_gas, blob_gas_used,
 /// excess_blob_gas). Returns null for absent post-London/Cancun fields.
 /// No heap allocation — extra_data, bloom etc. are skipped.
 pub fn decodeParentHeader(raw: []const u8) error{InvalidBlock}!ParentHeader {
@@ -116,15 +117,16 @@ pub fn decodeParentHeader(raw: []const u8) error{InvalidBlock}!ParentHeader {
     };
     var rest = hdr_payload;
 
-    // Skip fields [0]..[8]: parent_hash, ommers, beneficiary, state_root,
-    // tx_root, receipts_root, logs_bloom, difficulty, number.
+    // Skip fields [0]..[7]: parent_hash, ommers, beneficiary, state_root,
+    // tx_root, receipts_root, logs_bloom, difficulty.
     var i: usize = 0;
-    while (i < 9) : (i += 1) {
+    while (i < 8) : (i += 1) {
         if (rest.len == 0) return error.InvalidBlock;
         const r = mpt.rlp.decodeItem(rest) catch return error.InvalidBlock;
         rest = rest[r.consumed..];
     }
 
+    const number = try nextUint64(&rest); // [8]
     const gas_limit = try nextUint64(&rest); // [9]
     const gas_used = try nextUint64(&rest); // [10]
     const timestamp = try nextUint64(&rest); // [11]
@@ -134,6 +136,7 @@ pub fn decodeParentHeader(raw: []const u8) error{InvalidBlock}!ParentHeader {
     while (j < 3) : (j += 1) {
         if (rest.len == 0) {
             return .{
+                .number = number,
                 .gas_limit = gas_limit,
                 .gas_used = gas_used,
                 .timestamp = timestamp,
@@ -160,6 +163,7 @@ pub fn decodeParentHeader(raw: []const u8) error{InvalidBlock}!ParentHeader {
     const excess_blob_gas: ?u64 = if (rest.len == 0) null else try nextUint64(&rest);
 
     return .{
+        .number = number,
         .gas_limit = gas_limit,
         .gas_used = gas_used,
         .timestamp = timestamp,
@@ -810,6 +814,7 @@ test "decodeParentHeader: cancun header populates blob-gas fields" {
     defer alloc.free(payload);
 
     const p = try decodeParentHeader(payload);
+    try std.testing.expectEqual(@as(u64, 1234), p.number);
     try std.testing.expectEqual(@as(u64, 30_000_000), p.gas_limit);
     try std.testing.expectEqual(@as(u64, 21_000), p.gas_used);
     try std.testing.expectEqual(@as(u64, 1_700_000_000), p.timestamp);
