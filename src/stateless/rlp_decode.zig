@@ -341,12 +341,12 @@ fn decodeTxFields(allocator: std.mem.Allocator, tx_type: u8, payload: []const u8
             // Decode y_parity and chain_id from the raw Ethereum v.
             // EIP-155: v = chain_id*2 + 35 + y_parity  →  y_parity = (v-35) % 2
             // Legacy:  v = 27 + y_parity               →  y_parity = v - 27
-            if (v_raw >= 35) {
+            if (v_raw == 27 or v_raw == 28) {
+                tx.v = @intCast(v_raw - 27);
+            } else if (v_raw >= 35 and (v_raw - 35) / 2 <= std.math.maxInt(u64)) {
                 tx.chain_id = @intCast((v_raw - 35) / 2);
                 tx.v = @intCast((v_raw - 35) % 2);
-            } else if (v_raw >= 27) {
-                tx.v = @intCast(v_raw - 27);
-            }
+            } else return error.InvalidBlock;
         },
         1 => {
             // EIP-2930: [chainId, nonce, gasPrice, gasLimit, to, value, data, accessList, v, r, s]
@@ -583,7 +583,7 @@ fn txAuthList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const input.Author
         var addr: primitives.Address = undefined;
         @memcpy(&addr, addr_b);
         const nonce = try txU64(&ep);
-        const v = try txU64(&ep);
+        const v = std.math.cast(u8, try txU64(&ep)) orelse return error.InvalidBlock;
         const rv = try txU256(&ep);
         const sv = try txU256(&ep);
         items.append(alloc, .{
@@ -858,4 +858,38 @@ test "decodeParentHeader: shanghai header has base_fee but no blob fields" {
     try std.testing.expectEqual(@as(?u64, 13), p.base_fee_per_gas);
     try std.testing.expectEqual(@as(?u64, null), p.blob_gas_used);
     try std.testing.expectEqual(@as(?u64, null), p.excess_blob_gas);
+}
+
+test "decodeSingleTx: legacy v must be 27, 28 or EIP-155" {
+    const alloc = std.testing.allocator;
+    // [nonce, gasPrice, gas, to, value, data, v, r, s] with v patched at index 9.
+    var raw = [_]u8{ 0xcb, 0x80, 0x01, 0x82, 0x52, 0x08, 0x80, 0x80, 0x80, 0x00, 0x01, 0x01 };
+    for ([_]u8{ 27, 28, 37, 38 }) |v| {
+        raw[9] = v;
+        const tx = try decodeSingleTx(alloc, &raw);
+        alloc.free(tx.data);
+    }
+    for ([_]u8{ 0x80, 1, 26, 29, 34 }) |v| {
+        raw[9] = v;
+        try std.testing.expectError(error.InvalidBlock, decodeSingleTx(alloc, &raw));
+    }
+    // v whose EIP-155 chain id overflows u64.
+    const big = [_]u8{ 0xd5, 0x80, 0x01, 0x82, 0x52, 0x08, 0x80, 0x80, 0x80, 0x8a } ++ [_]u8{0xff} ** 10 ++ [_]u8{ 0x01, 0x01 };
+    try std.testing.expectError(error.InvalidBlock, decodeSingleTx(alloc, &big));
+}
+
+test "decodeSingleTx: authorization y_parity must fit in a byte" {
+    const alloc = std.testing.allocator;
+    const auth_head = [_]u8{ 0x01, 0x94 } ++ [_]u8{0xaa} ** 20 ++ [_]u8{0x80};
+    const tail = [_]u8{ 0x01, 0x01 };
+    const ok = [_]u8{ 0x04, 0xf8, 0x3f, 0x01, 0x80, 0x01, 0x01, 0x82, 0x52, 0x08, 0x94 } ++ [_]u8{0xbb} ** 20 ++
+        [_]u8{ 0x80, 0x80, 0xc0, 0xdc, 0xdb } ++ auth_head ++ [_]u8{ 0x81, 0xff } ++ tail ++ [_]u8{ 0x80, 0x01, 0x01 };
+    const tx = try decodeSingleTx(alloc, &ok);
+    try std.testing.expectEqual(@as(u64, 0xff), tx.authorization_list[0].v);
+    alloc.free(tx.data);
+    alloc.free(tx.access_list);
+    alloc.free(tx.authorization_list);
+    const bad = [_]u8{ 0x04, 0xf8, 0x40, 0x01, 0x80, 0x01, 0x01, 0x82, 0x52, 0x08, 0x94 } ++ [_]u8{0xbb} ** 20 ++
+        [_]u8{ 0x80, 0x80, 0xc0, 0xdd, 0xdc } ++ auth_head ++ [_]u8{ 0x82, 0x01, 0x00 } ++ tail ++ [_]u8{ 0x80, 0x01, 0x01 };
+    try std.testing.expectError(error.InvalidBlock, decodeSingleTx(alloc, &bad));
 }
