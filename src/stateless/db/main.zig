@@ -58,6 +58,9 @@ pub const WitnessDatabase = struct {
     /// lets that update skip accounts the block left unchanged (originalAccount). Accounts
     /// absent from pre-state are cached with exists = false and EMPTY_TRIE_HASH.
     original_accounts: std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80),
+    /// Set only while a system call runs. Its origin is SYSTEM_ADDRESS, whose account the
+    /// reference never reads, so a missing proof for it is accepted only then.
+    system_call_origin: bool = false,
 
     /// Pre-state account fields as proven by the witness.
     pub const OriginalAccount = struct {
@@ -161,11 +164,11 @@ pub const WitnessDatabase = struct {
             // every touched account's (non-)existence — a truly-absent account resolves to
             // null via an exclusion proof, never InvalidProof — so a missing node means the
             // witness is incomplete for a touched account and replay must fail.
-            // Exception: SYSTEM_ADDRESS (EIP-4788/7002/7251 system-call caller) is never
-            // read from pre-state by the reference (process_message_call with
-            // should_transfer_value=false), so its proof is legitimately absent.
+            // Exception: a system call's origin, SYSTEM_ADDRESS, is never read from
+            // pre-state by the reference, so its proof is legitimately absent. Any other
+            // read of SYSTEM_ADDRESS (a withdrawal, BALANCE) must be proved.
             error.InvalidProof => {
-                if (std.mem.eql(u8, &address, &SYSTEM_ADDRESS)) return null;
+                if (self.system_call_origin and std.mem.eql(u8, &address, &SYSTEM_ADDRESS)) return null;
                 return DbError.InvalidWitness;
             },
             else => return DbError.InvalidWitness,

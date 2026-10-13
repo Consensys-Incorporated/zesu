@@ -767,7 +767,7 @@ pub fn build(b: *std.Build) void {
     addRv64imObjectStep(b, optimize, crypto_prefix, &.{ .m, .zicclsm, .unaligned_scalar_mem, .zbb, .zbs }, "zisk-object", "Build relocatable rv64im+Zbb+Zbs ELF object for the ZisK guest (zesu-zisk.o)", "lib/zesu-zisk.o", true);
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
-    const spec_test_version = "tests@v21.0.0";
+    const spec_test_version = "tests@v21.0.1";
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-specs " ++ spec_test_version ++ " fixtures");
     fetch_fixtures_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
