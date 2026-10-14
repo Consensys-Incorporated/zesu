@@ -771,7 +771,7 @@ pub fn build(b: *std.Build) void {
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-specs " ++ spec_test_version ++ " fixtures");
     fetch_fixtures_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
-        "marker=spec-tests/.fixtures-" ++ spec_test_version ++ " && " ++
+        "marker=spec-tests/fixtures/.fixtures-" ++ spec_test_version ++ " && " ++
             "[ -f \"$marker\" ] && echo 'Fixtures already up to date.' && exit 0; " ++
             "echo 'Downloading execution-specs " ++ spec_test_version ++ " fixtures...' && " ++
             "rm -rf spec-tests/fixtures && mkdir -p spec-tests/fixtures && " ++

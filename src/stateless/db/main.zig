@@ -47,11 +47,14 @@ pub const WitnessDatabase = struct {
     node_index: *const mpt.NodeIndex,
     pre_state_root: primitives.Hash,
     /// All known bytecodes by keccak256(code). Witness entries borrow the input slices;
-    /// in-block entries are copied into `code_arena`. Content addressing means an entry
+    /// in-block entries are copied and listed in `owned_codes`. Content addressing means an entry
     /// never changes, so adding one needs no revert handling.
     /// EIP-8025: the verifier derives in-block code from execution, so it need not be in the witness.
     codes: std.HashMap(primitives.Hash, []const u8, primitives.HashContext, 80),
-    code_arena: std.heap.ArenaAllocator,
+    /// Copies backing the in-block entries, freed in deinit. Not an arena: ArenaAllocator
+    /// crashes the zkvm guest's freestanding allocator (ZisK vector, Sepolia 11856500).
+    owned_codes: std.ArrayList([]u8) = .empty,
+    alloc: std.mem.Allocator,
     block_hashes: []const types.BlockHashEntry,
     /// Cache of address → pre-state account (storage root, nonce, balance, code hash),
     /// populated by basic() and storage() during execution. Eliminates redundant account
@@ -117,7 +120,7 @@ pub const WitnessDatabase = struct {
             .node_index = node_index,
             .pre_state_root = pre_state_root,
             .codes = codes_map,
-            .code_arena = std.heap.ArenaAllocator.init(alloc),
+            .alloc = alloc,
             .block_hashes = block_hashes,
             .original_accounts = std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80).init(alloc),
         };
@@ -125,7 +128,8 @@ pub const WitnessDatabase = struct {
 
     pub fn deinit(self: *Self) void {
         self.codes.deinit();
-        self.code_arena.deinit();
+        for (self.owned_codes.items) |c| self.alloc.free(c);
+        self.owned_codes.deinit(self.alloc);
         self.original_accounts.deinit();
     }
 
@@ -137,7 +141,9 @@ pub const WitnessDatabase = struct {
         // OOM panics rather than propagates: see basic()'s comment below for why.
         const gop = self.codes.getOrPut(code_hash) catch @panic("out of memory");
         if (!gop.found_existing) {
-            gop.value_ptr.* = self.code_arena.allocator().dupe(u8, code) catch @panic("out of memory");
+            const copy = self.alloc.dupe(u8, code) catch @panic("out of memory");
+            self.owned_codes.append(self.alloc, copy) catch @panic("out of memory");
+            gop.value_ptr.* = copy;
         }
     }
 
