@@ -20,6 +20,16 @@ fn entry(func: InstructionFn, static_gas: u64) InstructionEntry {
     return .{ .func = func, .static_gas = static_gas };
 }
 
+/// The table for `spec`, built at compile time: one per fork, so a transaction pays no setup.
+pub fn instructionTable(spec: primitives.SpecId) *const InstructionTable {
+    @setEvalBranchQuota(100_000);
+    return switch (spec) {
+        inline else => |s| &struct {
+            const table = makeInstructionTable(s);
+        }.table,
+    };
+}
+
 pub fn makeInstructionTable(spec: primitives.SpecId) InstructionTable {
     var table = makeFrontierTable();
 
