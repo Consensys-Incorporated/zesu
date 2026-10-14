@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # The workflows pin every action to a full commit SHA; this keeps those pins
+  # and their version comments current, in one weekly pull request.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Skip releases younger than 7 days.
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - "*"
