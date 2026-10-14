@@ -416,31 +416,6 @@ const BaTracker = struct {
             }
         }
 
-        // Collect all addresses in the BAL. Per EIP-7928 (reference build_block_access_list):
-        // an address appears iff it is in account_reads (get_account_optional — our
-        // journal bal_account_reads) OR has storage activity. Account-level changes
-        // (balance/nonce/code) only ever occur on accounts that were also read, so we do
-        // NOT seed from the change maps — doing so would resurrect created-only accounts
-        // (same-tx create+selfdestruct ephemerals) that the reference never reads or writes.
-        var all_addrs = AddrMap(void).empty;
-        {
-            var it = ctx.journaled_state.inner.bal_account_reads.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch @panic("out of memory");
-        }
-        {
-            var it = self.slot_chg.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch @panic("out of memory");
-        }
-        {
-            var it = storage_reads.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch @panic("out of memory");
-        }
-        // Include selfdestruct_reads addresses (ephemeral accounts with storage reads).
-        {
-            var it = self.selfdestruct_reads.keyIterator();
-            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch @panic("out of memory");
-        }
-
         // Sort the addresses once, as big-endian words, and build the entries in that order.
         // Sorting the ~200-byte EncodeEntry values afterwards moved whole structs per swap.
         const AddrKey = struct {
@@ -467,14 +442,38 @@ const BaTracker = struct {
                 return out;
             }
         };
-        const keys = try a.alloc(AddrKey, all_addrs.count());
-        {
-            var i: usize = 0;
-            var kit = all_addrs.keyIterator();
-            while (kit.next()) |k| : (i += 1) keys[i] = AddrKey.of(k.*);
-        }
-        // Addresses are unique (map keys), so stability is irrelevant.
-        std.mem.sortUnstable(AddrKey, keys, {}, AddrKey.lessThan);
+        // Collect all addresses in the BAL. Per EIP-7928 (reference build_block_access_list):
+        // an address appears iff it is in account_reads (get_account_optional — our
+        // journal bal_account_reads) OR has storage activity. Account-level changes
+        // (balance/nonce/code) only ever occur on accounts that were also read, so we do
+        // NOT seed from the change maps — doing so would resurrect created-only accounts
+        // (same-tx create+selfdestruct ephemerals) that the reference never reads or writes.
+        // A list, not a set: the sources are map keys, so only overlaps between them repeat,
+        // and the sort puts those side by side. Filling a growing set in a larger same-hash
+        // map's iteration order lands each insert at the end of one long occupied run.
+        const keys = blk: {
+            var list = std.ArrayListUnmanaged(AddrKey).empty;
+            try list.ensureTotalCapacity(a, ctx.journaled_state.inner.bal_account_reads.count() +
+                self.slot_chg.count() + storage_reads.count() + self.selfdestruct_reads.count());
+            var it1 = ctx.journaled_state.inner.bal_account_reads.keyIterator();
+            while (it1.next()) |k| list.appendAssumeCapacity(AddrKey.of(k.*));
+            var it2 = self.slot_chg.keyIterator();
+            while (it2.next()) |k| list.appendAssumeCapacity(AddrKey.of(k.*));
+            var it3 = storage_reads.keyIterator();
+            while (it3.next()) |k| list.appendAssumeCapacity(AddrKey.of(k.*));
+            // Include selfdestruct_reads addresses (ephemeral accounts with storage reads).
+            var it4 = self.selfdestruct_reads.keyIterator();
+            while (it4.next()) |k| list.appendAssumeCapacity(AddrKey.of(k.*));
+            std.mem.sortUnstable(AddrKey, list.items, {}, AddrKey.lessThan);
+            var w: usize = 0;
+            for (list.items) |k| {
+                if (w == 0 or !std.meta.eql(list.items[w - 1], k)) {
+                    list.items[w] = k;
+                    w += 1;
+                }
+            }
+            break :blk list.items[0..w];
+        };
 
         var entries = std.ArrayListUnmanaged(bal_mod.EncodeEntry).empty;
         try entries.ensureTotalCapacity(a, keys.len);
