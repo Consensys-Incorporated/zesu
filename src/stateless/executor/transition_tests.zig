@@ -121,6 +121,21 @@ test "a block whose accounts are all provable is not marked invalid" {
     try std.testing.expectEqual(context_mod.ContextError.ok, ctx.ctx_error);
 }
 
+// The stub DB cannot prove the system contracts, so the pre- and post-block system
+// calls (EIP-2935, EIP-7002, EIP-7251) find their target unprovable.
+test "a system contract absent from the witness marks the block invalid" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var env = testEnv();
+    env.parent_hash = @splat(0x44);
+    var ctx = context_mod.Context(PartialWitnessDb).new(.{}, primitives.SpecId.prague);
+    const pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) = .{};
+    _ = transitionWithContext(arena_state.allocator(), &ctx, pre_alloc, env, &.{}, primitives.SpecId.prague, 1, 0) catch {};
+
+    try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
+}
+
 fn depositReceipt(log: *input.Log) input.Receipt {
     return .{
         .type = 2,

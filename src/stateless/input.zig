@@ -159,7 +159,7 @@ pub const NewPayloadRequest = struct {
 };
 
 /// Execution witness (spec-matching Amsterdam ExecutionWitness).
-/// state_root is NOT stored here — derived in stateless/main.zig via findPreStateRoot.
+/// state_root is NOT stored here — it is the last (parent) header's state root.
 pub const ExecutionWitness = struct {
     nodes: []const []const u8, // trie node preimages (spec field: `state`)
     codes: []const []const u8, // contract bytecodes
