@@ -498,9 +498,11 @@ pub fn opCreate(ctx: *InstructionContext) void {
     // the create returns 0 before accessing the address or charging NEW_ACCOUNT — else the
     // target's aliveness. Charge NEW_ACCOUNT only when it returned a non-null, not-alive result.
     var charge_new_account = false;
+    var known_addr: ?primitives.Address = null;
     if (primitives.isEnabledIn(spec, .amsterdam)) {
-        if (h.recordCreateTarget(ctx.interpreter.input.target, value, &[_]u8{}, false, 0, ctx.interpreter.input.depth)) |alive| {
-            charge_new_account = !alive;
+        if (h.recordCreateTarget(ctx.interpreter.input.target, value, &[_]u8{}, false, 0, ctx.interpreter.input.depth)) |t| {
+            charge_new_account = !t.alive;
+            known_addr = t.addr;
         }
     }
 
@@ -544,7 +546,7 @@ pub fn opCreate(ctx: *InstructionContext) void {
     } else 0;
 
     const caller = ctx.interpreter.input.target;
-    const setup = h.setupCreate(caller, value, init_code, forwarded, false, 0, false, ctx.interpreter.input.depth, true);
+    const setup = h.setupCreate(caller, value, init_code, forwarded, false, 0, false, ctx.interpreter.input.depth, true, known_addr);
     switch (setup) {
         .failed => |r| {
             // EIP-8037: pre-exec failure (e.g. address collision) — restore the parent reservoir
@@ -663,10 +665,12 @@ pub fn opCreate2(ctx: *InstructionContext) void {
     // recordCreateTarget returns null when a reference pre-check (depth/balance/nonce) fails,
     // else the target's aliveness. Charge NEW_ACCOUNT only for a non-null, not-alive result.
     var charge_new_account = false;
+    var known_addr: ?primitives.Address = null;
     if (primitives.isEnabledIn(spec, .amsterdam)) {
         const ic: []const u8 = if (size_u > 0) ctx.interpreter.memory.buffer.items[off_u .. off_u + size_u] else &[_]u8{};
-        if (h.recordCreateTarget(ctx.interpreter.input.target, value, ic, true, salt, ctx.interpreter.input.depth)) |alive| {
-            charge_new_account = !alive;
+        if (h.recordCreateTarget(ctx.interpreter.input.target, value, ic, true, salt, ctx.interpreter.input.depth)) |t| {
+            charge_new_account = !t.alive;
+            known_addr = t.addr;
         }
     }
 
@@ -711,7 +715,7 @@ pub fn opCreate2(ctx: *InstructionContext) void {
 
     const caller = ctx.interpreter.input.target;
     const salt_hash = host_module.u256ToHash(salt);
-    const setup = h.setupCreate(caller, value, init_code, forwarded, true, salt, false, ctx.interpreter.input.depth, true);
+    const setup = h.setupCreate(caller, value, init_code, forwarded, true, salt, false, ctx.interpreter.input.depth, true, known_addr);
     switch (setup) {
         .failed => |r| {
             // EIP-8037: pre-exec failure (e.g. address collision) — restore the parent reservoir
