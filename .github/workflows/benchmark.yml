@@ -173,6 +173,8 @@ jobs:
       head: ${{ steps.shas.outputs.head }}
       base: ${{ steps.shas.outputs.base }}
       zkvm: ${{ steps.shas.outputs.zkvm }}
+      rust: ${{ steps.shas.outputs.rust }}
+      zisk_toolchain: ${{ steps.shas.outputs.zisk_toolchain }}
       zisk: ${{ steps.zisk.outputs.version }}
       sampler: ${{ steps.sampler.outputs.hash }}
       shards: ${{ steps.shards.outputs.list }}
@@ -225,11 +227,13 @@ jobs:
           echo "base=$base_sha" >> "$GITHUB_OUTPUT"
           echo "head $head_sha"
           echo "base $base_sha (merge-base with $base_ref)"
-          # Read the zesu-zkvm pin from the PR's own CI config, so the guest is
-          # linked exactly the way CI links it.
-          ref=$(grep -m1 'ZKVM_REF:' .github/workflows/ci.yml | sed 's/.*"\(.*\)".*/\1/')
-          test -n "$ref"
-          echo "zkvm=$ref" >> "$GITHUB_OUTPUT"
+          # Read the zesu-zkvm pin and the Rust toolchains from the PR's own CI
+          # config, so the guest is built and linked exactly the way CI does it.
+          for pair in zkvm:ZKVM_REF rust:RUST_VERSION zisk_toolchain:ZISK_RUST_TOOLCHAIN; do
+            v=$(grep -m1 "${pair#*:}:" .github/workflows/ci.yml | sed 's/.*"\(.*\)".*/\1/')
+            test -n "$v"
+            echo "${pair%%:*}=$v" >> "$GITHUB_OUTPUT"
+          done
 
       - name: Checkout zesu-zkvm CI config
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -325,8 +329,10 @@ jobs:
         with:
           version: '0.16.0'
 
-      - name: Install Rust stable
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: ${{ needs.prepare.outputs.rust }}
 
       - name: Install cargo-zisk runtime deps
         run: sudo apt-get install -y libomp5 libopenmpi3t64
@@ -337,7 +343,7 @@ jobs:
         run: |
           ZISK_BIN_DIR="${HOME}/.config/.zisk/bin"
           mkdir -p "$ZISK_BIN_DIR"
-          curl -fsSL "https://raw.githubusercontent.com/0xPolygonHermez/zisk/main/ziskup/ziskup" \
+          curl -fsSL "https://raw.githubusercontent.com/0xPolygonHermez/zisk/v${ZISK_VERSION}/ziskup/ziskup" \
             -o "$ZISK_BIN_DIR/ziskup"
           chmod +x "$ZISK_BIN_DIR/ziskup"
           # Pin the emulator to the same ZisK as the staticlib and linker script;
@@ -347,7 +353,9 @@ jobs:
           "$ZISK_BIN_DIR/ziskemu" --version
 
       - name: Install Zisk Rust toolchain
-        run: cargo +zisk --version 2>/dev/null || cargo-zisk toolchain install
+        env:
+          ZISK_RUST_TOOLCHAIN: ${{ needs.prepare.outputs.zisk_toolchain }}
+        run: cargo-zisk toolchain install -t "$ZISK_RUST_TOOLCHAIN"
 
       - name: Cache libziskos_staticlib.a
         id: cache-libziskos
@@ -614,7 +622,7 @@ jobs:
         run: |
           ZISK_BIN_DIR="${HOME}/.config/.zisk/bin"
           mkdir -p "$ZISK_BIN_DIR"
-          curl -fsSL "https://raw.githubusercontent.com/0xPolygonHermez/zisk/main/ziskup/ziskup" \
+          curl -fsSL "https://raw.githubusercontent.com/0xPolygonHermez/zisk/v${ZISK_VERSION}/ziskup/ziskup" \
             -o "$ZISK_BIN_DIR/ziskup"
           chmod +x "$ZISK_BIN_DIR/ziskup"
           "$ZISK_BIN_DIR/ziskup" -v "$ZISK_VERSION" --cpu --nokey
