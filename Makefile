@@ -6,12 +6,6 @@ ARGS ?=
 
 UNAME_S := $(shell uname -s)
 
-# blst and mcl are built from source at these commits. mcl: tag v4.20. blst has
-# had no release since v0.3.17 and CI has been building master, so this is the
-# newest master commit at least 7 days old; move to the next release when it ships.
-BLST_COMMIT = 4f72b303888fd02d402a786eeb3d35ac38263ac2
-MCL_COMMIT = 828c95660fdc9bffd351f069b2c4c20beebe2060
-
 .PHONY: install-deps install-brew-deps install-apt-deps check-deps check-os \
         spec-tests state-tests blockchain-tests fetch-fixtures
 
@@ -60,16 +54,14 @@ install-brew-deps:
 	brew install secp256k1 openssl || true
 	@if [ ! -f /opt/homebrew/lib/libblst.a ] && [ ! -f /usr/local/lib/libblst.a ]; then \
 		echo "Building blst from source..."; \
-		if [ -d /tmp/blst ]; then git -C /tmp/blst fetch --quiet origin; else git clone --quiet https://github.com/supranational/blst.git /tmp/blst; fi; \
-		git -C /tmp/blst checkout --quiet $(BLST_COMMIT) || exit 1; \
+		if [ ! -d /tmp/blst ]; then cd /tmp && git clone https://github.com/supranational/blst.git; fi; \
 		cd /tmp/blst && ./build.sh; \
 		sudo cp libblst.a /opt/homebrew/lib/ 2>/dev/null || cp libblst.a /usr/local/lib/; \
 		sudo cp bindings/blst.h bindings/blst_aux.h /opt/homebrew/include/ 2>/dev/null || cp bindings/blst.h bindings/blst_aux.h /usr/local/include/; \
 	else echo "blst already installed"; fi
 	@if [ ! -f /opt/homebrew/lib/libmcl.a ] && [ ! -f /usr/local/lib/libmcl.a ]; then \
 		echo "Building mcl from source..."; \
-		if [ -d /tmp/mcl ]; then git -C /tmp/mcl fetch --quiet origin; else git clone --quiet https://github.com/herumi/mcl.git /tmp/mcl; fi; \
-		git -C /tmp/mcl checkout --quiet $(MCL_COMMIT) || exit 1; \
+		if [ ! -d /tmp/mcl ]; then cd /tmp && git clone https://github.com/herumi/mcl.git; fi; \
 		cd /tmp/mcl && make -j$$(sysctl -n hw.ncpu 2>/dev/null || echo 4); \
 		sudo cp lib/libmcl.a /opt/homebrew/lib/ 2>/dev/null || cp lib/libmcl.a /usr/local/lib/; \
 		sudo cp -r include/mcl /opt/homebrew/include/ 2>/dev/null || cp -r include/mcl /usr/local/include/; \
@@ -81,16 +73,14 @@ install-apt-deps:
 	sudo apt-get install -y libsecp256k1-dev libssl-dev build-essential git cmake
 	@if [ ! -f /usr/local/lib/libblst.a ] && [ ! -f /usr/lib/libblst.a ]; then \
 		echo "Building blst from source..."; \
-		if [ -d /tmp/blst ]; then git -C /tmp/blst fetch --quiet origin; else git clone --quiet https://github.com/supranational/blst.git /tmp/blst; fi; \
-		git -C /tmp/blst checkout --quiet $(BLST_COMMIT) || exit 1; \
+		if [ ! -d /tmp/blst ]; then cd /tmp && git clone https://github.com/supranational/blst.git; fi; \
 		cd /tmp/blst && ./build.sh; \
 		sudo cp libblst.a /usr/local/lib/; \
 		sudo cp bindings/blst.h bindings/blst_aux.h /usr/local/include/; \
 	else echo "blst already installed"; fi
 	@if [ ! -f /usr/local/lib/libmcl.so ] && [ ! -f /usr/lib/libmcl.so ]; then \
 		echo "Building mcl from source..."; \
-		if [ -d /tmp/mcl ]; then git -C /tmp/mcl fetch --quiet origin; else git clone --quiet https://github.com/herumi/mcl.git /tmp/mcl; fi; \
-		git -C /tmp/mcl checkout --quiet $(MCL_COMMIT) || exit 1; \
+		if [ ! -d /tmp/mcl ]; then cd /tmp && git clone https://github.com/herumi/mcl.git; fi; \
 		cd /tmp/mcl && make -j$$(nproc 2>/dev/null || echo 4); \
 		sudo rm -f /usr/local/lib/libmcl.a; \
 		sudo cp lib/libmcl.so /usr/local/lib/; \
