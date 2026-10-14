@@ -60,12 +60,11 @@ pub fn opSelfbalance(ctx: *InstructionContext) void {
         return;
     }
 
-    const self_addr = ctx.interpreter.input.target;
-    const info = h.accountInfo(self_addr) orelse {
+    const balance = h.selfBalance(ctx.interpreter.input.target) orelse {
         stack.pushUnsafe(0);
         return;
     };
-    stack.pushUnsafe(info.balance);
+    stack.pushUnsafe(balance);
 }
 
 /// EXTCODESIZE (0x3B): Push the size of an external account's code.

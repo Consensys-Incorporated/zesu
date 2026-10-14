@@ -1567,6 +1567,15 @@ pub fn Journal(comptime DB: type) type {
             return self.inner.evm_state.contains(address);
         }
 
+        /// SELFBALANCE: the executing account is already loaded and warm in this
+        /// transaction, so its balance is one lookup. The full load stays as the fallback.
+        pub fn selfBalance(self: *@This(), address: primitives.Address) !primitives.U256 {
+            if (self.inner.evm_state.getPtr(address)) |a| {
+                if (!a.isColdTransactionId(self.inner.transaction_id)) return a.info.balance;
+            }
+            return (try self.loadAccountInfoSkipColdLoad(address, false, false)).info.balance;
+        }
+
         pub fn loadAccountInfoSkipColdLoad(self: *@This(), address: primitives.Address, load_code: bool, skip_cold_load: bool) !AccountInfoLoad {
             const spec = self.inner.spec;
             const account = try self.inner.loadAccountOptional(self.getDbMut(), address, load_code, skip_cold_load);
