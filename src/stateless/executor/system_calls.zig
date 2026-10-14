@@ -93,7 +93,11 @@ fn runSystemCallImpl(
 ) if (capture) error{SystemContractCallFailed}![]const u8 else void {
     const SYSTEM_CALL_GAS: u64 = systemCallGasLimit(ctx.cfg.spec);
 
-    const account_load = ctx.journaled_state.loadAccount(target) catch {
+    // The reference reads the target account (get_account), so the witness must prove
+    // it: an unprovable target invalidates the block rather than skipping the call.
+    const account_load = ctx.journaled_state.loadAccount(target) catch |err| {
+        if (err == error.OutOfMemory) @panic("out of memory");
+        ctx.ctx_error = .database_error;
         ctx.journaled_state.discardTx();
         return if (capture) &.{} else {};
     };
