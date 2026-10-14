@@ -126,6 +126,7 @@ pub const JournalVTable = struct {
     sloadProbe: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) context_mod.SloadProbe,
     isAddressLoaded: *const fn (*anyopaque, primitives.Address) bool,
     accountInfo: *const fn (*anyopaque, primitives.Address) anyerror!context_mod.AccountInfoLoad,
+    selfBalance: *const fn (*anyopaque, primitives.Address) anyerror!primitives.U256,
     loadAccountWithCode: *const fn (*anyopaque, primitives.Address) anyerror!context_mod.StateLoad(*const state_mod.Account),
     sload: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) anyerror!context_mod.StateLoad(primitives.StorageValue),
     sstore: *const fn (*anyopaque, primitives.Address, primitives.StorageKey, primitives.StorageValue) anyerror!context_mod.StateLoad(context_mod.SStoreResult),
@@ -151,6 +152,7 @@ pub const JournalVTable = struct {
                 .sloadProbe = sloadProbeFn,
                 .isAddressLoaded = isAddressLoadedFn,
                 .accountInfo = accountInfoFn,
+                .selfBalance = selfBalanceFn,
                 .loadAccountWithCode = loadAccountWithCodeFn,
                 .sload = sloadFn,
                 .sstore = sstoreFn,
@@ -184,6 +186,9 @@ pub const JournalVTable = struct {
             }
             fn accountInfoFn(ptr: *anyopaque, addr: primitives.Address) anyerror!context_mod.AccountInfoLoad {
                 return j(ptr).loadAccountInfoSkipColdLoad(addr, false, false);
+            }
+            fn selfBalanceFn(ptr: *anyopaque, addr: primitives.Address) anyerror!primitives.U256 {
+                return j(ptr).selfBalance(addr);
             }
             fn loadAccountWithCodeFn(ptr: *anyopaque, addr: primitives.Address) anyerror!context_mod.StateLoad(*const state_mod.Account) {
                 return j(ptr).loadAccountWithCode(addr);
@@ -392,6 +397,14 @@ pub const Host = struct {
             .balance = load.info.balance,
             .is_cold = load.is_cold,
             .is_empty = load.is_empty,
+        };
+    }
+
+    /// Balance of the executing account. Returns null on database error.
+    pub fn selfBalance(self: *Host, addr: primitives.Address) ?primitives.U256 {
+        return self.js_vtable.selfBalance(self.js, addr) catch {
+            self.ctx_error.* = context_mod.ContextError.database_error;
+            return null;
         };
     }
 
