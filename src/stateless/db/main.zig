@@ -174,6 +174,15 @@ pub const WitnessDatabase = struct {
     // ── basic ───────────────────────────────────────────────────────────────
 
     pub fn basic(self: *Self, address: primitives.Address) !?state.AccountInfo {
+        // Already proven: the BAL tracker re-reads every touched account's pre-state.
+        // OOM panics rather than propagates: see the comment on the fill below.
+        const gop = self.original_accounts.getOrPut(address) catch @panic("out of memory");
+        if (gop.found_existing) {
+            const o = gop.value_ptr.*;
+            if (!o.exists) return null;
+            return state.AccountInfo{ .balance = o.balance, .nonce = o.nonce, .code_hash = o.code_hash, .code = null };
+        }
+        errdefer _ = self.original_accounts.remove(address);
         const account_state = mpt.verifyAccountIndexed(
             self.pre_state_root,
             address,
@@ -188,13 +197,16 @@ pub const WitnessDatabase = struct {
             // pre-state by the reference, so its proof is legitimately absent. Any other
             // read of SYSTEM_ADDRESS (a withdrawal, BALANCE) must be proved.
             error.InvalidProof => {
-                if (self.system_call_origin and std.mem.eql(u8, &address, &SYSTEM_ADDRESS)) return null;
+                if (self.system_call_origin and std.mem.eql(u8, &address, &SYSTEM_ADDRESS)) {
+                    _ = self.original_accounts.remove(address);
+                    return null;
+                }
                 return DbError.InvalidWitness;
             },
             else => return DbError.InvalidWitness,
         };
 
-        // These puts must not be dropped: storageRootFor() is a bare cache `get()`,
+        // These entries must not be dropped: storageRootFor() is a bare cache `get()`,
         // so a dropped entry reads as "account never loaded", and the post-execution
         // batch trie update (executor/output.zig) rebuilds the storage trie from only
         // the touched slots for that case -- a wrong state root reported as success.
@@ -202,7 +214,7 @@ pub const WitnessDatabase = struct {
         // `catch { ctx_error = .database_error }` wrappers in context.zig/host.zig
         // can't tell OOM apart from DbError.InvalidWitness, so it would misreport a
         // host allocator failure as "the witness is incomplete". Panic on OOM instead.
-        self.original_accounts.put(address, OriginalAccount.of(account_state)) catch @panic("out of memory");
+        gop.value_ptr.* = OriginalAccount.of(account_state);
         const as = account_state orelse return null;
         return state.AccountInfo{
             .balance = as.balance,
