@@ -847,8 +847,12 @@ pub const MainnetHandler = struct {
     }
 
     /// Handle errors — revert journal, discard tx.
-    pub fn catchError(evm: anytype, _: anyerror) void {
+    pub fn catchError(evm: anytype, err: anyerror) void {
         const ctx = evm.getContext();
+        // A witness that cannot serve a read invalidates the block, not just this
+        // transaction: without the mark, the block would be rejected, if at all, only
+        // because the failed transaction's gas no longer matches.
+        if (err == error.InvalidWitness) ctx.ctx_error = .database_error;
         // Revert all state changes from this transaction (also clears per-tx BAL pending).
         ctx.journaled_state.discardTx();
     }
