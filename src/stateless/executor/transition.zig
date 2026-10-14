@@ -1312,7 +1312,12 @@ pub fn transitionWithContext(
 
     // ── Post-block system calls (EIP-7002, EIP-7251) ──────────────────────────
     // Capture return data for EIP-7685 requests_hash computation.
-    const post_block_reqs = try system_calls.applyPostBlockCallsCapture(arena, ctx, &instructions, &precompiles, spec, chain_id);
+    // A call that failed because the witness could not serve one of its reads leaves an
+    // incomplete witness, not a failed system call.
+    const post_block_reqs = system_calls.applyPostBlockCallsCapture(arena, ctx, &instructions, &precompiles, spec, chain_id) catch |err| {
+        if (ctx.ctx_error != context_mod.ContextError.ok) return error.InvalidWitness;
+        return err;
+    };
 
     // Detect changes from mining reward + withdrawals + post-block calls (all at BAI=N+1)
     if (tracker) |*t| t.detectAndRecord(txs.len + 1, ctx, txs.len);
