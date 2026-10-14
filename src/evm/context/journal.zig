@@ -1287,16 +1287,16 @@ pub const JournalInner = struct {
     ///
     /// EIP-1153: Transient storage opcodes
     pub fn tstore(self: *JournalInner, address: primitives.Address, key: primitives.StorageKey, new_value: primitives.StorageValue) void {
-        const previous_value = self.transient_storage.get(.{ address, key }) orelse @as(primitives.StorageValue, 0);
-
+        // One probe each way: stored values are never zero, so a present entry is the previous value.
         if (new_value == 0) {
             // Remove entry from transient storage; journal only if there was a previous value.
-            _ = self.transient_storage.remove(.{ address, key });
-            if (previous_value != 0) {
-                self.journal.append(alloc_mod.get(), JournalEntryFactory.transientStorageChanged(address, key, previous_value)) catch {};
+            if (self.transient_storage.fetchRemove(.{ address, key })) |kv| {
+                self.journal.append(alloc_mod.get(), JournalEntryFactory.transientStorageChanged(address, key, kv.value)) catch {};
             }
         } else {
-            self.transient_storage.put(.{ address, key }, new_value) catch {};
+            const gop = self.transient_storage.getOrPut(.{ address, key }) catch return;
+            const previous_value: primitives.StorageValue = if (gop.found_existing) gop.value_ptr.* else 0;
+            gop.value_ptr.* = new_value;
             if (previous_value != new_value) {
                 self.journal.append(alloc_mod.get(), JournalEntryFactory.transientStorageChanged(address, key, previous_value)) catch {};
             }
