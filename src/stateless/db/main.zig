@@ -130,11 +130,11 @@ pub const WitnessDatabase = struct {
         self.original_accounts.deinit();
     }
 
-    /// Called by the journal to register code the block itself writes: bytecodes deployed
-    /// by CREATE (after each committed transaction) and EIP-7702 delegation designators
-    /// (when set). Allows codeByHash to serve them without requiring them in the witness
-    /// (EIP-8025: the verifier derives them from execution), including to another account
-    /// whose code has the same hash.
+    /// Called by the journal at each committed transaction to register code the block
+    /// itself writes: bytecodes deployed by CREATE and EIP-7702 delegation designators.
+    /// Allows codeByHash to serve them without requiring them in the witness (EIP-8025:
+    /// the verifier derives them from execution), including to another account whose
+    /// code has the same hash.
     pub fn notifyCodeDeployed(self: *Self, code_hash: primitives.Hash, code: bytecode.Bytecode) void {
         // getOrPut avoids two pitfalls from a naive newLegacy + put sequence:
         //   1. duplicate hash (same bytecode deployed at two addresses): put would

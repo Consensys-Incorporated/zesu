@@ -812,6 +812,49 @@ pub const JournalInner = struct {
         return null;
     }
 
+    const KeptDesignator = struct { hash: primitives.Hash, code: bytecode.Bytecode };
+
+    /// The EIP-7702 designators that the write recorded by journal entry `i` (a CodeChanged)
+    /// installed and this transaction still keeps. If it was the last write to the account,
+    /// its designator is the current code; a designator a later write replaced or cleared
+    /// is that later entry's old code, unless no earlier write to the account exists (then
+    /// the old code is the pre-transaction code). A write rolled back with its frame is
+    /// already gone from the journal.
+    fn keptDesignatorsAt(self: *const JournalInner, i: usize) [2]?KeptDesignator {
+        var out: [2]?KeptDesignator = .{ null, null };
+        const data = self.journal.items[i].CodeChanged;
+        if (self.evm_state.get(data.address)) |acct| {
+            if (acct.info.code) |code| {
+                if (code == .eip7702) out[0] = .{ .hash = acct.info.code_hash, .code = code };
+            }
+        }
+        if (data.old_code) |old| {
+            if (old == .eip7702 and self.writtenEarlier(data.address, i)) out[1] = .{ .hash = data.old_code_hash, .code = old };
+        }
+        return out;
+    }
+
+    fn writtenEarlier(self: *const JournalInner, address: primitives.Address, i: usize) bool {
+        for (self.journal.items[0..i]) |entry| {
+            if (entry == .CodeChanged and std.mem.eql(u8, &entry.CodeChanged.address, &address)) return true;
+        }
+        return false;
+    }
+
+    /// An EIP-7702 designator this transaction wrote and still keeps, by hash: like
+    /// createdCodeByHash, the reference reads the transaction's own code writes before the
+    /// pre-state, and the database only learns of them at commitTx.
+    fn keptDesignatorByHash(self: *const JournalInner, code_hash: primitives.Hash) ?bytecode.Bytecode {
+        for (self.journal.items, 0..) |entry, i| {
+            if (entry != .CodeChanged) continue;
+            for (self.keptDesignatorsAt(i)) |kept| {
+                const d = kept orelse continue;
+                if (std.mem.eql(u8, &d.hash, &code_hash)) return d.code;
+            }
+        }
+        return null;
+    }
+
     /// Reverts all changes to evm_state until given checkpoint.
     pub fn checkpointRevert(self: *JournalInner, checkpoint: JournalCheckpoint) void {
         const is_spurious_dragon_enabled = primitives.isEnabledIn(self.spec, .spurious_dragon);
@@ -1155,7 +1198,7 @@ pub const JournalInner = struct {
             const code = if (std.mem.eql(u8, &info.code_hash, &primitives.KECCAK_EMPTY))
                 bytecode.Bytecode.new()
             else
-                db.codeByHash(info.code_hash) catch |err| (self.createdCodeByHash(info.code_hash) orelse return err);
+                db.codeByHash(info.code_hash) catch |err| (self.createdCodeByHash(info.code_hash) orelse self.keptDesignatorByHash(info.code_hash) orelse return err);
             info.code = code;
         }
 
@@ -1458,13 +1501,11 @@ pub fn Journal(comptime DB: type) type {
         /// EIP-7702: install a delegation designator, as inner.setCode does. The reference
         /// keys code by hash, so the designator is then readable by hash for the rest of the
         /// block: an account delegated to the same target in pre-state reads this code
-        /// without it being in the witness.
+        /// without it being in the witness. It is served from the journal during this
+        /// transaction and registered with the database at commitTx, so a write rolled back
+        /// with its frame is never served.
         pub fn setDelegation(self: *@This(), address: primitives.Address, code: bytecode.Bytecode) void {
             self.inner.setCode(address, code);
-            if (comptime @hasDecl(DB, "notifyCodeDeployed")) {
-                const info = self.inner.evm_state.get(address).?.info;
-                if (!info.isEmptyCodeHash()) self.database.notifyCodeDeployed(info.code_hash, code);
-            }
         }
 
         pub fn createAccountCheckpoint(self: *@This(), caller: primitives.Address, address: primitives.Address, balance: primitives.U256, spec_id: primitives.SpecId) !JournalCheckpoint {
@@ -1494,7 +1535,7 @@ pub fn Journal(comptime DB: type) type {
             // Reverted AccountCreated entries are already removed from the journal by
             // checkpointRevert, so only committed CREATEs appear here.
             if (comptime @hasDecl(DB, "notifyCodeDeployed")) {
-                for (self.inner.journal.items) |entry| {
+                for (self.inner.journal.items, 0..) |entry, i| {
                     switch (entry) {
                         .AccountCreated => |data| {
                             if (self.inner.evm_state.get(data.address)) |acct| {
@@ -1504,6 +1545,10 @@ pub fn Journal(comptime DB: type) type {
                                     }
                                 }
                             }
+                        },
+                        // EIP-7702 designators this transaction kept (see setDelegation).
+                        .CodeChanged => for (self.inner.keptDesignatorsAt(i)) |kept| {
+                            if (kept) |d| self.database.notifyCodeDeployed(d.hash, d.code);
                         },
                         else => {},
                     }
