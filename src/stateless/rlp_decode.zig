@@ -250,7 +250,7 @@ pub fn decodeTxList(allocator: std.mem.Allocator, payload: []const u8) ![]const 
     var txns = std.ArrayListUnmanaged(input.Transaction).empty;
     var rest = payload;
     while (rest.len > 0) {
-        const r = mpt.rlp.decodeItem(rest) catch return error.InvalidBlock;
+        const r = mpt.rlp.decodeItemCanonical(rest) catch return error.InvalidBlock;
         const tx = try decodeTxItem(allocator, r.item);
         txns.append(allocator, tx) catch return error.InvalidBlock;
         rest = rest[r.consumed..];
@@ -264,13 +264,15 @@ pub fn decodeTxList(allocator: std.mem.Allocator, payload: []const u8) ![]const 
 pub fn decodeSingleTx(allocator: std.mem.Allocator, raw: []const u8) !input.Transaction {
     if (raw.len == 0) return error.InvalidBlock;
     if (raw[0] >= 0xc0) {
-        const r = mpt.rlp.decodeItem(raw) catch return error.InvalidBlock;
+        const r = mpt.rlp.decodeItemCanonical(raw) catch return error.InvalidBlock;
+        if (r.consumed != raw.len) return error.InvalidBlock; // trailing bytes
         return decodeTxItem(allocator, r.item);
     }
     if (raw[0] < 0x80) {
         const tx_type = raw[0];
         if (tx_type == 0 or tx_type > 4) return error.InvalidBlock;
-        const r = mpt.rlp.decodeItem(raw[1..]) catch return error.InvalidBlock;
+        const r = mpt.rlp.decodeItemCanonical(raw[1..]) catch return error.InvalidBlock;
+        if (r.consumed != raw.len - 1) return error.InvalidBlock; // trailing bytes
         const payload = switch (r.item) {
             .list => |p| p,
             .bytes => return error.InvalidBlock,
@@ -290,7 +292,8 @@ fn decodeTxItem(allocator: std.mem.Allocator, item: anytype) !input.Transaction 
             if (data.len < 2) return error.InvalidBlock;
             const tx_type = data[0];
             if (tx_type == 0 or tx_type > 4) return error.InvalidBlock;
-            const r = mpt.rlp.decodeItem(data[1..]) catch return error.InvalidBlock;
+            const r = mpt.rlp.decodeItemCanonical(data[1..]) catch return error.InvalidBlock;
+            if (r.consumed != data.len - 1) return error.InvalidBlock; // trailing bytes
             const payload = switch (r.item) {
                 .list => |p| p,
                 .bytes => return error.InvalidBlock,
@@ -408,13 +411,14 @@ fn decodeTxFields(allocator: std.mem.Allocator, tx_type: u8, payload: []const u8
         },
         else => return error.InvalidBlock,
     }
+    if (rest.len != 0) return error.InvalidBlock; // extra fields
     return tx;
 }
 
 // ── Transaction field helpers ─────────────────────────────────────────────────
 
 fn txBytesView(rest: *[]const u8) error{InvalidBlock}![]const u8 {
-    const r = mpt.rlp.decodeItem(rest.*) catch return error.InvalidBlock;
+    const r = mpt.rlp.decodeItemCanonical(rest.*) catch return error.InvalidBlock;
     const b = switch (r.item) {
         .bytes => |bs| bs,
         .list => return error.InvalidBlock,
@@ -428,8 +432,16 @@ fn txBytesCopy(alloc: std.mem.Allocator, rest: *[]const u8) ![]const u8 {
     return alloc.dupe(u8, b) catch return error.InvalidBlock;
 }
 
-fn txU64(rest: *[]const u8) error{InvalidBlock}!u64 {
+/// A transaction integer field: canonical RLP writes integers without leading zero bytes,
+/// so zero is the empty string.
+fn txUintBytes(rest: *[]const u8) error{InvalidBlock}![]const u8 {
     const b = try txBytesView(rest);
+    if (b.len > 0 and b[0] == 0) return error.InvalidBlock;
+    return b;
+}
+
+fn txU64(rest: *[]const u8) error{InvalidBlock}!u64 {
+    const b = try txUintBytes(rest);
     if (b.len > 8) return error.InvalidBlock;
     var v: u64 = 0;
     for (b) |byte| v = (v << 8) | byte;
@@ -441,7 +453,7 @@ fn txU64(rest: *[]const u8) error{InvalidBlock}!u64 {
 /// so the transaction still decodes and the payload root can be computed; validation
 /// then rejects the block (nonce >= maxInt) rather than failing to decode the input.
 fn txNonce(rest: *[]const u8) error{InvalidBlock}!u64 {
-    const b = try txBytesView(rest);
+    const b = try txUintBytes(rest);
     if (b.len > 8) return std.math.maxInt(u64);
     var v: u64 = 0;
     for (b) |byte| v = (v << 8) | byte;
@@ -449,7 +461,7 @@ fn txNonce(rest: *[]const u8) error{InvalidBlock}!u64 {
 }
 
 fn txU128(rest: *[]const u8) error{InvalidBlock}!u128 {
-    const b = try txBytesView(rest);
+    const b = try txUintBytes(rest);
     if (b.len > 16) return std.math.maxInt(u128);
     var v: u128 = 0;
     for (b) |byte| v = (v << 8) | byte;
@@ -457,7 +469,7 @@ fn txU128(rest: *[]const u8) error{InvalidBlock}!u128 {
 }
 
 fn txU256(rest: *[]const u8) error{InvalidBlock}!u256 {
-    const b = try txBytesView(rest);
+    const b = try txUintBytes(rest);
     if (b.len > 32) return error.InvalidBlock;
     var v: u256 = 0;
     for (b) |byte| v = (v << 8) | byte;
@@ -465,7 +477,7 @@ fn txU256(rest: *[]const u8) error{InvalidBlock}!u256 {
 }
 
 fn txAddr(rest: *[]const u8) error{InvalidBlock}!?primitives.Address {
-    const r = mpt.rlp.decodeItem(rest.*) catch return error.InvalidBlock;
+    const r = mpt.rlp.decodeItemCanonical(rest.*) catch return error.InvalidBlock;
     rest.* = rest.*[r.consumed..];
     const b = switch (r.item) {
         .bytes => |bs| bs,
@@ -479,7 +491,7 @@ fn txAddr(rest: *[]const u8) error{InvalidBlock}!?primitives.Address {
 }
 
 fn txAccessList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const input.AccessListEntry {
-    const r = mpt.rlp.decodeItem(rest.*) catch return error.InvalidBlock;
+    const r = mpt.rlp.decodeItemCanonical(rest.*) catch return error.InvalidBlock;
     const al_payload = switch (r.item) {
         .list => |p| p,
         .bytes => return error.InvalidBlock,
@@ -489,14 +501,14 @@ fn txAccessList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const input.Acce
     var entries = std.ArrayListUnmanaged(input.AccessListEntry).empty;
     var al = al_payload;
     while (al.len > 0) {
-        const er = mpt.rlp.decodeItem(al) catch return error.InvalidBlock;
+        const er = mpt.rlp.decodeItemCanonical(al) catch return error.InvalidBlock;
         var ep = switch (er.item) {
             .list => |p| p,
             .bytes => return error.InvalidBlock,
         };
         al = al[er.consumed..];
 
-        const addr_r = mpt.rlp.decodeItem(ep) catch return error.InvalidBlock;
+        const addr_r = mpt.rlp.decodeItemCanonical(ep) catch return error.InvalidBlock;
         const addr_b = switch (addr_r.item) {
             .bytes => |b| b,
             .list => return error.InvalidBlock,
@@ -506,7 +518,7 @@ fn txAccessList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const input.Acce
         @memcpy(&addr, addr_b);
         ep = ep[addr_r.consumed..];
 
-        const keys_r = mpt.rlp.decodeItem(ep) catch return error.InvalidBlock;
+        const keys_r = mpt.rlp.decodeItemCanonical(ep) catch return error.InvalidBlock;
         const kp_payload = switch (keys_r.item) {
             .list => |p| p,
             .bytes => return error.InvalidBlock,
@@ -514,7 +526,7 @@ fn txAccessList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const input.Acce
         var keys = std.ArrayListUnmanaged(primitives.Hash).empty;
         var kp = kp_payload;
         while (kp.len > 0) {
-            const k_r = mpt.rlp.decodeItem(kp) catch return error.InvalidBlock;
+            const k_r = mpt.rlp.decodeItemCanonical(kp) catch return error.InvalidBlock;
             const k_b = switch (k_r.item) {
                 .bytes => |b| b,
                 .list => return error.InvalidBlock,
@@ -525,6 +537,7 @@ fn txAccessList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const input.Acce
             keys.append(alloc, key) catch return error.InvalidBlock;
             kp = kp[k_r.consumed..];
         }
+        if (ep.len != keys_r.consumed) return error.InvalidBlock; // extra entry fields
         entries.append(alloc, .{
             .address = addr,
             .storage_keys = keys.toOwnedSlice(alloc) catch return error.InvalidBlock,
@@ -534,7 +547,7 @@ fn txAccessList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const input.Acce
 }
 
 fn txHashList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const primitives.Hash {
-    const r = mpt.rlp.decodeItem(rest.*) catch return error.InvalidBlock;
+    const r = mpt.rlp.decodeItemCanonical(rest.*) catch return error.InvalidBlock;
     const payload = switch (r.item) {
         .list => |p| p,
         .bytes => return error.InvalidBlock,
@@ -543,7 +556,7 @@ fn txHashList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const primitives.H
     var hashes = std.ArrayListUnmanaged(primitives.Hash).empty;
     var p = payload;
     while (p.len > 0) {
-        const hr = mpt.rlp.decodeItem(p) catch return error.InvalidBlock;
+        const hr = mpt.rlp.decodeItemCanonical(p) catch return error.InvalidBlock;
         const b = switch (hr.item) {
             .bytes => |bs| bs,
             .list => return error.InvalidBlock,
@@ -558,7 +571,7 @@ fn txHashList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const primitives.H
 }
 
 fn txAuthList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const input.AuthorizationTuple {
-    const r = mpt.rlp.decodeItem(rest.*) catch return error.InvalidBlock;
+    const r = mpt.rlp.decodeItemCanonical(rest.*) catch return error.InvalidBlock;
     const payload = switch (r.item) {
         .list => |p| p,
         .bytes => return error.InvalidBlock,
@@ -567,7 +580,7 @@ fn txAuthList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const input.Author
     var items = std.ArrayListUnmanaged(input.AuthorizationTuple).empty;
     var p = payload;
     while (p.len > 0) {
-        const ir = mpt.rlp.decodeItem(p) catch return error.InvalidBlock;
+        const ir = mpt.rlp.decodeItemCanonical(p) catch return error.InvalidBlock;
         var ep = switch (ir.item) {
             .list => |lp| lp,
             .bytes => return error.InvalidBlock,
@@ -582,6 +595,7 @@ fn txAuthList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const input.Author
         const v = try txU64(&ep);
         const rv = try txU256(&ep);
         const sv = try txU256(&ep);
+        if (ep.len != 0) return error.InvalidBlock; // extra tuple fields
         items.append(alloc, .{
             .chain_id = chain_id,
             .address = addr,
@@ -854,4 +868,41 @@ test "decodeParentHeader: shanghai header has base_fee but no blob fields" {
     try std.testing.expectEqual(@as(?u64, 13), p.base_fee_per_gas);
     try std.testing.expectEqual(@as(?u64, null), p.blob_gas_used);
     try std.testing.expectEqual(@as(?u64, null), p.excess_blob_gas);
+}
+
+// A legacy transaction (nonce 0, gas price 10, gas 400000, value 0, no data, v 37) in
+// canonical RLP, and non-canonical encodings of it the reference refuses to decode.
+const canonical_tx_hex = "f860800a83061a809492d2fc80312acd8c37857696d2224af18ce6f966808025a04ff8a4e4957d67afb417056cdc8cc22d2590d96b2d7fa1de345d27d621064913a040f0281c748387d842b625df32f11994909265433041a0ad75157634f4e63bdd";
+
+fn decodeHexTx(alloc: std.mem.Allocator, hex: []const u8) !input.Transaction {
+    const raw = try alloc.alloc(u8, hex.len / 2);
+    _ = try std.fmt.hexToBytes(raw, hex);
+    return decodeSingleTx(alloc, raw);
+}
+
+test "decodeSingleTx accepts the canonical encoding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const tx = try decodeHexTx(arena.allocator(), canonical_tx_hex);
+    try std.testing.expectEqual(@as(u64, 400_000), tx.gas_limit);
+}
+
+test "decodeSingleTx rejects non-canonical transaction encodings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = canonical_tx_hex[4..]; // the list payload, after the f860 header
+    const cases = [_][]const u8{
+        // Nonce 0 written as 0x00 instead of the empty string 0x80.
+        "f860" ++ "00" ++ body[2..],
+        // Gas price 10 with a leading zero byte (0x82000a).
+        "f862" ++ "80" ++ "82000a" ++ body[4..],
+        // Gas price 10 (a single byte below 0x80) wrapped as a one-byte string.
+        "f861" ++ "80" ++ "810a" ++ body[4..],
+        // A byte after the transaction.
+        canonical_tx_hex ++ "00",
+        // An extra field after s.
+        "f861" ++ body ++ "80",
+    };
+    for (cases) |hex| try std.testing.expectError(error.InvalidBlock, decodeHexTx(a, hex));
 }
