@@ -176,6 +176,77 @@ pub const StateWitness = struct {
     headers: []const []const u8,
 };
 
+/// Addresses of the protocol system contracts the executor calls or reads logs from.
+/// Every field defaults to the canonical mainnet address; chains whose genesis config
+/// overrides them (e.g. Besu `depositContractAddress`, `withdrawalRequestContractAddress`,
+/// `consolidationRequestContractAddress`) supply their own.
+pub const SystemContracts = struct {
+    /// EIP-4788 beacon roots contract (pre-block, Cancun+).
+    beacon_roots: primitives.Address = MAINNET_BEACON_ROOTS,
+    /// EIP-2935 history storage contract (pre-block, Prague+).
+    history_storage: primitives.Address = MAINNET_HISTORY_STORAGE,
+    /// EIP-6110 deposit contract whose `DepositEvent` logs become deposit requests (Prague+).
+    deposit: primitives.Address = MAINNET_DEPOSIT,
+    /// EIP-7002 withdrawal requests contract (post-block, Prague+).
+    withdrawal_request: primitives.Address = MAINNET_WITHDRAWAL_REQUEST,
+    /// EIP-7251 consolidation requests contract (post-block, Prague+).
+    consolidation_request: primitives.Address = MAINNET_CONSOLIDATION_REQUEST,
+    /// EIP-8282 builder deposit requests contract (post-block, Amsterdam+).
+    builder_deposit_request: primitives.Address = MAINNET_BUILDER_DEPOSIT_REQUEST,
+    /// EIP-8282 builder exit requests contract (post-block, Amsterdam+).
+    builder_exit_request: primitives.Address = MAINNET_BUILDER_EXIT_REQUEST,
+
+    /// Mainnet addresses, with the deposit contract of known public testnets that deploy
+    /// their own (only Sepolia so far). Used when the caller supplies no override.
+    pub fn forChainId(chain_id: u64) SystemContracts {
+        return switch (chain_id) {
+            11155111 => .{ .deposit = SEPOLIA_DEPOSIT },
+            else => .{},
+        };
+    }
+
+    // 0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02
+    pub const MAINNET_BEACON_ROOTS: primitives.Address = .{
+        0x00, 0x0f, 0x3d, 0xf6, 0xd7, 0x32, 0x80, 0x7e, 0xf1, 0x31,
+        0x9f, 0xb7, 0xb8, 0xbb, 0x85, 0x22, 0xd0, 0xbe, 0xac, 0x02,
+    };
+    // 0x0000F90827F1C53a10cb7A02335B175320002935
+    pub const MAINNET_HISTORY_STORAGE: primitives.Address = .{
+        0x00, 0x00, 0xf9, 0x08, 0x27, 0xf1, 0xc5, 0x3a, 0x10, 0xcb,
+        0x7a, 0x02, 0x33, 0x5b, 0x17, 0x53, 0x20, 0x00, 0x29, 0x35,
+    };
+    // 0x00000000219ab540356cBB839Cbe05303d7705Fa
+    pub const MAINNET_DEPOSIT: primitives.Address = .{
+        0x00, 0x00, 0x00, 0x00, 0x21, 0x9a, 0xb5, 0x40, 0x35, 0x6c,
+        0xbb, 0x83, 0x9c, 0xbe, 0x05, 0x30, 0x3d, 0x77, 0x05, 0xfa,
+    };
+    // 0x7f02C3E3c98b133055B8B348B2Ac625669Ed295D
+    pub const SEPOLIA_DEPOSIT: primitives.Address = .{
+        0x7f, 0x02, 0xc3, 0xe3, 0xc9, 0x8b, 0x13, 0x30, 0x55, 0xb8,
+        0xb3, 0x48, 0xb2, 0xac, 0x62, 0x56, 0x69, 0xed, 0x29, 0x5d,
+    };
+    // 0x00000961Ef480Eb55e80D19ad83579A64c007002
+    pub const MAINNET_WITHDRAWAL_REQUEST: primitives.Address = .{
+        0x00, 0x00, 0x09, 0x61, 0xef, 0x48, 0x0e, 0xb5, 0x5e, 0x80,
+        0xd1, 0x9a, 0xd8, 0x35, 0x79, 0xa6, 0x4c, 0x00, 0x70, 0x02,
+    };
+    // 0x0000BBdDc7CE488642fb579F8B00f3a590007251
+    pub const MAINNET_CONSOLIDATION_REQUEST: primitives.Address = .{
+        0x00, 0x00, 0xbb, 0xdd, 0xc7, 0xce, 0x48, 0x86, 0x42, 0xfb,
+        0x57, 0x9f, 0x8b, 0x00, 0xf3, 0xa5, 0x90, 0x00, 0x72, 0x51,
+    };
+    // 0x0000BFF46984E3725691FA540A8C7589300D8282 (glamsterdam-devnet-7 predeploy)
+    pub const MAINNET_BUILDER_DEPOSIT_REQUEST: primitives.Address = .{
+        0x00, 0x00, 0xbf, 0xf4, 0x69, 0x84, 0xe3, 0x72, 0x56, 0x91,
+        0xfa, 0x54, 0x0a, 0x8c, 0x75, 0x89, 0x30, 0x0d, 0x82, 0x82,
+    };
+    // 0x000064D678505AD48F8CCB093BC65613800E8282 (glamsterdam-devnet-7 predeploy)
+    pub const MAINNET_BUILDER_EXIT_REQUEST: primitives.Address = .{
+        0x00, 0x00, 0x64, 0xd6, 0x78, 0x50, 0x5a, 0xd4, 0x8f, 0x8c,
+        0xcb, 0x09, 0x3b, 0xc6, 0x56, 0x13, 0x80, 0x0e, 0x82, 0x82,
+    };
+};
+
 pub const ChainConfig = struct {
     chain_id: u64 = 1,
     /// Fork hint carried by the input (e.g. populated by the SSZ extended layout).
