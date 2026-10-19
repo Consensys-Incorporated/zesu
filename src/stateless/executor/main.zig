@@ -192,6 +192,8 @@ pub fn executeBlockStateless(
     parent_header: ?rlp_decode.ParentHeader,
     fork_name: ?[]const u8,
     chain_id: u64,
+    /// The chain's system-contract addresses (see input.SystemContracts).
+    contracts: input.SystemContracts,
     /// The payload's requests and block access list hashes, which execution must reproduce
     /// (fork.py `execute_block`).
     requests_hash: [32]u8,
@@ -229,6 +231,7 @@ pub fn executeBlockStateless(
         txs,
         spec,
         chain_id,
+        contracts,
         fork_mod.blockReward(spec),
     );
     // Backstop for a database error raised after the per-tx loop (mining reward,
@@ -314,6 +317,7 @@ pub fn executeStatelessInput(
         headers.parent,
         fork_name,
         si.chain_config.chain_id,
+        input.SystemContracts.forChainId(si.chain_config.chain_id),
         requests_hash,
         block_access_list_hash,
     );
