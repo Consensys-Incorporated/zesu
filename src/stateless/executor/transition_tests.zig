@@ -58,6 +58,8 @@ fn makeTestCtx() context_mod.Context(PartialWitnessDb) {
 }
 
 fn runTestBlock(arena: std.mem.Allocator, ctx: anytype, txs: []input.TxInput) !TransitionResult {
+    // As executeBlockStateless does: the fee goes to the block's beneficiary.
+    ctx.block = transition_mod.buildBlockEnv(testEnv(), primitives.SpecId.shanghai);
     const pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) = .{};
     return transitionWithContext(
         arena,
@@ -121,6 +123,21 @@ test "a block whose accounts are all provable is not marked invalid" {
     _ = try runTestBlock(arena_state.allocator(), &ctx, &txs);
 
     try std.testing.expectEqual(context_mod.ContextError.ok, ctx.ctx_error);
+}
+
+// The stub DB cannot prove the system contracts, so the pre- and post-block system
+// calls (EIP-2935, EIP-7002, EIP-7251) find their target unprovable.
+test "a system contract absent from the witness marks the block invalid" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var env = testEnv();
+    env.parent_hash = @splat(0x44);
+    var ctx = context_mod.Context(PartialWitnessDb).new(.{}, primitives.SpecId.prague);
+    const pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) = .{};
+    _ = transitionWithContext(arena_state.allocator(), &ctx, pre_alloc, env, &.{}, primitives.SpecId.prague, 1, SystemContracts.forChainId(1), 0) catch {};
+
+    try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
 }
 
 fn depositReceipt(log: *input.Log) input.Receipt {
@@ -256,4 +273,50 @@ test "builder exit requests are read from the configured EIP-8282 contract" {
 
     const defaults = try runBlockWithRequestContract(a, .amsterdam, custom, 68, .{});
     try std.testing.expectEqualSlices(u8, &no_requests, &defaults.requests_hash);
+}
+
+// A witness that proves the accounts but not the recipient's code, which the top-level
+// call loads before it executes.
+const UnprovableCodeDb = struct {
+    const CODE_HASH: primitives.Hash = @splat(0xc0);
+
+    pub fn basic(_: *@This(), address: input.Address) !?state_mod.AccountInfo {
+        var info = state_mod.AccountInfo.default();
+        if (std.mem.eql(u8, &address, &TEST_SENDER) or std.mem.eql(u8, &address, &TEST_COINBASE)) {
+            info.balance = 1_000_000_000_000;
+        } else if (std.mem.eql(u8, &address, &TEST_RECIPIENT)) {
+            info.code_hash = CODE_HASH;
+            info.code = null; // loaded through codeByHash, as WitnessDatabase does
+        } else return null;
+        return info;
+    }
+
+    pub fn codeByHash(_: *@This(), _: primitives.Hash) !bytecode_mod.Bytecode {
+        return error.InvalidWitness;
+    }
+
+    pub fn storage(_: *@This(), _: primitives.Address, _: primitives.StorageKey) !primitives.StorageValue {
+        return 0;
+    }
+
+    pub fn blockHash(_: *@This(), _: u64) !primitives.Hash {
+        return @splat(0);
+    }
+};
+
+test "a transaction whose recipient code is absent from the witness marks the block invalid" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var txs = [_]input.TxInput{.{
+        .from = TEST_SENDER,
+        .to = TEST_RECIPIENT,
+        .nonce = 0,
+        .gas = 100_000,
+        .gas_price = 1,
+    }};
+    var ctx = context_mod.Context(UnprovableCodeDb).new(.{}, primitives.SpecId.shanghai);
+    _ = runTestBlock(arena_state.allocator(), &ctx, &txs) catch {};
+
+    try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
 }

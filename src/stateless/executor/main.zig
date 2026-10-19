@@ -54,6 +54,7 @@ test {
     // transition_tests.zig is a leaf test file nothing else imports, so it must be
     // referenced explicitly to be pulled into the test graph.
     _ = @import("./transition_tests.zig");
+    _ = @import("./main_tests.zig");
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
@@ -180,8 +181,7 @@ pub fn executeBlockFromAlloc(
 ///
 /// `parent_header`: parent block's gas/basefee/blob-gas fields, decoded by the caller
 /// from the witness header whose hash equals `ep.parent_hash`. Used to enforce the
-/// EIP-1559 basefee and EIP-4844 excess-blob-gas checks. Pass `null` to skip them
-/// (e.g. when the parent is the genesis block and no header is in the witness).
+/// EIP-1559 basefee and EIP-4844 excess-blob-gas checks. Pass `null` to skip them.
 pub fn executeBlockStateless(
     alloc: std.mem.Allocator,
     pre_state_root: [32]u8,
@@ -302,84 +302,71 @@ pub fn executeStatelessInput(
         if (next != si.new_payload_request.versioned_hashes.len) return error.InvalidVersionedHashes;
     }
 
-    const pre_state_root_raw = rlp_decode.findPreStateRoot(si.witness.headers, ep.block_number);
-    const pre_state_root = pre_state_root_raw orelse ep.state_root;
+    const headers = try decodeWitnessHeaders(alloc, si.witness.headers, ep.parent_hash, ep.block_number);
 
     var node_index = try mpt.buildNodeIndex(alloc, si.witness.nodes);
     defer node_index.deinit();
 
-    const HeaderInfo = struct { number: u64, parent_hash: [32]u8, hash: [32]u8 };
-    var header_infos = std.ArrayListUnmanaged(HeaderInfo).empty;
-    var block_hashes = std.ArrayListUnmanaged(BlockHashEntry).empty;
-    for (si.witness.headers) |hdr_rlp| {
-        const hash = mpt.keccak256(hdr_rlp);
-        const outer = mpt.rlp.decodeItem(hdr_rlp) catch return error.InvalidWitness;
-        var rest = switch (outer.item) {
-            .list => |p| p,
-            .bytes => return error.InvalidWitness,
-        };
-        // Field [0]: parent_hash (32-byte bytes item)
-        const ph_r = mpt.rlp.decodeItem(rest) catch return error.InvalidWitness;
-        const ph_bytes = switch (ph_r.item) {
-            .bytes => |b| b,
-            .list => return error.InvalidWitness,
-        };
-        if (ph_bytes.len != 32) return error.InvalidWitness;
-        var parent_hash: [32]u8 = undefined;
-        @memcpy(&parent_hash, ph_bytes);
-        rest = rest[ph_r.consumed..];
-        // Skip fields [1]-[7] (7 fields between parent_hash and block number)
-        var skip: usize = 0;
-        while (skip < 7 and rest.len > 0) : (skip += 1) {
-            const fr = mpt.rlp.decodeItem(rest) catch return error.InvalidWitness;
-            rest = rest[fr.consumed..];
-        }
-        if (rest.len == 0) return error.InvalidWitness;
-        const num_r = mpt.rlp.decodeItem(rest) catch return error.InvalidWitness;
-        const num_bytes = switch (num_r.item) {
-            .bytes => |b| b,
-            .list => return error.InvalidWitness,
-        };
-        if (num_bytes.len > 8) return error.InvalidWitness;
-        var number: u64 = 0;
-        for (num_bytes) |b| number = (number << 8) | b;
-        try block_hashes.append(alloc, .{ .number = number, .hash = hash });
-        try header_infos.append(alloc, .{ .number = number, .parent_hash = parent_hash, .hash = hash });
-    }
-
-    // Validate header chain: headers must be provided in ascending block-number order
-    // (each header's keccak256 must equal the next header's parent_hash), and the
-    // last header's hash must match EP.parent_hash (chain anchor). Out-of-order
-    // headers (e.g. reversed) break the hash-linkage check and are rejected.
-    // After chain validation, the last header IS the parent block — decode its
-    // gas/basefee/blob-gas fields so ckStateless can populate Env.parent_*.
-    var parent_header: ?rlp_decode.ParentHeader = null;
-    if (header_infos.items.len > 0) {
-        for (0..header_infos.items.len - 1) |k| {
-            if (!std.mem.eql(u8, &header_infos.items[k].hash, &header_infos.items[k + 1].parent_hash)) {
-                return error.InvalidWitness;
-            }
-        }
-        const last = header_infos.items[header_infos.items.len - 1];
-        if (!std.mem.eql(u8, &last.hash, &ep.parent_hash)) {
-            return error.InvalidWitness;
-        }
-        parent_header = rlp_decode.decodeParentHeader(si.witness.headers[si.witness.headers.len - 1]) catch
-            return error.InvalidWitness;
-    }
-
     return executeBlockStateless(
         alloc,
-        pre_state_root,
+        headers.pre_state_root,
         &node_index,
         si.new_payload_request,
         si.witness.codes,
-        block_hashes.items,
-        parent_header,
+        headers.block_hashes,
+        headers.parent,
         fork_name,
         si.chain_config.chain_id,
         input.SystemContracts.forChainId(si.chain_config.chain_id),
         requests_hash,
         block_access_list_hash,
     );
+}
+
+/// The witness headers, validated as a chain ending at the payload's parent.
+pub const WitnessHeaders = struct {
+    block_hashes: []BlockHashEntry,
+    parent: rlp_decode.ParentHeader,
+    /// The parent's state root, which the block executes against.
+    pre_state_root: [32]u8,
+};
+
+/// Decode the witness headers and check that they form a chain (each header's hash is
+/// the next one's parent_hash) ending at the payload's parent, whose number is one below
+/// the payload's. Like the reference (stateless.py), take the parent, and with it the
+/// pre-state root, from the last header, so a witness without headers is incomplete.
+pub fn decodeWitnessHeaders(
+    alloc: std.mem.Allocator,
+    headers_rlp: []const []const u8,
+    payload_parent_hash: [32]u8,
+    payload_block_number: u64,
+) !WitnessHeaders {
+    if (headers_rlp.len == 0) return error.InvalidWitness;
+
+    var block_hashes = try alloc.alloc(BlockHashEntry, headers_rlp.len);
+    var last: rlp_decode.MinimalHeader = undefined;
+    var prev_hash: ?[32]u8 = null;
+    for (headers_rlp, block_hashes) |hdr_rlp, *entry| {
+        const hdr = rlp_decode.decodeMinimalHeader(hdr_rlp) catch return error.InvalidWitness;
+        const hash = mpt.keccak256(hdr_rlp);
+        // Each header must be the previous one's child.
+        if (prev_hash) |prev| {
+            if (!std.mem.eql(u8, &prev, &hdr.parent_hash)) return error.InvalidWitness;
+        }
+        entry.* = .{ .number = hdr.number, .hash = hash };
+        prev_hash = hash;
+        last = hdr;
+    }
+    if (!std.mem.eql(u8, &block_hashes[block_hashes.len - 1].hash, &payload_parent_hash)) {
+        return error.InvalidWitness;
+    }
+    // validate_header: block.number == parent.number + 1.
+    if (last.number == std.math.maxInt(u64) or last.number + 1 != payload_block_number) {
+        return error.InvalidBlockNumber;
+    }
+    return .{
+        .block_hashes = block_hashes,
+        .parent = rlp_decode.decodeParentHeader(headers_rlp[headers_rlp.len - 1]) catch return error.InvalidWitness,
+        .pre_state_root = last.state_root,
+    };
 }

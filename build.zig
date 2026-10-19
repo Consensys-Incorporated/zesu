@@ -458,15 +458,39 @@ fn addZkevmBenchmarkSteps(b: *std.Build, runner: *std.Build.Step.Compile) void {
     run.dependOn(&cmd.step);
 }
 
-/// Build a relocatable rv64im ELF guest object (zkvm-standards ABI: IO, crypto, heap and
-/// logging left as unresolved externs) on the freestanding riscv64 baseline plus
+/// Build the relocatable guest object (zkvm-standards ABI: IO, crypto, heap and logging left as
+/// unresolved externs) for a caller-supplied freestanding riscv64 `target`.
+///
+/// This is zesu's public build API for zkVM projects: a dependent (e.g. zesu-zkvm) imports this
+/// build.zig, passes the same resolved target it uses for its own host object, and links the
+/// returned object. zesu therefore carries no knowledge of any zkVM's ISA extensions.
+///
+/// `b` must be zesu's own builder (`dep.builder` from `b.dependency("zesu", .{})`), because the
+/// module graph resolves its sources relative to it.
+pub fn addGuestObject(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    has_dma: bool,
+) *std.Build.Step.Compile {
+    // The extern crypto backend ignores crypto_prefix (it only locates native libraries).
+    const obj_mods = buildModules(b, target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), "", .@"extern", true, has_dma);
+
+    const obj = b.addObject(.{
+        .name = "zesu",
+        .root_module = obj_mods.zkvm_root.?,
+    });
+    obj.root_module.code_model = .medium;
+    return obj;
+}
+
+/// Build a relocatable rv64im ELF guest object on the freestanding riscv64 baseline plus
 /// `extra_features`, and wire an install step named `step_name` that publishes it to
-/// `install_name` under zig-out. Shared by `rv64im-object` and `zisk-object`, which differ
-/// only in which optional ISA extensions ride on top of the shared baseline.
+/// `install_name` under zig-out. Backs the published `rv64im-object` (and, for now,
+/// `zisk-object`) release artifacts.
 fn addRv64imObjectStep(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
-    crypto_prefix: []const u8,
     extra_features: []const std.Target.riscv.Feature,
     step_name: []const u8,
     step_desc: []const u8,
@@ -482,13 +506,7 @@ fn addRv64imObjectStep(
         .abi = .none,
     });
 
-    const obj_mods = buildModules(b, rv64im_target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), crypto_prefix, .@"extern", true, has_dma);
-
-    const rv64_obj = b.addObject(.{
-        .name = "zesu",
-        .root_module = obj_mods.zkvm_root.?,
-    });
-    rv64_obj.root_module.code_model = .medium;
+    const rv64_obj = addGuestObject(b, rv64im_target, optimize, has_dma);
 
     const obj_step = b.step(step_name, step_desc);
     const install_obj = b.addInstallFile(rv64_obj.getEmittedBin(), install_name);
@@ -763,8 +781,8 @@ pub fn build(b: *std.Build) void {
     //
     // Build with: zig build rv64im-object | zig build zisk-object
     // Verify undefined refs: llvm-nm zig-out/lib/<name> | grep ' U '
-    addRv64imObjectStep(b, optimize, crypto_prefix, &.{ .m, .zicclsm, .unaligned_scalar_mem }, "rv64im-object", "Build relocatable rv64im ELF object (zesu.o)", "lib/zesu.o", false);
-    addRv64imObjectStep(b, optimize, crypto_prefix, &.{ .m, .zicclsm, .unaligned_scalar_mem, .zbb, .zbs }, "zisk-object", "Build relocatable rv64im+Zbb+Zbs ELF object for the ZisK guest (zesu-zisk.o)", "lib/zesu-zisk.o", true);
+    addRv64imObjectStep(b, optimize, &.{ .m, .zicclsm, .unaligned_scalar_mem }, "rv64im-object", "Build relocatable rv64im ELF object (zesu.o)", "lib/zesu.o", false);
+    addRv64imObjectStep(b, optimize, &.{ .m, .zicclsm, .unaligned_scalar_mem, .zbb, .zbs }, "zisk-object", "Build relocatable rv64im+Zbb+Zbs ELF object for the ZisK guest (zesu-zisk.o)", "lib/zesu-zisk.o", true);
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
     const spec_test_version = "tests@v21.0.1";
