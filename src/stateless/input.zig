@@ -197,7 +197,7 @@ pub const SystemContracts = struct {
     builder_exit_request: primitives.Address = MAINNET_BUILDER_EXIT_REQUEST,
 
     /// Mainnet addresses, with the deposit contract of known public testnets that deploy
-    /// their own (only Sepolia so far). Used when the chain config carries no override.
+    /// their own (only Sepolia so far). Used when the caller supplies no override.
     pub fn forChainId(chain_id: u64) SystemContracts {
         return switch (chain_id) {
             11155111 => .{ .deposit = SEPOLIA_DEPOSIT },
@@ -249,10 +249,6 @@ pub const SystemContracts = struct {
 
 pub const ChainConfig = struct {
     chain_id: u64 = 1,
-    /// System-contract addresses for this chain. `null` selects
-    /// `SystemContracts.forChainId(chain_id)`. The zkevm SSZ input carries only the chain
-    /// id, so this is only set by callers that build the input themselves.
-    system_contracts: ?SystemContracts = null,
     /// Fork hint carried by the input (e.g. populated by the SSZ extended layout).
     /// Precedence at the executor entry points: an explicit `fork_name` argument
     /// (e.g. the `--fork` CLI override) wins; otherwise this field is used; if both
@@ -261,12 +257,6 @@ pub const ChainConfig = struct {
     /// The stateless input schema the guest decoded: fork_index << 8 | revision.
     /// Echoed verbatim in the SSZ validation result (zkevm@v0.8.4).
     schema_id: u16 = 0,
-
-    /// The system-contract addresses to execute with: the explicit override if set,
-    /// otherwise the defaults for `chain_id`.
-    pub fn systemContracts(self: ChainConfig) SystemContracts {
-        return self.system_contracts orelse SystemContracts.forChainId(self.chain_id);
-    }
 };
 
 /// Top-level input (matches Amsterdam spec StatelessInput).

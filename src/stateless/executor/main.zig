@@ -192,7 +192,7 @@ pub fn executeBlockStateless(
     parent_header: ?rlp_decode.ParentHeader,
     fork_name: ?[]const u8,
     chain_id: u64,
-    /// The chain's system-contract addresses (see input.ChainConfig.systemContracts).
+    /// The chain's system-contract addresses (see input.SystemContracts).
     contracts: input.SystemContracts,
     /// The payload's requests and block access list hashes, which execution must reproduce
     /// (fork.py `execute_block`).
@@ -378,7 +378,7 @@ pub fn executeStatelessInput(
         parent_header,
         fork_name,
         si.chain_config.chain_id,
-        si.chain_config.systemContracts(),
+        input.SystemContracts.forChainId(si.chain_config.chain_id),
         requests_hash,
         block_access_list_hash,
     );
