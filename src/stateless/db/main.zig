@@ -58,6 +58,9 @@ pub const WitnessDatabase = struct {
     /// lets that update skip accounts the block left unchanged (originalAccount). Accounts
     /// absent from pre-state are cached with exists = false and EMPTY_TRIE_HASH.
     original_accounts: std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80),
+    /// Storage roots whose witness trie has passed mpt.validateSecuredTriePaths, so each
+    /// trie the block reads is walked once.
+    checked_storage_roots: std.HashMap(primitives.Hash, void, primitives.HashContext, 80),
     /// Set only while a system call runs. Its origin is SYSTEM_ADDRESS, whose account the
     /// reference never reads, so a missing proof for it is accepted only then.
     system_call_origin: bool = false,
@@ -119,6 +122,7 @@ pub const WitnessDatabase = struct {
             .block_hashes = block_hashes,
             .deployed_codes = std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80).init(alloc),
             .original_accounts = std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80).init(alloc),
+            .checked_storage_roots = std.HashMap(primitives.Hash, void, primitives.HashContext, 80).init(alloc),
         };
     }
 
@@ -128,6 +132,7 @@ pub const WitnessDatabase = struct {
         while (bc_it.next()) |bc| bc.deinit();
         self.deployed_codes.deinit();
         self.original_accounts.deinit();
+        self.checked_storage_roots.deinit();
     }
 
     /// Called by the journal to register code the block itself writes: bytecodes deployed
@@ -239,6 +244,15 @@ pub const WitnessDatabase = struct {
             self.original_accounts.put(address, orig) catch @panic("out of memory");
             break :blk orig.storage_root;
         };
+        // The reference checks a storage trie the first time the block reads it.
+        if (!std.mem.eql(u8, &storage_root, &EMPTY_TRIE_HASH)) {
+            // OOM panics rather than propagates: see basic()'s comment above for why.
+            const gop = self.checked_storage_roots.getOrPut(storage_root) catch @panic("out of memory");
+            if (!gop.found_existing) mpt.validateSecuredTriePaths(storage_root, self.node_index) catch {
+                _ = self.checked_storage_roots.remove(storage_root);
+                return DbError.InvalidWitness;
+            };
+        }
         const slot = u256ToHash(index);
         const value = mpt.verifyStorageIndexed(storage_root, slot, self.node_index) catch |err| switch (err) {
             // A slot that is genuinely unset yields null from verifyStorageIndexed
