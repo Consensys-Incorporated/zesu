@@ -94,38 +94,133 @@ const NodeView = struct {
 /// Nibbles in a secured-trie key: the keccak256 of an address or storage slot.
 const SECURED_KEY_NIBBLES = 64;
 
+/// A bitset over the keys of a NodeIndex, read from hash bytes 8..16 (the index's own
+/// hash reads bytes 0..8). Most child hashes the path walk meets are not in the witness,
+/// and a miss in the index probes several slots; the filter answers most of them in one load.
+pub const NodeFilter = struct {
+    bits: []u64,
+    mask: u64,
+
+    /// At least 16 bits per node, so about 6% of absent hashes still reach the index.
+    pub fn init(alloc: std.mem.Allocator, index: *const NodeIndex) error{OutOfMemory}!NodeFilter {
+        var len_bits: usize = 64;
+        while (len_bits < 16 * index.count()) len_bits <<= 1;
+        const bits = try alloc.alloc(u64, len_bits / 64);
+        @memset(bits, 0);
+        const filter: NodeFilter = .{ .bits = bits, .mask = len_bits - 1 };
+        var it = index.keyIterator();
+        while (it.next()) |key| {
+            const b = filter.bit(key);
+            bits[b >> 6] |= @as(u64, 1) << @intCast(b & 63);
+        }
+        return filter;
+    }
+
+    pub fn deinit(self: NodeFilter, alloc: std.mem.Allocator) void {
+        alloc.free(self.bits);
+    }
+
+    fn bit(self: NodeFilter, hash: *const [32]u8) u64 {
+        return std.mem.readInt(u64, hash[8..16], .little) & self.mask;
+    }
+
+    fn mayContain(self: NodeFilter, hash: *const [32]u8) bool {
+        const b = self.bit(hash);
+        return (self.bits[b >> 6] >> @intCast(b & 63)) & 1 != 0;
+    }
+};
+
+/// The witness index and its filter, as the path walk reads them.
+const PathWalk = struct {
+    index: *const NodeIndex,
+    filter: NodeFilter,
+};
+
 /// Rejects a secured (state or storage) trie whose witness nodes, walked from `root`,
 /// hold a path that does not end at exactly 64 nibbles: a leaf that ends early or late,
 /// an extension that reaches the key length, or a branch at it. Children absent from
 /// `index` are not walked. Mirrors the reference's `_validate_secured_trie_paths`, run on
 /// every trie it decodes from the witness, including nodes no lookup reaches.
-pub fn validateSecuredTriePaths(root: primitives.Hash, index: *const NodeIndex) MptError!void {
+/// `filter` must be built from `index`.
+pub fn validateSecuredTriePaths(root: primitives.Hash, index: *const NodeIndex, filter: NodeFilter) MptError!void {
     if (std.mem.eql(u8, &root, &EMPTY_TRIE_HASH)) return;
     const root_rlp = findNodeInIndex(index, root) orelse return;
-    try validatePathsFrom(root_rlp, SECURED_KEY_NIBBLES, index);
+    try validatePathsFrom(root_rlp, SECURED_KEY_NIBBLES, &.{ .index = index, .filter = filter });
 }
 
-fn validatePathsFrom(node_rlp: []const u8, remaining: usize, index: *const NodeIndex) MptError!void {
-    switch (try node.decodeNode(node_rlp)) {
-        .leaf => |lf| if (try hpNibbleLen(lf.key_end) != remaining) return error.InvalidProof,
-        .extension => |e| {
-            const len = try hpNibbleLen(e.prefix);
-            if (len >= remaining) return error.InvalidProof;
-            try validateChildPaths(e.child, remaining - len, index);
+/// Scans `node_rlp` in place rather than through node.decodeNode: the walk visits every
+/// witness node, and most branch slots are an empty string or a 32-byte hash, which the
+/// scan reads directly. Malformed nodes fail as decodeNode would.
+fn validatePathsFrom(node_rlp: []const u8, remaining: usize, walk: *const PathWalk) MptError!void {
+    // A branch is almost always a long list with a two-byte length.
+    var rest = if (node_rlp.len >= 3 and node_rlp[0] == 0xf9 and
+        3 + (@as(usize, node_rlp[1]) << 8 | node_rlp[2]) <= node_rlp.len)
+        node_rlp[3..][0 .. @as(usize, node_rlp[1]) << 8 | node_rlp[2]]
+    else switch ((try rlp.decodeItem(node_rlp)).item) {
+        .list => |payload| payload,
+        .bytes => return error.InvalidNode,
+    };
+    if (rest.len == 0) return error.InvalidNode;
+    const first = try rlp.decodeItem(rest);
+    const first_raw = rest[0..first.consumed];
+    rest = rest[first.consumed..];
+    if (rest.len == 0) return error.InvalidNode;
+    const second = try rlp.decodeItem(rest);
+    const second_raw = rest[0..second.consumed];
+    rest = rest[second.consumed..];
+
+    if (rest.len == 0) {
+        // Leaf or extension: the hex-prefix flag tells them apart.
+        const path = switch (first.item) {
+            .bytes => |b| b,
+            .list => return error.InvalidNode,
+        };
+        if (path.len == 0) return error.InvalidNode;
+        const len = try hpNibbleLen(path);
+        if (path[0] & 0x20 != 0) {
+            if (len != remaining) return error.InvalidProof;
+            return;
+        }
+        if (len >= remaining) return error.InvalidProof;
+        return validateChildItem(second.item, second_raw, remaining - len, walk);
+    }
+
+    // Branch: 16 children and a value, which is not checked.
+    if (remaining == 0) return error.InvalidProof;
+    try validateChildItem(first.item, first_raw, remaining - 1, walk);
+    try validateChildItem(second.item, second_raw, remaining - 1, walk);
+    for (2..16) |_| {
+        if (rest.len == 0) return error.InvalidNode;
+        if (rest[0] == 0x80) {
+            rest = rest[1..];
+        } else if (rest[0] == 0xa0 and rest.len >= 33) {
+            try validateHashChild(rest[1..33], remaining - 1, walk);
+            rest = rest[33..];
+        } else {
+            const child = try rlp.decodeItem(rest);
+            try validateChildItem(child.item, rest[0..child.consumed], remaining - 1, walk);
+            rest = rest[child.consumed..];
+        }
+    }
+    if (rest.len == 1 and rest[0] == 0x80) return;
+    if (rest.len == 0 or (try rlp.decodeItem(rest)).consumed != rest.len) return error.InvalidNode;
+}
+
+/// A child slot as node.decodeNodeRef reads it: empty, a 32-byte hash, or an inline node.
+fn validateChildItem(item: rlp.RlpItem, raw: []const u8, remaining: usize, walk: *const PathWalk) MptError!void {
+    switch (item) {
+        .bytes => |b| switch (b.len) {
+            0 => {},
+            32 => try validateHashChild(b[0..32], remaining, walk),
+            else => try validatePathsFrom(b, remaining, walk),
         },
-        .branch => |b| {
-            if (remaining == 0) return error.InvalidProof;
-            for (b.children) |child| try validateChildPaths(child, remaining - 1, index);
-        },
+        .list => try validatePathsFrom(raw, remaining, walk),
     }
 }
 
-fn validateChildPaths(ref: node.NodeRef, remaining: usize, index: *const NodeIndex) MptError!void {
-    switch (ref) {
-        .empty => {},
-        .hash => |h| if (findNodeInIndex(index, h.*)) |child_rlp| try validatePathsFrom(child_rlp, remaining, index),
-        .inline_node => |child_rlp| try validatePathsFrom(child_rlp, remaining, index),
-    }
+fn validateHashChild(hash: *const [32]u8, remaining: usize, walk: *const PathWalk) MptError!void {
+    if (!walk.filter.mayContain(hash)) return;
+    if (findNodeInIndex(walk.index, hash.*)) |child_rlp| try validatePathsFrom(child_rlp, remaining, walk);
 }
 
 /// Number of nibbles in a hex-prefix (compact) path, without decoding it.
