@@ -94,46 +94,47 @@ const NodeView = struct {
 /// Nibbles in a secured-trie key: the keccak256 of an address or storage slot.
 const SECURED_KEY_NIBBLES = 64;
 
-/// A bitset over the keys of a NodeIndex, read from hash bytes 8..16 (the index's own
-/// hash reads bytes 0..8). Most child hashes the path walk meets are not in the witness,
-/// and a miss in the index probes several slots; the filter answers most of them in one load.
-pub const NodeFilter = struct {
-    bits: []u64,
+/// What validateSecuredTriePaths needs besides the index, built once per block: a byte map
+/// over the index's keys, indexed by hash bytes 8..16 (the index's own hash reads bytes
+/// 0..8), and the walk's stack. Most child hashes the walk meets are not in the witness,
+/// and a miss in the index probes several slots; the map answers most of them in one load.
+pub const PathCheck = struct {
+    present: []u8,
     mask: u64,
+    stack: []Pending,
 
-    /// At least 16 bits per node, so about 6% of absent hashes still reach the index.
-    pub fn init(alloc: std.mem.Allocator, index: *const NodeIndex) error{OutOfMemory}!NodeFilter {
-        var len_bits: usize = 64;
-        while (len_bits < 16 * index.count()) len_bits <<= 1;
-        const bits = try alloc.alloc(u64, len_bits / 64);
-        @memset(bits, 0);
-        const filter: NodeFilter = .{ .bits = bits, .mask = len_bits - 1 };
+    /// A node still to walk, with the key nibbles left below it.
+    const Pending = struct { ptr: [*]const u8, len: u32, remaining: u32 };
+
+    /// Each branch level leaves at most 15 siblings pending, and a branch needs a nibble
+    /// left, so 64 levels of 15 plus the 16 children of the deepest fit.
+    const stack_len = 15 * SECURED_KEY_NIBBLES + 16;
+
+    /// At least 32 entries per node, so about 3% of absent hashes still reach the index.
+    pub fn init(alloc: std.mem.Allocator, index: *const NodeIndex) error{OutOfMemory}!PathCheck {
+        var len: usize = 64;
+        while (len < 32 * index.count()) len <<= 1;
+        const present = try alloc.alloc(u8, len);
+        errdefer alloc.free(present);
+        @memset(present, 0);
+        const check: PathCheck = .{ .present = present, .mask = len - 1, .stack = try alloc.alloc(Pending, stack_len) };
         var it = index.keyIterator();
-        while (it.next()) |key| {
-            const b = filter.bit(key);
-            bits[b >> 6] |= @as(u64, 1) << @intCast(b & 63);
-        }
-        return filter;
+        while (it.next()) |key| present[check.slot(key)] = 1;
+        return check;
     }
 
-    pub fn deinit(self: NodeFilter, alloc: std.mem.Allocator) void {
-        alloc.free(self.bits);
+    pub fn deinit(self: PathCheck, alloc: std.mem.Allocator) void {
+        alloc.free(self.stack);
+        alloc.free(self.present);
     }
 
-    fn bit(self: NodeFilter, hash: *const [32]u8) u64 {
+    fn slot(self: PathCheck, hash: *const [32]u8) usize {
         return std.mem.readInt(u64, hash[8..16], .little) & self.mask;
     }
 
-    fn mayContain(self: NodeFilter, hash: *const [32]u8) bool {
-        const b = self.bit(hash);
-        return (self.bits[b >> 6] >> @intCast(b & 63)) & 1 != 0;
+    fn mayContain(self: PathCheck, hash: *const [32]u8) bool {
+        return self.present[self.slot(hash)] != 0;
     }
-};
-
-/// The witness index and its filter, as the path walk reads them.
-const PathWalk = struct {
-    index: *const NodeIndex,
-    filter: NodeFilter,
 };
 
 /// Rejects a secured (state or storage) trie whose witness nodes, walked from `root`,
@@ -141,86 +142,131 @@ const PathWalk = struct {
 /// an extension that reaches the key length, or a branch at it. Children absent from
 /// `index` are not walked. Mirrors the reference's `_validate_secured_trie_paths`, run on
 /// every trie it decodes from the witness, including nodes no lookup reaches.
-/// `filter` must be built from `index`.
-pub fn validateSecuredTriePaths(root: primitives.Hash, index: *const NodeIndex, filter: NodeFilter) MptError!void {
+/// `check` must be built from `index`.
+///
+/// Nodes are scanned in place rather than through node.decodeNode, and walked from a stack
+/// rather than by recursion: the walk visits every witness node, and most branch slots are
+/// an empty string or a 32-byte hash, which the scan reads directly. Malformed nodes fail
+/// as decodeNode would.
+pub fn validateSecuredTriePaths(root: primitives.Hash, index: *const NodeIndex, check: *const PathCheck) MptError!void {
     if (std.mem.eql(u8, &root, &EMPTY_TRIE_HASH)) return;
     const root_rlp = findNodeInIndex(index, root) orelse return;
-    try validatePathsFrom(root_rlp, SECURED_KEY_NIBBLES, &.{ .index = index, .filter = filter });
-}
+    // Stack writes keep the compiler from proving `check` unchanged, so read it once.
+    const stack = check.stack;
+    const present = check.present.ptr;
+    const mask = check.mask;
+    stack[0] = .{ .ptr = root_rlp.ptr, .len = @intCast(root_rlp.len), .remaining = SECURED_KEY_NIBBLES };
+    var top: usize = 1;
+    while (top > 0) {
+        top -= 1;
+        const node_rlp = stack[top].ptr[0..stack[top].len];
+        const remaining = stack[top].remaining;
 
-/// Scans `node_rlp` in place rather than through node.decodeNode: the walk visits every
-/// witness node, and most branch slots are an empty string or a 32-byte hash, which the
-/// scan reads directly. Malformed nodes fail as decodeNode would.
-fn validatePathsFrom(node_rlp: []const u8, remaining: usize, walk: *const PathWalk) MptError!void {
-    // A branch is almost always a long list with a two-byte length.
-    var rest = if (node_rlp.len >= 3 and node_rlp[0] == 0xf9 and
-        3 + (@as(usize, node_rlp[1]) << 8 | node_rlp[2]) <= node_rlp.len)
-        node_rlp[3..][0 .. @as(usize, node_rlp[1]) << 8 | node_rlp[2]]
-    else switch ((try rlp.decodeItem(node_rlp)).item) {
-        .list => |payload| payload,
-        .bytes => return error.InvalidNode,
-    };
-    if (rest.len == 0) return error.InvalidNode;
-    const first = try rlp.decodeItem(rest);
-    const first_raw = rest[0..first.consumed];
-    rest = rest[first.consumed..];
-    if (rest.len == 0) return error.InvalidNode;
-    const second = try rlp.decodeItem(rest);
-    const second_raw = rest[0..second.consumed];
-    rest = rest[second.consumed..];
-
-    if (rest.len == 0) {
-        // Leaf or extension: the hex-prefix flag tells them apart.
-        const path = switch (first.item) {
-            .bytes => |b| b,
-            .list => return error.InvalidNode,
+        // A branch is almost always a long list with a two-byte length.
+        var rest = if (node_rlp.len >= 3 and node_rlp[0] == 0xf9 and
+            3 + (@as(usize, node_rlp[1]) << 8 | node_rlp[2]) <= node_rlp.len)
+            node_rlp[3..][0 .. @as(usize, node_rlp[1]) << 8 | node_rlp[2]]
+        else switch ((try rlp.decodeItem(node_rlp)).item) {
+            .list => |payload| payload,
+            .bytes => return error.InvalidNode,
         };
-        if (path.len == 0) return error.InvalidNode;
-        const len = try hpNibbleLen(path);
-        if (path[0] & 0x20 != 0) {
-            if (len != remaining) return error.InvalidProof;
-            return;
-        }
-        if (len >= remaining) return error.InvalidProof;
-        return validateChildItem(second.item, second_raw, remaining - len, walk);
-    }
 
-    // Branch: 16 children and a value, which is not checked.
-    if (remaining == 0) return error.InvalidProof;
-    try validateChildItem(first.item, first_raw, remaining - 1, walk);
-    try validateChildItem(second.item, second_raw, remaining - 1, walk);
-    for (2..16) |_| {
-        if (rest.len == 0) return error.InvalidNode;
-        if (rest[0] == 0x80) {
-            rest = rest[1..];
-        } else if (rest[0] == 0xa0 and rest.len >= 33) {
-            try validateHashChild(rest[1..33], remaining - 1, walk);
-            rest = rest[33..];
-        } else {
-            const child = try rlp.decodeItem(rest);
-            try validateChildItem(child.item, rest[0..child.consumed], remaining - 1, walk);
-            rest = rest[child.consumed..];
+        // A leaf or extension has exactly two items: a hex-prefix path and a value or child.
+        const len_0 = try itemLen(rest);
+        if (rest.len == len_0 + try itemLen(rest[len_0..])) {
+            const path = if (rest[0] < 0x80)
+                rest[0..1]
+            else if (rest[0] <= 0xb7)
+                rest[1..len_0]
+            else switch ((try rlp.decodeItem(rest)).item) {
+                .bytes => |b| b,
+                .list => return error.InvalidNode,
+            };
+            if (path.len == 0) return error.InvalidNode;
+            const len = try hpNibbleLen(path);
+            if (path[0] & 0x20 != 0) {
+                if (len != remaining) return error.InvalidProof;
+                continue;
+            }
+            if (len >= remaining) return error.InvalidProof;
+            const child_raw = rest[len_0..];
+            if (childNode((try rlp.decodeItem(child_raw)).item, child_raw, index, check)) |child|
+                top = try push(stack, top, child, remaining - @as(u32, @intCast(len)));
+            continue;
         }
+
+        // Branch: 16 children and a value, which is not checked.
+        if (remaining == 0) return error.InvalidProof;
+        // Most branch slots in a witness sit in branches with 16 hashed children: read
+        // those at fixed offsets, and fall back to the scan below for any other layout.
+        if (rest.len == 16 * 33 + 1 and rest[16 * 33] == 0x80) full: {
+            const pending = top;
+            inline for (0..16) |i| {
+                if (rest[33 * i] != 0xa0) {
+                    top = pending;
+                    break :full;
+                }
+                if (present[std.mem.readInt(u64, rest[33 * i + 9 ..][0..8], .little) & mask] != 0)
+                    top = try pushIndexed(stack, top, index, rest[33 * i + 1 ..][0..32], remaining - 1);
+            }
+            continue;
+        }
+        for (0..16) |_| {
+            if (rest.len == 0) return error.InvalidNode;
+            if (rest[0] == 0x80) {
+                rest = rest[1..];
+            } else if (rest[0] == 0xa0 and rest.len >= 33) {
+                if (present[std.mem.readInt(u64, rest[9..17], .little) & mask] != 0) {
+                    if (findNodeInIndex(index, rest[1..33].*)) |child| top = try push(stack, top, child, remaining - 1);
+                }
+                rest = rest[33..];
+            } else {
+                const item = try rlp.decodeItem(rest);
+                if (childNode(item.item, rest[0..item.consumed], index, check)) |child| top = try push(stack, top, child, remaining - 1);
+                rest = rest[item.consumed..];
+            }
+        }
+        if (rest.len == 1 and rest[0] == 0x80) continue;
+        if (rest.len == 0 or (try rlp.decodeItem(rest)).consumed != rest.len) return error.InvalidNode;
     }
-    if (rest.len == 1 and rest[0] == 0x80) return;
-    if (rest.len == 0 or (try rlp.decodeItem(rest)).consumed != rest.len) return error.InvalidNode;
 }
 
-/// A child slot as node.decodeNodeRef reads it: empty, a 32-byte hash, or an inline node.
-fn validateChildItem(item: rlp.RlpItem, raw: []const u8, remaining: usize, walk: *const PathWalk) MptError!void {
-    switch (item) {
+/// Pushes the witness node with this hash, if any. Out of line so that the 16 unrolled
+/// slots of a full branch stay small.
+noinline fn pushIndexed(stack: []PathCheck.Pending, top: usize, index: *const NodeIndex, hash: *const [32]u8, remaining: u32) MptError!usize {
+    return push(stack, top, findNodeInIndex(index, hash.*) orelse return top, remaining);
+}
+
+inline fn push(stack: []PathCheck.Pending, top: usize, node_rlp: []const u8, remaining: u32) MptError!usize {
+    if (top == stack.len) return error.InvalidNode; // unreachable: see PathCheck.stack_len
+    stack[top] = .{ .ptr = node_rlp.ptr, .len = @intCast(node_rlp.len), .remaining = remaining };
+    return top + 1;
+}
+
+/// Length of the RLP item at the start of `bytes`, reading a single byte and a short
+/// string inline: these cover branch slots, paths and storage values.
+inline fn itemLen(bytes: []const u8) MptError!usize {
+    if (bytes.len == 0) return error.InvalidNode;
+    if (bytes[0] < 0x80) return 1;
+    if (bytes[0] <= 0xb7) {
+        const len = 1 + @as(usize, bytes[0] - 0x80);
+        if (len > bytes.len) return error.InvalidRlp;
+        return len;
+    }
+    return (try rlp.decodeItem(bytes)).consumed;
+}
+
+/// The node a child slot refers to, reading the slot as node.decodeNodeRef does, or null
+/// when the slot is empty or the witness lacks the node.
+fn childNode(item: rlp.RlpItem, raw: []const u8, index: *const NodeIndex, check: *const PathCheck) ?[]const u8 {
+    return switch (item) {
         .bytes => |b| switch (b.len) {
-            0 => {},
-            32 => try validateHashChild(b[0..32], remaining, walk),
-            else => try validatePathsFrom(b, remaining, walk),
+            0 => null,
+            32 => if (check.mayContain(b[0..32])) findNodeInIndex(index, b[0..32].*) else null,
+            else => b,
         },
-        .list => try validatePathsFrom(raw, remaining, walk),
-    }
-}
-
-fn validateHashChild(hash: *const [32]u8, remaining: usize, walk: *const PathWalk) MptError!void {
-    if (!walk.filter.mayContain(hash)) return;
-    if (findNodeInIndex(walk.index, hash.*)) |child_rlp| try validatePathsFrom(child_rlp, remaining, walk);
+        .list => raw,
+    };
 }
 
 /// Number of nibbles in a hex-prefix (compact) path, without decoding it.

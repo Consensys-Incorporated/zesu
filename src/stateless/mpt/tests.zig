@@ -683,7 +683,7 @@ test "validateSecuredTriePaths: leaves ending at the key length pass" {
     defer arena.deinit();
     var index = NodeIndex.init(arena.allocator());
     const root = try buildPathTestTrie(arena.allocator(), &index, 63, 63);
-    try mpt.validateSecuredTriePaths(root, &index, try mpt.NodeFilter.init(arena.allocator(), &index));
+    try mpt.validateSecuredTriePaths(root, &index, &try mpt.PathCheck.init(arena.allocator(), &index));
 }
 
 // The reference checks only that a branch has key nibbles left, not its value slot: a
@@ -702,7 +702,7 @@ test "validateSecuredTriePaths: a branch value is not checked" {
     }
     const root = try updEncodeBranch(alloc, &enc, "branch-value");
     try index.put(keccak256(root), root);
-    try mpt.validateSecuredTriePaths(keccak256(root), &index, try mpt.NodeFilter.init(arena.allocator(), &index));
+    try mpt.validateSecuredTriePaths(keccak256(root), &index, &try mpt.PathCheck.init(arena.allocator(), &index));
 }
 
 test "validateSecuredTriePaths: a leaf past or short of the key length is rejected" {
@@ -711,7 +711,7 @@ test "validateSecuredTriePaths: a leaf past or short of the key length is reject
     for ([_]usize{ 64, 66, 62 }) |len| {
         var index = NodeIndex.init(arena.allocator());
         const root = try buildPathTestTrie(arena.allocator(), &index, 63, len);
-        try std.testing.expectError(error.InvalidProof, mpt.validateSecuredTriePaths(root, &index, try mpt.NodeFilter.init(arena.allocator(), &index)));
+        try std.testing.expectError(error.InvalidProof, mpt.validateSecuredTriePaths(root, &index, &try mpt.PathCheck.init(arena.allocator(), &index)));
     }
 }
 
@@ -724,7 +724,7 @@ test "validateSecuredTriePaths: an extension reaching the key length is rejected
     const path: [64]u8 = @splat(0);
     const ext = try updMakeExtension(alloc, &path, try updRlpBytes(alloc, &branch_hash));
     try index.put(keccak256(ext), ext);
-    try std.testing.expectError(error.InvalidProof, mpt.validateSecuredTriePaths(keccak256(ext), &index, try mpt.NodeFilter.init(arena.allocator(), &index)));
+    try std.testing.expectError(error.InvalidProof, mpt.validateSecuredTriePaths(keccak256(ext), &index, &try mpt.PathCheck.init(arena.allocator(), &index)));
 }
 
 test "validateSecuredTriePaths: nodes absent from the witness are not walked" {
@@ -736,8 +736,8 @@ test "validateSecuredTriePaths: nodes absent from the witness are not walked" {
     // Drop the over-length leaf: only its hash remains, in the root.
     const leaf = try updMakeLeaf(alloc, &(@as([66]u8, @splat(0))), "value");
     try std.testing.expect(index.remove(keccak256(leaf)));
-    try mpt.validateSecuredTriePaths(root, &index, try mpt.NodeFilter.init(arena.allocator(), &index));
+    try mpt.validateSecuredTriePaths(root, &index, &try mpt.PathCheck.init(arena.allocator(), &index));
     // An empty root, or a root absent from the witness, has nothing to walk.
-    try mpt.validateSecuredTriePaths(EMPTY_TRIE_HASH, &index, try mpt.NodeFilter.init(arena.allocator(), &index));
-    try mpt.validateSecuredTriePaths(@splat(0x11), &index, try mpt.NodeFilter.init(arena.allocator(), &index));
+    try mpt.validateSecuredTriePaths(EMPTY_TRIE_HASH, &index, &try mpt.PathCheck.init(arena.allocator(), &index));
+    try mpt.validateSecuredTriePaths(@splat(0x11), &index, &try mpt.PathCheck.init(arena.allocator(), &index));
 }
