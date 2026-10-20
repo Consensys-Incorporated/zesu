@@ -662,3 +662,62 @@ test "batchUpdateIndexed: sequential inserts descend into nodes the same batch c
     for (&kv, &keys) |*e, *k| e.* = .{ .key = k, .value = &value };
     try std.testing.expectEqual(try builder.trieRoot(alloc, &kv), got);
 }
+
+/// A branch at the root whose children 1 and 2 are leaves with paths of `len_1` and
+/// `len_2` nibbles; a valid secured trie has 63 for both. Returns the root hash.
+fn buildPathTestTrie(alloc: std.mem.Allocator, index: *NodeIndex, len_1: usize, len_2: usize) ![32]u8 {
+    const path: [70]u8 = @splat(0);
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    for ([_]struct { u8, usize }{ .{ 1, len_1 }, .{ 2, len_2 } }) |c| {
+        const leaf = try updMakeLeaf(alloc, path[0..c[1]], "value");
+        try index.put(keccak256(leaf), leaf);
+        enc[c[0]] = try updHashOrEmbed(alloc, leaf);
+    }
+    const root = try updEncodeBranch(alloc, &enc, &.{});
+    try index.put(keccak256(root), root);
+    return keccak256(root);
+}
+
+test "validateSecuredTriePaths: leaves ending at the key length pass" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var index = NodeIndex.init(arena.allocator());
+    try mpt.validateSecuredTriePaths(try buildPathTestTrie(arena.allocator(), &index, 63, 63), &index);
+}
+
+test "validateSecuredTriePaths: a leaf past or short of the key length is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]usize{ 64, 66, 62 }) |len| {
+        var index = NodeIndex.init(arena.allocator());
+        const root = try buildPathTestTrie(arena.allocator(), &index, 63, len);
+        try std.testing.expectError(error.InvalidProof, mpt.validateSecuredTriePaths(root, &index));
+    }
+}
+
+test "validateSecuredTriePaths: an extension reaching the key length is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const branch_hash = try buildPathTestTrie(alloc, &index, 0, 0);
+    const path: [64]u8 = @splat(0);
+    const ext = try updMakeExtension(alloc, &path, try updRlpBytes(alloc, &branch_hash));
+    try index.put(keccak256(ext), ext);
+    try std.testing.expectError(error.InvalidProof, mpt.validateSecuredTriePaths(keccak256(ext), &index));
+}
+
+test "validateSecuredTriePaths: nodes absent from the witness are not walked" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const root = try buildPathTestTrie(alloc, &index, 63, 66);
+    // Drop the over-length leaf: only its hash remains, in the root.
+    const leaf = try updMakeLeaf(alloc, &(@as([66]u8, @splat(0))), "value");
+    try std.testing.expect(index.remove(keccak256(leaf)));
+    try mpt.validateSecuredTriePaths(root, &index);
+    // An empty root, or a root absent from the witness, has nothing to walk.
+    try mpt.validateSecuredTriePaths(EMPTY_TRIE_HASH, &index);
+    try mpt.validateSecuredTriePaths(@splat(0x11), &index);
+}

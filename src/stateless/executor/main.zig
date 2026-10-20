@@ -207,6 +207,8 @@ pub fn executeBlockStateless(
     const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals), parent_header, spec);
     try block_validation.validateBlock(env, spec);
     const txs = try tx_decode.decodeTxsFromInput(alloc, ep.transactions);
+    // The reference decodes, and so checks, the whole witness state trie for every block.
+    mpt.validateSecuredTriePaths(pre_state_root, node_index) catch return error.InvalidWitness;
 
     var ctx = context_mod.Context(db_mod.WitnessDatabase).new(
         try db_mod.WitnessDatabase.init(alloc, node_index, pre_state_root, witness_codes, block_hashes),

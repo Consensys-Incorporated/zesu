@@ -89,6 +89,51 @@ const NodeView = struct {
     }
 };
 
+// ─── validateSecuredTriePaths ──────────────────────────────────────────────────
+
+/// Nibbles in a secured-trie key: the keccak256 of an address or storage slot.
+const SECURED_KEY_NIBBLES = 64;
+
+/// Rejects a secured (state or storage) trie whose witness nodes, walked from `root`,
+/// hold a path that does not end at exactly 64 nibbles: a leaf that ends early or late,
+/// an extension that reaches the key length, or a branch at it. Children absent from
+/// `index` are not walked. Mirrors the reference's `_validate_secured_trie_paths`, run on
+/// every trie it decodes from the witness, including nodes no lookup reaches.
+pub fn validateSecuredTriePaths(root: primitives.Hash, index: *const NodeIndex) MptError!void {
+    if (std.mem.eql(u8, &root, &EMPTY_TRIE_HASH)) return;
+    const root_rlp = findNodeInIndex(index, root) orelse return;
+    try validatePathsFrom(root_rlp, SECURED_KEY_NIBBLES, index);
+}
+
+fn validatePathsFrom(node_rlp: []const u8, remaining: usize, index: *const NodeIndex) MptError!void {
+    switch (try node.decodeNode(node_rlp)) {
+        .leaf => |lf| if (try hpNibbleLen(lf.key_end) != remaining) return error.InvalidProof,
+        .extension => |e| {
+            const len = try hpNibbleLen(e.prefix);
+            if (len >= remaining) return error.InvalidProof;
+            try validateChildPaths(e.child, remaining - len, index);
+        },
+        .branch => |b| {
+            if (remaining == 0) return error.InvalidProof;
+            for (b.children) |child| try validateChildPaths(child, remaining - 1, index);
+        },
+    }
+}
+
+fn validateChildPaths(ref: node.NodeRef, remaining: usize, index: *const NodeIndex) MptError!void {
+    switch (ref) {
+        .empty => {},
+        .hash => |h| if (findNodeInIndex(index, h.*)) |child_rlp| try validatePathsFrom(child_rlp, remaining, index),
+        .inline_node => |child_rlp| try validatePathsFrom(child_rlp, remaining, index),
+    }
+}
+
+/// Number of nibbles in a hex-prefix (compact) path, without decoding it.
+fn hpNibbleLen(hp: []const u8) MptError!usize {
+    if (hp.len == 0 or hp[0] >> 4 > 3) return error.InvalidHp;
+    return 2 * (hp.len - 1) + (hp[0] >> 4 & 1);
+}
+
 // ─── findNode ──────────────────────────────────────────────────────────────────
 
 /// Linear scan of the node pool for an entry whose keccak256 equals `hash`.
