@@ -140,6 +140,76 @@ test "a system contract absent from the witness marks the block invalid" {
     try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
 }
 
+// A witness that proves every account (any other address as absent) and the
+// recipient's delegation designator, but not the code of the delegate it points to
+// unless `delegate_code_known`.
+const DelegationWitnessDb = struct {
+    delegate_code_known: bool,
+
+    const DELEGATE: input.Address = @splat(0x55);
+    const DESIGNATOR_HASH: primitives.Hash = @splat(0xd1);
+    const DELEGATE_CODE_HASH: primitives.Hash = @splat(0xd2);
+
+    pub fn basic(_: *@This(), address: input.Address) !?state_mod.AccountInfo {
+        var info = state_mod.AccountInfo.default();
+        if (std.mem.eql(u8, &address, &TEST_SENDER) or std.mem.eql(u8, &address, &TEST_COINBASE)) {
+            info.balance = 1_000_000_000_000;
+        } else if (std.mem.eql(u8, &address, &TEST_RECIPIENT)) {
+            info.code_hash = DESIGNATOR_HASH;
+            info.code = null; // loaded through codeByHash, as WitnessDatabase does
+        } else if (std.mem.eql(u8, &address, &DELEGATE)) {
+            info.code_hash = DELEGATE_CODE_HASH;
+            info.code = null;
+        } else return null;
+        return info;
+    }
+
+    pub fn codeByHash(self: *@This(), code_hash: primitives.Hash) !bytecode_mod.Bytecode {
+        if (std.mem.eql(u8, &code_hash, &DESIGNATOR_HASH)) {
+            return .{ .eip7702 = bytecode_mod.Eip7702Bytecode.new(DELEGATE) };
+        }
+        if (std.mem.eql(u8, &code_hash, &DELEGATE_CODE_HASH) and self.delegate_code_known) {
+            return bytecode_mod.Bytecode.newLegacy(&.{0x00}); // STOP
+        }
+        return error.InvalidWitness;
+    }
+
+    pub fn storage(_: *@This(), _: primitives.Address, _: primitives.StorageKey) !primitives.StorageValue {
+        return 0;
+    }
+
+    pub fn blockHash(_: *@This(), _: u64) !primitives.Hash {
+        return @splat(0);
+    }
+};
+
+fn runDelegatedCall(delegate_code_known: bool) !context_mod.ContextError {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var txs = [_]input.TxInput{.{
+        .from = TEST_SENDER,
+        .to = TEST_RECIPIENT,
+        .nonce = 0,
+        .gas = 100_000,
+        .gas_price = 1,
+    }};
+    var ctx = context_mod.Context(DelegationWitnessDb).new(.{ .delegate_code_known = delegate_code_known }, primitives.SpecId.prague);
+    const pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) = .{};
+    _ = transitionWithContext(arena_state.allocator(), &ctx, pre_alloc, testEnv(), &txs, primitives.SpecId.prague, 1, SystemContracts.forChainId(1), 0) catch {};
+    return ctx.ctx_error;
+}
+
+// A STOP delegate run as empty code gives the same result, so only the witness
+// check can reject the block.
+test "a transaction to a delegated account whose delegate code is absent from the witness marks the block invalid" {
+    try std.testing.expectEqual(context_mod.ContextError.database_error, try runDelegatedCall(false));
+}
+
+test "a transaction to a delegated account whose delegate code is in the witness is not marked invalid" {
+    try std.testing.expectEqual(context_mod.ContextError.ok, try runDelegatedCall(true));
+}
+
 fn depositReceipt(log: *input.Log) input.Receipt {
     return .{
         .type = 2,
