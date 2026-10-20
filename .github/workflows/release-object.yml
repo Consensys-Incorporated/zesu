@@ -17,13 +17,14 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
+permissions: {} # lock everything by default (least-privilege)
 
 jobs:
   build-and-release:
     name: Build guest objects and create draft release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # least-privilege for this job only
 
     steps:
       - name: Checkout

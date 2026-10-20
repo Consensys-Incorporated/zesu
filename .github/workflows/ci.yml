@@ -6,10 +6,14 @@ on:
   pull_request:
     branches: [ main, develop ]
 
+permissions: {} # lock everything by default (least-privilege)
+
 jobs:
   build-and-test:
     name: Build and Test
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read  # least-privilege for this job only
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -58,6 +62,8 @@ jobs:
   zkevm-tests:
     name: zkEVM Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read  # least-privilege for this job only
     strategy:
       matrix:
         zig-version: ['0.16.0']
@@ -94,6 +100,8 @@ jobs:
   blockchain-tests:
     name: Blockchain Tests (${{ matrix.suite }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read  # least-privilege for this job only
     strategy:
       fail-fast: false
       matrix:
@@ -149,6 +157,8 @@ jobs:
   guest-zisk:
     name: ZisK Guest Vectors
     runs-on: ubuntu-latest
+    permissions:
+      contents: read  # least-privilege for this job only
     env:
       # zesu-zkvm commit supplying the linker script, host object and vectors.
       # Bump when the guest ABI or memory map changes. The ZisK version is read
@@ -262,6 +272,8 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read  # least-privilege for this job only
 
     steps:
       - name: Checkout code
