@@ -74,7 +74,7 @@ fn runTestBlock(arena: std.mem.Allocator, ctx: anytype, txs: []input.TxInput) !T
     );
 }
 
-// Integration counterpart to the unit tests in db/test.zig and host_tests.zig:
+// Integration counterpart to the unit tests in db/tests.zig and host_tests.zig:
 // those prove the database error is raised and that setupCreate marks ctx_error,
 // this proves it survives a whole block execution -- the block is rejected
 // rather than completing as if the CREATE legitimately failed.

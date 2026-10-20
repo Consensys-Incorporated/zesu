@@ -107,7 +107,7 @@ fn finalizeOutput(
     alloc: std.mem.Allocator,
     pre_state_root: [32]u8,
     result: transition_mod.TransitionResult,
-    node_index: *mpt.NodeIndex,
+    node_index: *const mpt.NodeIndex,
     spec: primitives.SpecId,
     witness_db: anytype,
 ) !output.ProofOutput {
@@ -185,7 +185,7 @@ pub fn executeBlockFromAlloc(
 pub fn executeBlockStateless(
     alloc: std.mem.Allocator,
     pre_state_root: [32]u8,
-    node_index: *mpt.NodeIndex,
+    node_index: *const mpt.NodeIndex,
     req: input.NewPayloadRequest,
     witness_codes: []const []const u8,
     block_hashes: []types.BlockHashEntry,
