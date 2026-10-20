@@ -1,9 +1,9 @@
 //! WitnessDatabase: stateless EVM database backed by a pre-built MPT NodeIndex.
 //!
 //! Serves account/storage reads via live MPT proof verification (O(log n) per read
-//! via NodeIndex O(1) node lookups). Contract bytecodes are served from two sources:
-//! the witness codes pool (linear scan over a bounded set) and the deployed_codes map
-//! (O(1) lookup for bytecodes produced by CREATE during the current block).
+//! via NodeIndex O(1) node lookups). Contract bytecodes live in one mutable hash → bytes
+//! map: seeded from the witness codes at init, extended by the journal with code the block
+//! itself writes (CREATE, EIP-7702 delegations).
 //!
 //! Used directly as the DB type in Context(WitnessDatabase):
 //!   var ctx = context.Context(WitnessDatabase).new(witness_db, spec);
@@ -46,12 +46,16 @@ const EMPTY_TRIE_HASH: primitives.Hash = .{
 pub const WitnessDatabase = struct {
     node_index: *const mpt.NodeIndex,
     pre_state_root: primitives.Hash,
-    /// Witness bytecodes indexed by keccak256(code) for O(1) lookup.
-    witness_codes: std.HashMap(primitives.Hash, []const u8, primitives.HashContext, 80),
+    /// All known bytecodes by keccak256(code). Witness entries borrow the input slices;
+    /// in-block entries are copied and listed in `owned_codes`. Content addressing means an entry
+    /// never changes, so adding one needs no revert handling.
+    /// EIP-8025: the verifier derives in-block code from execution, so it need not be in the witness.
+    codes: std.HashMap(primitives.Hash, []const u8, primitives.HashContext, 80),
+    /// Copies backing the in-block entries, freed in deinit. Not an arena: ArenaAllocator
+    /// crashes the zkvm guest's freestanding allocator (ZisK vector, Sepolia 11856500).
+    owned_codes: std.ArrayList([]u8) = .empty,
+    alloc: std.mem.Allocator,
     block_hashes: []const types.BlockHashEntry,
-    /// Bytecodes deployed by CREATE in the current block, keyed by code hash.
-    /// EIP-8025: verifier derives these from execution, so they need not be in the witness.
-    deployed_codes: std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80),
     /// Cache of address → pre-state account (storage root, nonce, balance, code hash),
     /// populated by basic() and storage() during execution. Eliminates redundant account
     /// trie walks in storage() and in the post-execution batch update (storageRootFor), and
@@ -106,48 +110,40 @@ pub const WitnessDatabase = struct {
         codes: []const []const u8,
         block_hashes: []const types.BlockHashEntry,
     ) !Self {
-        var witness_codes = std.HashMap(primitives.Hash, []const u8, primitives.HashContext, 80).init(alloc);
-        try witness_codes.ensureTotalCapacity(@intCast(codes.len));
+        var codes_map = std.HashMap(primitives.Hash, []const u8, primitives.HashContext, 80).init(alloc);
+        try codes_map.ensureTotalCapacity(@intCast(codes.len));
         for (codes) |code_bytes| {
             const h = mpt.keccak256(code_bytes);
-            try witness_codes.put(h, code_bytes);
+            try codes_map.put(h, code_bytes);
         }
         return .{
             .node_index = node_index,
             .pre_state_root = pre_state_root,
-            .witness_codes = witness_codes,
+            .codes = codes_map,
+            .alloc = alloc,
             .block_hashes = block_hashes,
-            .deployed_codes = std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80).init(alloc),
             .original_accounts = std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80).init(alloc),
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.witness_codes.deinit();
-        var bc_it = self.deployed_codes.valueIterator();
-        while (bc_it.next()) |bc| bc.deinit();
-        self.deployed_codes.deinit();
+        self.codes.deinit();
+        for (self.owned_codes.items) |c| self.alloc.free(c);
+        self.owned_codes.deinit(self.alloc);
         self.original_accounts.deinit();
     }
 
-    /// Called by the journal to register code the block itself writes: bytecodes deployed
-    /// by CREATE (after each committed transaction) and EIP-7702 delegation designators
-    /// (when set). Allows codeByHash to serve them without requiring them in the witness
-    /// (EIP-8025: the verifier derives them from execution), including to another account
-    /// whose code has the same hash.
-    pub fn notifyCodeDeployed(self: *Self, code_hash: primitives.Hash, code: bytecode.Bytecode) void {
-        // getOrPut avoids two pitfalls from a naive newLegacy + put sequence:
-        //   1. duplicate hash (same bytecode deployed at two addresses): put would
-        //      overwrite the existing entry without deinitting its jump table → leak.
-        //   2. put OOM after newLegacy already allocated: the new jump table is
-        //      abandoned with no way to free it → leak.
-        // Same hash ⟹ same bytecode content, so the existing entry is always correct.
+    /// Called by the journal for every code write (CREATE, EIP-7702 delegations), so
+    /// codeByHash can serve it without requiring it in the witness, including to another
+    /// account whose code has the same hash. Callers skip empty code.
+    pub fn notifyCodeDeployed(self: *Self, code_hash: primitives.Hash, code: []const u8) void {
+        // Same hash ⟹ same bytes, so an existing entry is always correct.
         // OOM panics rather than propagates: see basic()'s comment below for why.
-        const gop = self.deployed_codes.getOrPut(code_hash) catch @panic("out of memory");
+        const gop = self.codes.getOrPut(code_hash) catch @panic("out of memory");
         if (!gop.found_existing) {
-            // A designator keeps its type, as codeByHash returns it for witness codes, so
-            // callers that test isEip7702() (sender checks, CALL resolution) still see one.
-            gop.value_ptr.* = if (code == .eip7702) code else bytecode.Bytecode.newLegacy(code.originalBytes());
+            const copy = self.alloc.dupe(u8, code) catch @panic("out of memory");
+            self.owned_codes.append(self.alloc, copy) catch @panic("out of memory");
+            gop.value_ptr.* = copy;
         }
     }
 
@@ -198,18 +194,15 @@ pub const WitnessDatabase = struct {
         if (std.mem.eql(u8, &code_hash, &primitives.KECCAK_EMPTY)) {
             return bytecode.Bytecode.newLegacy(&.{});
         }
-        if (self.witness_codes.get(code_hash)) |code_bytes| {
-            // Detect EIP-7702 delegation pointer: 0xEF 0x01 0x00 + 20-byte address (23 bytes total).
-            // Must return Bytecode.eip7702 so that setupCall detects it and loads the delegation target.
-            if (code_bytes.len == 23 and code_bytes[0] == 0xEF and code_bytes[1] == 0x01 and code_bytes[2] == 0x00) {
-                var delegation_addr: primitives.Address = [_]u8{0} ** 20;
-                @memcpy(&delegation_addr, code_bytes[3..23]);
-                return bytecode.Bytecode{ .eip7702 = bytecode.Eip7702Bytecode.new(delegation_addr) };
-            }
-            return bytecode.Bytecode.newLegacy(code_bytes);
+        const code_bytes = self.codes.get(code_hash) orelse return DbError.InvalidWitness;
+        // Detect EIP-7702 delegation pointer: 0xEF 0x01 0x00 + 20-byte address (23 bytes total).
+        // Must return Bytecode.eip7702 so that setupCall detects it and loads the delegation target.
+        if (code_bytes.len == 23 and code_bytes[0] == 0xEF and code_bytes[1] == 0x01 and code_bytes[2] == 0x00) {
+            var delegation_addr: primitives.Address = [_]u8{0} ** 20;
+            @memcpy(&delegation_addr, code_bytes[3..23]);
+            return bytecode.Bytecode{ .eip7702 = bytecode.Eip7702Bytecode.new(delegation_addr) };
         }
-        if (self.deployed_codes.get(code_hash)) |code| return code;
-        return DbError.InvalidWitness;
+        return bytecode.Bytecode.newLegacy(code_bytes);
     }
 
     // ── storage ─────────────────────────────────────────────────────────────
