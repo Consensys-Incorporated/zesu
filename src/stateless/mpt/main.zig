@@ -78,6 +78,192 @@ fn findNodeInIndex(index: *const NodeIndex, hash: primitives.Hash) ?[]const u8 {
     return index.get(hash);
 }
 
+// ─── validateSecuredTriePaths ──────────────────────────────────────────────────
+
+/// Nibbles in a secured-trie key: the keccak256 of an address or storage slot.
+const SECURED_KEY_NIBBLES = 64;
+
+/// What validateSecuredTriePaths needs besides the index, built once per block: a byte map
+/// over the index's keys, indexed by hash bytes 8..16 (the index's own hash reads bytes
+/// 0..8), and the walk's stack. Most child hashes the walk meets are not in the witness,
+/// and a miss in the index probes several slots; the map answers most of them in one load.
+pub const PathCheck = struct {
+    present: []u8,
+    mask: u64,
+    stack: []Pending,
+
+    /// A node still to walk, with the key nibbles left below it.
+    const Pending = struct { ptr: [*]const u8, len: u32, remaining: u32 };
+
+    /// Each branch level leaves at most 15 siblings pending, and a branch needs a nibble
+    /// left, so 64 levels of 15 plus the 16 children of the deepest fit.
+    const stack_len = 15 * SECURED_KEY_NIBBLES + 16;
+
+    /// At least 32 entries per node, so about 3% of absent hashes still reach the index.
+    pub fn init(alloc: std.mem.Allocator, index: *const NodeIndex) error{OutOfMemory}!PathCheck {
+        var len: usize = 64;
+        while (len < 32 * index.count()) len <<= 1;
+        const present = try alloc.alloc(u8, len);
+        errdefer alloc.free(present);
+        @memset(present, 0);
+        const check: PathCheck = .{ .present = present, .mask = len - 1, .stack = try alloc.alloc(Pending, stack_len) };
+        var it = index.keyIterator();
+        while (it.next()) |key| present[check.slot(key)] = 1;
+        return check;
+    }
+
+    pub fn deinit(self: PathCheck, alloc: std.mem.Allocator) void {
+        alloc.free(self.stack);
+        alloc.free(self.present);
+    }
+
+    fn slot(self: PathCheck, hash: *const [32]u8) usize {
+        return std.mem.readInt(u64, hash[8..16], .little) & self.mask;
+    }
+
+    fn mayContain(self: PathCheck, hash: *const [32]u8) bool {
+        return self.present[self.slot(hash)] != 0;
+    }
+};
+
+/// Rejects a secured (state or storage) trie whose witness nodes, walked from `root`,
+/// hold a path that does not end at exactly 64 nibbles: a leaf that ends early or late,
+/// an extension that reaches the key length, or a branch at it. Children absent from
+/// `index` are not walked. Mirrors the reference's `_validate_secured_trie_paths`, run on
+/// every trie it decodes from the witness, including nodes no lookup reaches.
+/// `check` must be built from `index`.
+///
+/// Nodes are scanned in place rather than through node.decodeNode, and walked from a stack
+/// rather than by recursion: the walk visits every witness node, and most branch slots are
+/// an empty string or a 32-byte hash, which the scan reads directly. Malformed nodes fail
+/// as decodeNode would.
+pub fn validateSecuredTriePaths(root: primitives.Hash, index: *const NodeIndex, check: *const PathCheck) MptError!void {
+    if (std.mem.eql(u8, &root, &EMPTY_TRIE_HASH)) return;
+    const root_rlp = findNodeInIndex(index, root) orelse return;
+    // Stack writes keep the compiler from proving `check` unchanged, so read it once.
+    const stack = check.stack;
+    const present = check.present.ptr;
+    const mask = check.mask;
+    stack[0] = .{ .ptr = root_rlp.ptr, .len = @intCast(root_rlp.len), .remaining = SECURED_KEY_NIBBLES };
+    var top: usize = 1;
+    while (top > 0) {
+        top -= 1;
+        const node_rlp = stack[top].ptr[0..stack[top].len];
+        const remaining = stack[top].remaining;
+
+        // A branch is almost always a long list with a two-byte length.
+        var rest = if (node_rlp.len >= 3 and node_rlp[0] == 0xf9 and
+            3 + (@as(usize, node_rlp[1]) << 8 | node_rlp[2]) <= node_rlp.len)
+            node_rlp[3..][0 .. @as(usize, node_rlp[1]) << 8 | node_rlp[2]]
+        else switch ((try rlp.decodeItem(node_rlp)).item) {
+            .list => |payload| payload,
+            .bytes => return error.InvalidNode,
+        };
+
+        // A leaf or extension has exactly two items: a hex-prefix path and a value or child.
+        const len_0 = try itemLen(rest);
+        if (rest.len == len_0 + try itemLen(rest[len_0..])) {
+            const path = if (rest[0] < 0x80)
+                rest[0..1]
+            else if (rest[0] <= 0xb7)
+                rest[1..len_0]
+            else switch ((try rlp.decodeItem(rest)).item) {
+                .bytes => |b| b,
+                .list => return error.InvalidNode,
+            };
+            if (path.len == 0) return error.InvalidNode;
+            const len = try hpNibbleLen(path);
+            if (path[0] & 0x20 != 0) {
+                if (len != remaining) return error.InvalidProof;
+                continue;
+            }
+            if (len >= remaining) return error.InvalidProof;
+            const child_raw = rest[len_0..];
+            if (childNode((try rlp.decodeItem(child_raw)).item, child_raw, index, check)) |child|
+                top = try push(stack, top, child, remaining - @as(u32, @intCast(len)));
+            continue;
+        }
+
+        // Branch: 16 children and a value, which is not checked.
+        if (remaining == 0) return error.InvalidProof;
+        // Most branch slots in a witness sit in branches with 16 hashed children: read
+        // those at fixed offsets, and fall back to the scan below for any other layout.
+        if (rest.len == 16 * 33 + 1 and rest[16 * 33] == 0x80) full: {
+            const pending = top;
+            inline for (0..16) |i| {
+                if (rest[33 * i] != 0xa0) {
+                    top = pending;
+                    break :full;
+                }
+                if (present[std.mem.readInt(u64, rest[33 * i + 9 ..][0..8], .little) & mask] != 0)
+                    top = try pushIndexed(stack, top, index, rest[33 * i + 1 ..][0..32], remaining - 1);
+            }
+            continue;
+        }
+        for (0..16) |_| {
+            if (rest.len == 0) return error.InvalidNode;
+            if (rest[0] == 0x80) {
+                rest = rest[1..];
+            } else if (rest[0] == 0xa0 and rest.len >= 33) {
+                if (present[std.mem.readInt(u64, rest[9..17], .little) & mask] != 0) {
+                    if (findNodeInIndex(index, rest[1..33].*)) |child| top = try push(stack, top, child, remaining - 1);
+                }
+                rest = rest[33..];
+            } else {
+                const item = try rlp.decodeItem(rest);
+                if (childNode(item.item, rest[0..item.consumed], index, check)) |child| top = try push(stack, top, child, remaining - 1);
+                rest = rest[item.consumed..];
+            }
+        }
+        if (rest.len == 1 and rest[0] == 0x80) continue;
+        if (rest.len == 0 or (try rlp.decodeItem(rest)).consumed != rest.len) return error.InvalidNode;
+    }
+}
+
+/// Pushes the witness node with this hash, if any. Out of line so that the 16 unrolled
+/// slots of a full branch stay small.
+noinline fn pushIndexed(stack: []PathCheck.Pending, top: usize, index: *const NodeIndex, hash: *const [32]u8, remaining: u32) MptError!usize {
+    return push(stack, top, findNodeInIndex(index, hash.*) orelse return top, remaining);
+}
+
+inline fn push(stack: []PathCheck.Pending, top: usize, node_rlp: []const u8, remaining: u32) MptError!usize {
+    if (top == stack.len) return error.InvalidNode; // unreachable: see PathCheck.stack_len
+    stack[top] = .{ .ptr = node_rlp.ptr, .len = @intCast(node_rlp.len), .remaining = remaining };
+    return top + 1;
+}
+
+/// Length of the RLP item at the start of `bytes`, reading a single byte and a short
+/// string inline: these cover branch slots, paths and storage values.
+inline fn itemLen(bytes: []const u8) MptError!usize {
+    if (bytes.len == 0) return error.InvalidNode;
+    if (bytes[0] < 0x80) return 1;
+    if (bytes[0] <= 0xb7) {
+        const len = 1 + @as(usize, bytes[0] - 0x80);
+        if (len > bytes.len) return error.InvalidRlp;
+        return len;
+    }
+    return (try rlp.decodeItem(bytes)).consumed;
+}
+
+/// The node a child slot refers to, reading the slot as node.decodeNodeRef does, or null
+/// when the slot is empty or the witness lacks the node.
+fn childNode(item: rlp.RlpItem, raw: []const u8, index: *const NodeIndex, check: *const PathCheck) ?[]const u8 {
+    return switch (item) {
+        .bytes => |b| switch (b.len) {
+            0 => null,
+            32 => if (check.mayContain(b[0..32])) findNodeInIndex(index, b[0..32].*) else null,
+            else => b,
+        },
+        .list => raw,
+    };
+}
+
+/// Number of nibbles in a hex-prefix (compact) path, without decoding it.
+fn hpNibbleLen(hp: []const u8) MptError!usize {
+    if (hp.len == 0 or hp[0] >> 4 > 3) return error.InvalidHp;
+    return 2 * (hp.len - 1) + (hp[0] >> 4 & 1);
+}
+
 // ─── findNode ──────────────────────────────────────────────────────────────────
 
 /// Linear scan of the node pool for an entry whose keccak256 equals `hash`.
@@ -2036,4 +2222,83 @@ fn updRlpList(alloc: std.mem.Allocator, items: []const []const u8) ![]u8 {
         pos += item.len;
     }
     return out;
+}
+
+/// A branch at the root whose children 1 and 2 are leaves with paths of `len_1` and
+/// `len_2` nibbles; a valid secured trie has 63 for both. Returns the root hash.
+fn buildPathTestTrie(alloc: std.mem.Allocator, index: *NodeIndex, len_1: usize, len_2: usize) ![32]u8 {
+    const path: [70]u8 = @splat(0);
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    for ([_]struct { u8, usize }{ .{ 1, len_1 }, .{ 2, len_2 } }) |c| {
+        const leaf = try updMakeLeaf(alloc, path[0..c[1]], "value");
+        try index.put(keccak256(leaf), leaf);
+        enc[c[0]] = try updHashOrEmbed(alloc, leaf);
+    }
+    const root = try updEncodeBranch(alloc, &enc, &.{});
+    try index.put(keccak256(root), root);
+    return keccak256(root);
+}
+
+test "validateSecuredTriePaths: leaves ending at the key length pass" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var index = NodeIndex.init(arena.allocator());
+    const root = try buildPathTestTrie(arena.allocator(), &index, 63, 63);
+    try validateSecuredTriePaths(root, &index, &try PathCheck.init(arena.allocator(), &index));
+}
+
+// The reference checks only that a branch has key nibbles left, not its value slot: a
+// 64-nibble lookup always descends into a child, so the value is never read.
+test "validateSecuredTriePaths: a branch value is not checked" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const path: [63]u8 = @splat(0);
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    for ([_]u8{ 1, 2 }) |nib| {
+        const leaf = try updMakeLeaf(alloc, &path, "value");
+        try index.put(keccak256(leaf), leaf);
+        enc[nib] = try updHashOrEmbed(alloc, leaf);
+    }
+    const root = try updEncodeBranch(alloc, &enc, "branch-value");
+    try index.put(keccak256(root), root);
+    try validateSecuredTriePaths(keccak256(root), &index, &try PathCheck.init(arena.allocator(), &index));
+}
+
+test "validateSecuredTriePaths: a leaf past or short of the key length is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]usize{ 64, 66, 62 }) |len| {
+        var index = NodeIndex.init(arena.allocator());
+        const root = try buildPathTestTrie(arena.allocator(), &index, 63, len);
+        try std.testing.expectError(error.InvalidProof, validateSecuredTriePaths(root, &index, &try PathCheck.init(arena.allocator(), &index)));
+    }
+}
+
+test "validateSecuredTriePaths: an extension reaching the key length is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const branch_hash = try buildPathTestTrie(alloc, &index, 0, 0);
+    const path: [64]u8 = @splat(0);
+    const ext = try updMakeExtension(alloc, &path, try updRlpBytes(alloc, &branch_hash));
+    try index.put(keccak256(ext), ext);
+    try std.testing.expectError(error.InvalidProof, validateSecuredTriePaths(keccak256(ext), &index, &try PathCheck.init(arena.allocator(), &index)));
+}
+
+test "validateSecuredTriePaths: nodes absent from the witness are not walked" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const root = try buildPathTestTrie(alloc, &index, 63, 66);
+    // Drop the over-length leaf: only its hash remains, in the root.
+    const leaf = try updMakeLeaf(alloc, &(@as([66]u8, @splat(0))), "value");
+    try std.testing.expect(index.remove(keccak256(leaf)));
+    try validateSecuredTriePaths(root, &index, &try PathCheck.init(arena.allocator(), &index));
+    // An empty root, or a root absent from the witness, has nothing to walk.
+    try validateSecuredTriePaths(EMPTY_TRIE_HASH, &index, &try PathCheck.init(arena.allocator(), &index));
+    try validateSecuredTriePaths(@splat(0x11), &index, &try PathCheck.init(arena.allocator(), &index));
 }
