@@ -58,9 +58,12 @@ pub const WitnessDatabase = struct {
     /// lets that update skip accounts the block left unchanged (originalAccount). Accounts
     /// absent from pre-state are cached with exists = false and EMPTY_TRIE_HASH.
     original_accounts: std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80),
-    /// Storage roots whose witness trie has passed mpt.validateSecuredTriePaths, so each
-    /// trie the block reads is walked once.
+    /// Filter over `node_index` for mpt.validateSecuredTriePaths.
+    node_filter: mpt.NodeFilter,
+    /// Storage roots whose witness trie has passed checkTriePaths, so each trie the
+    /// block reads is walked once.
     checked_storage_roots: std.HashMap(primitives.Hash, void, primitives.HashContext, 80),
+    alloc: std.mem.Allocator,
     /// Set only while a system call runs. Its origin is SYSTEM_ADDRESS, whose account the
     /// reference never reads, so a missing proof for it is accepted only then.
     system_call_origin: bool = false,
@@ -122,7 +125,9 @@ pub const WitnessDatabase = struct {
             .block_hashes = block_hashes,
             .deployed_codes = std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80).init(alloc),
             .original_accounts = std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80).init(alloc),
+            .node_filter = try mpt.NodeFilter.init(alloc, node_index),
             .checked_storage_roots = std.HashMap(primitives.Hash, void, primitives.HashContext, 80).init(alloc),
+            .alloc = alloc,
         };
     }
 
@@ -132,7 +137,14 @@ pub const WitnessDatabase = struct {
         while (bc_it.next()) |bc| bc.deinit();
         self.deployed_codes.deinit();
         self.original_accounts.deinit();
+        self.node_filter.deinit(self.alloc);
         self.checked_storage_roots.deinit();
+    }
+
+    /// Rejects a witness trie under `root` whose paths do not end at the 64-nibble key
+    /// length (see mpt.validateSecuredTriePaths).
+    pub fn checkTriePaths(self: *const Self, root: primitives.Hash) DbError!void {
+        mpt.validateSecuredTriePaths(root, self.node_index, self.node_filter) catch return DbError.InvalidWitness;
     }
 
     /// Called by the journal to register code the block itself writes: bytecodes deployed
@@ -248,9 +260,9 @@ pub const WitnessDatabase = struct {
         if (!std.mem.eql(u8, &storage_root, &EMPTY_TRIE_HASH)) {
             // OOM panics rather than propagates: see basic()'s comment above for why.
             const gop = self.checked_storage_roots.getOrPut(storage_root) catch @panic("out of memory");
-            if (!gop.found_existing) mpt.validateSecuredTriePaths(storage_root, self.node_index) catch {
+            if (!gop.found_existing) self.checkTriePaths(storage_root) catch |err| {
                 _ = self.checked_storage_roots.remove(storage_root);
-                return DbError.InvalidWitness;
+                return err;
             };
         }
         const slot = u256ToHash(index);
