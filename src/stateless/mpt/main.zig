@@ -2105,6 +2105,25 @@ test "validateSecuredTriePaths: leaves ending at the key length pass" {
     try validateSecuredTriePaths(try buildPathTestTrie(arena.allocator(), &index, 63, 63), &index);
 }
 
+// The reference checks only that a branch has key nibbles left, not its value slot: a
+// 64-nibble lookup always descends into a child, so the value is never read.
+test "validateSecuredTriePaths: a branch value is not checked" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const path: [63]u8 = @splat(0);
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    for ([_]u8{ 1, 2 }) |nib| {
+        const leaf = try updMakeLeaf(alloc, &path, "value");
+        try index.put(keccak256(leaf), leaf);
+        enc[nib] = try updHashOrEmbed(alloc, leaf);
+    }
+    const root = try updEncodeBranch(alloc, &enc, "branch-value");
+    try index.put(keccak256(root), root);
+    try validateSecuredTriePaths(keccak256(root), &index);
+}
+
 test "validateSecuredTriePaths: a leaf past or short of the key length is rejected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
