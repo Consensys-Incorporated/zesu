@@ -1732,212 +1732,6 @@ fn updRlpBytes(alloc: std.mem.Allocator, data: []const u8) ![]u8 {
     return out;
 }
 
-// ─── Tests ─────────────────────────────────────────────────────────────────────
-//
-// These are internal tests that directly exercise the private updNode* functions.
-// They cover the extension-node diverge case: deleting a key that doesn't exist
-// in the trie (key diverges from the extension prefix before its end) must return
-// the trie unchanged rather than incorrectly splitting the extension node.
-
-fn buildTestExtTrie(alloc: std.mem.Allocator) ![]const u8 {
-    // Builds: Extension(prefix=[0,0]) → Branch{child[1]:leaf"a", child[2]:leaf"b"}
-    // Full key nibbles for "a": [0, 0, 1]
-    // Full key nibbles for "b": [0, 0, 2]
-    const leaf_a = try updMakeLeaf(alloc, &.{}, "a");
-    const leaf_b = try updMakeLeaf(alloc, &.{}, "b");
-    var enc: [16][]const u8 = undefined;
-    for (0..16) |i| enc[i] = &[_]u8{0x80};
-    enc[1] = leaf_a;
-    enc[2] = leaf_b;
-    const branch = try updEncodeBranch(alloc, &enc, &.{});
-    const child_ref = try updHashOrEmbed(alloc, branch);
-    return updMakeExtension(alloc, &.{ 0, 0 }, child_ref);
-}
-
-test "rlp helpers byte-identical to updRlpBytes/updRlpList" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    // Byte-string encoding across every branch: empty, single-byte <0x80,
-    // single-byte >=0x80, short (<=55) and long (>55, multi-byte length prefix).
-    const lens = [_]usize{ 0, 1, 2, 31, 32, 55, 56, 100, 256, 300 };
-    for (lens) |n| {
-        const data = try alloc.alloc(u8, n);
-        for (data, 0..) |*b, i| b.* = @intCast((i * 7 + 1) & 0xff);
-        if (n == 1) data[0] = 0x7f; // single-byte <0x80 (raw) path
-        const ref = try updRlpBytes(alloc, data);
-        try std.testing.expectEqual(ref.len, rlpBytesLen(data));
-        const buf = try alloc.alloc(u8, rlpBytesLen(data));
-        try std.testing.expectEqual(buf.len, rlpBytesWrite(buf, 0, data));
-        try std.testing.expectEqualSlices(u8, ref, buf);
-    }
-    // single-byte >=0x80 must take the length-prefixed path (0x81, b)
-    {
-        const data = [_]u8{0xff};
-        const ref = try updRlpBytes(alloc, &data);
-        try std.testing.expectEqual(ref.len, rlpBytesLen(&data));
-        const buf = try alloc.alloc(u8, rlpBytesLen(&data));
-        _ = rlpBytesWrite(buf, 0, &data);
-        try std.testing.expectEqualSlices(u8, ref, buf);
-    }
-
-    // List header across short (<=55) and long (>55) payloads — compared against
-    // the prefix of updRlpList of a single payload-sized item.
-    const payloads = [_]usize{ 0, 1, 55, 56, 256, 1000 };
-    for (payloads) |p| {
-        const item = try alloc.alloc(u8, p);
-        @memset(item, 0xab);
-        const ref = try updRlpList(alloc, &.{item});
-        const hlen = rlpListHeaderLen(p);
-        try std.testing.expectEqual(ref.len - p, hlen);
-        const buf = try alloc.alloc(u8, hlen);
-        try std.testing.expectEqual(buf.len, rlpListHeaderWrite(buf, 0, p));
-        try std.testing.expectEqualSlices(u8, ref[0..hlen], buf);
-    }
-}
-
-test "updNode: deleting non-existent key (diverges from extension prefix) is a no-op" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const ext = try buildTestExtTrie(alloc);
-    // key[0]=0 matches prefix[0]=0, but key[1]=1 ≠ prefix[1]=0 → cp=1 < prefix.len=2
-    const result = try updNode(alloc, ext, &.{ 0, 1, 0, 0 }, null, &.{});
-    try std.testing.expectEqualSlices(u8, ext, result);
-}
-
-test "updNodeEx: deleting non-existent key (diverges from extension prefix) is a no-op" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const ext = try buildTestExtTrie(alloc);
-    var extra = std.ArrayListUnmanaged([]const u8).empty;
-    const result = try updNodeEx(alloc, ext, &.{ 0, 1, 0, 0 }, null, &.{}, &extra);
-    try std.testing.expectEqualSlices(u8, ext, result);
-    try std.testing.expectEqual(@as(usize, 0), extra.items.len);
-}
-
-test "updNodeExRecorded: deleting non-existent key (diverges from extension prefix) is a no-op" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const ext = try buildTestExtTrie(alloc);
-    var index = NodeIndex.init(alloc);
-    var nodes: NodeView = .{ .witness = &index, .created = NodeIndex.init(alloc) };
-    const result = try updNodeExRecorded(alloc, ext, &.{ 0, 1, 0, 0 }, null, &nodes);
-    try std.testing.expectEqualSlices(u8, ext, result);
-}
-
-// ─── Branch-collapse tests ─────────────────────────────────────────────────────
-//
-// Build: Branch{child[1]:leaf"a", child[2]:leaf"b"}
-// Delete child[1] → only child[2] remains → branch collapses to leaf "b" at key [2].
-// All three updNode variants must produce the same result.
-
-fn buildTestBranchTrie(alloc: std.mem.Allocator) !struct { branch: []const u8, pool: []const []const u8 } {
-    const leaf_a = try updMakeLeaf(alloc, &.{}, "a");
-    const leaf_b = try updMakeLeaf(alloc, &.{}, "b");
-    var enc: [16][]const u8 = undefined;
-    for (0..16) |i| enc[i] = try alloc.dupe(u8, &.{0x80});
-    enc[1] = try updHashOrEmbed(alloc, leaf_a);
-    enc[2] = try updHashOrEmbed(alloc, leaf_b);
-    const branch = try updEncodeBranch(alloc, &enc, &.{});
-    // pool contains leaf_a and leaf_b so hash refs can be resolved
-    const pool = try alloc.dupe([]const u8, &.{ leaf_a, leaf_b });
-    return .{ .branch = branch, .pool = pool };
-}
-
-test "updNode: deleting a key collapses branch to leaf" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const t = try buildTestBranchTrie(alloc);
-    // Delete key [1] — only child[2] remains → branch must collapse to a leaf at path [2].
-    const result = try updNode(alloc, t.branch, &.{1}, null, t.pool);
-    const expected = try updMakeLeaf(alloc, &.{2}, "b");
-    try std.testing.expectEqualSlices(u8, expected, result);
-}
-
-test "updNodeEx: deleting a key collapses branch to leaf" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const t = try buildTestBranchTrie(alloc);
-    var extra = std.ArrayListUnmanaged([]const u8).empty;
-    const result = try updNodeEx(alloc, t.branch, &.{1}, null, t.pool, &extra);
-    const expected = try updMakeLeaf(alloc, &.{2}, "b");
-    try std.testing.expectEqualSlices(u8, expected, result);
-}
-
-test "updNodeExRecorded: deleting a key collapses branch to leaf" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const t = try buildTestBranchTrie(alloc);
-    var index = try buildNodeIndex(alloc, t.pool);
-    defer index.deinit();
-    var nodes: NodeView = .{ .witness = &index, .created = NodeIndex.init(alloc) };
-    const result = try updNodeExRecorded(alloc, t.branch, &.{1}, null, &nodes);
-    const expected = try updMakeLeaf(alloc, &.{2}, "b");
-    try std.testing.expectEqualSlices(u8, expected, result);
-}
-
-// ─── Extension-merge tests ─────────────────────────────────────────────────────
-//
-// Build: Extension([0]) → Branch{child[1]:leaf"a", child[2]:leaf"b"}
-// Delete key [0,1] → branch collapses to leaf"b" at [2] → extension merges with
-// that leaf suffix → result is a single leaf at path [0,2].
-
-fn buildTestExtBranchTrie(alloc: std.mem.Allocator) !struct { root: []const u8, pool: []const []const u8 } {
-    const leaf_a = try updMakeLeaf(alloc, &.{}, "a");
-    const leaf_b = try updMakeLeaf(alloc, &.{}, "b");
-    var enc: [16][]const u8 = undefined;
-    for (0..16) |i| enc[i] = try alloc.dupe(u8, &.{0x80});
-    enc[1] = try updHashOrEmbed(alloc, leaf_a);
-    enc[2] = try updHashOrEmbed(alloc, leaf_b);
-    const branch = try updEncodeBranch(alloc, &enc, &.{});
-    const branch_ref = try updHashOrEmbed(alloc, branch);
-    const root = try updMakeExtension(alloc, &.{0}, branch_ref);
-    const pool = try alloc.dupe([]const u8, &.{ leaf_a, leaf_b, branch });
-    return .{ .root = root, .pool = pool };
-}
-
-test "updNode: deleting collapses branch and merges extension" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const t = try buildTestExtBranchTrie(alloc);
-    // Delete key [0,1] → extension([0])→branch collapses → result: leaf at [0,2].
-    const result = try updNode(alloc, t.root, &.{ 0, 1 }, null, t.pool);
-    const expected = try updMakeLeaf(alloc, &.{ 0, 2 }, "b");
-    try std.testing.expectEqualSlices(u8, expected, result);
-}
-
-test "updNodeEx: deleting collapses branch and merges extension" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const t = try buildTestExtBranchTrie(alloc);
-    var extra = std.ArrayListUnmanaged([]const u8).empty;
-    const result = try updNodeEx(alloc, t.root, &.{ 0, 1 }, null, t.pool, &extra);
-    const expected = try updMakeLeaf(alloc, &.{ 0, 2 }, "b");
-    try std.testing.expectEqualSlices(u8, expected, result);
-}
-
-test "updNodeExRecorded: deleting collapses branch and merges extension" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const t = try buildTestExtBranchTrie(alloc);
-    var index = try buildNodeIndex(alloc, t.pool);
-    defer index.deinit();
-    var nodes: NodeView = .{ .witness = &index, .created = NodeIndex.init(alloc) };
-    const result = try updNodeExRecorded(alloc, t.root, &.{ 0, 1 }, null, &nodes);
-    const expected = try updMakeLeaf(alloc, &.{ 0, 2 }, "b");
-    try std.testing.expectEqualSlices(u8, expected, result);
-}
-
 fn updRlpList(alloc: std.mem.Allocator, items: []const []const u8) ![]u8 {
     var total: usize = 0;
     for (items) |item| total += item.len;
@@ -1972,66 +1766,28 @@ fn updRlpList(alloc: std.mem.Allocator, items: []const []const u8) ![]u8 {
     return out;
 }
 
-// Regression for #179: a NodeIndex shared across consecutive blocks must not be
-// left pointing into the scratch allocator of an earlier block's root update.
-test "batchUpdateIndexed: shared NodeIndex stays valid after scratch is freed" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+// ─── Tests ─────────────────────────────────────────────────────────────────────
 
-    var key_a: [32]u8 = @splat(0x11);
-    key_a[0] = 0x10;
-    var key_b: [32]u8 = @splat(0x22);
-    key_b[0] = 0x20;
-    var key_c: [32]u8 = @splat(0x33);
-    key_c[0] = 0x30;
-
-    const leafAt = struct {
-        fn f(a: std.mem.Allocator, key: [32]u8, val: []const u8) ![]const u8 {
-            var nibs: [64]u8 = undefined;
-            nibbles.bytesToNibbles(&key, &nibs);
-            return updMakeLeaf(a, nibs[1..], val);
-        }
-    }.f;
-    const branchOf = struct {
-        fn f(a: std.mem.Allocator, children: []const struct { u8, []const u8 }) ![]const u8 {
-            var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
-            for (children) |c| enc[c[0]] = try updHashOrEmbed(a, c[1]);
-            return updEncodeBranch(a, &enc, &.{});
-        }
-    }.f;
-
-    // Block 1 pre-state: {a, b, c}. Block 1 deletes a and updates b, so the
-    // update creates leaf_b2 and records it for a possible collapse.
-    const leaf_a = try leafAt(alloc, key_a, "va");
-    const leaf_b1 = try leafAt(alloc, key_b, "vb1");
-    const leaf_c = try leafAt(alloc, key_c, "vc");
-    const root0 = try branchOf(alloc, &.{ .{ 1, leaf_a }, .{ 2, leaf_b1 }, .{ 3, leaf_c } });
-
-    // Block 2's witness proves block 1's post-state: {b = vb2, c}.
-    const leaf_b2 = try leafAt(alloc, key_b, "vb2");
-    const root1 = try branchOf(alloc, &.{ .{ 2, leaf_b2 }, .{ 3, leaf_c } });
-
-    const witness = [_][]const u8{ root0, leaf_a, leaf_b1, leaf_c, root1, leaf_b2 };
-    var index = try buildNodeIndex(alloc, &witness);
-    defer index.deinit();
-
-    var scratch_buf: [16 * 1024]u8 = undefined;
-    var scratch_fba = std.heap.FixedBufferAllocator.init(&scratch_buf);
-    const block1 = [_]BatchChange{ .{ .key = key_a, .value = null }, .{ .key = key_b, .value = "vb2" } };
-    const got1 = try batchUpdateIndexed(scratch_fba.allocator(), keccak256(root0), &block1, &index);
-    try std.testing.expectEqual(keccak256(root1), got1);
-
-    // Block 1 left the index exactly as built from the witness.
-    try std.testing.expectEqual(@as(u32, witness.len), index.count());
-    for (witness) |w| try std.testing.expectEqual(w.ptr, index.get(keccak256(w)).?.ptr);
-
-    // Free block 1's scratch.
-    @memset(&scratch_buf, 0xAA);
-
-    const block2 = [_]BatchChange{.{ .key = key_b, .value = "vb3" }};
-    const got2 = try batchUpdateIndexed(alloc, got1, &block2, &index);
-
-    var kv = [_]builder.KV{ .{ .key = &key_b, .value = "vb3" }, .{ .key = &key_c, .value = "vc" } };
-    try std.testing.expectEqual(try builder.trieRoot(alloc, &kv), got2);
+test {
+    _ = @import("./tests.zig");
 }
+
+const Mpt = @This();
+
+/// Private helpers re-exported for tests.zig. Not part of the module's supported API.
+pub const testing = struct {
+    pub const NodeView = Mpt.NodeView;
+    pub const updNode = Mpt.updNode;
+    pub const updNodeEx = Mpt.updNodeEx;
+    pub const updNodeExRecorded = Mpt.updNodeExRecorded;
+    pub const updMakeLeaf = Mpt.updMakeLeaf;
+    pub const updMakeExtension = Mpt.updMakeExtension;
+    pub const updEncodeBranch = Mpt.updEncodeBranch;
+    pub const updHashOrEmbed = Mpt.updHashOrEmbed;
+    pub const updRlpBytes = Mpt.updRlpBytes;
+    pub const updRlpList = Mpt.updRlpList;
+    pub const rlpBytesLen = Mpt.rlpBytesLen;
+    pub const rlpBytesWrite = Mpt.rlpBytesWrite;
+    pub const rlpListHeaderLen = Mpt.rlpListHeaderLen;
+    pub const rlpListHeaderWrite = Mpt.rlpListHeaderWrite;
+};

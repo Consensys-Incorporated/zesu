@@ -11,7 +11,7 @@ const state_mod = @import("state");
 const bytecode = @import("bytecode");
 const mpt = @import("mpt");
 const input = @import("input");
-const db_mod = @import("db");
+const db_mod = @import("./main.zig");
 
 // ─── Known constants ───────────────────────────────────────────────────────────
 
