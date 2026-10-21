@@ -11,8 +11,8 @@
 ///
 /// A transaction is accepted when it decodes, its type exists at the fork, its chain id is
 /// the fixture chain's, its signature recovers a sender, and it passes the stateless
-/// transaction checks: EIP-7702 shape, the EIP-2681 nonce limit, and intrinsic and floor
-/// gas within the gas limit.
+/// transaction checks: EIP-7702 shape, the EIP-2681 nonce limit, and block execution's
+/// intrinsic gas checks (intrinsic and floor gas, initcode size, gas limit caps).
 ///
 /// Usage:
 ///   transaction-test-runner [--fixtures DIR] [--file FILE] [-x]
@@ -60,7 +60,9 @@ pub fn main(init: std.process.Init) !void {
     var stats: Stats = .{};
 
     if (single_file) |path| {
-        processFile(init.io, allocator, path, &stats) catch {};
+        processFile(init.io, allocator, path, &stats) catch {
+            stats.failed += 1;
+        };
     } else {
         var dir = std.Io.Dir.cwd().openDir(init.io, fixtures_dir, .{ .iterate = true }) catch |err| {
             std.debug.print("error: cannot open fixtures dir '{s}': {}\n", .{ fixtures_dir, err });
@@ -91,7 +93,9 @@ pub fn main(init: std.process.Init) !void {
             const full_path = try std.Io.Dir.path.join(allocator, &.{ fixtures_dir, rel_path });
             defer allocator.free(full_path);
             const failed_before = stats.failed;
-            processFile(init.io, allocator, full_path, &stats) catch {};
+            processFile(init.io, allocator, full_path, &stats) catch {
+                stats.failed += 1;
+            };
             if (stop_on_fail and stats.failed > failed_before) break;
         }
     }
@@ -109,21 +113,26 @@ pub fn main(init: std.process.Init) !void {
 
 const Stats = struct { passed: u64 = 0, failed: u64 = 0, skipped: u64 = 0 };
 
+/// A fixture that cannot be read or parsed returns an error, which the caller counts as a
+/// failure.
 fn processFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, stats: *Stats) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
     const json_text = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(256 * 1024 * 1024)) catch |err| {
-        std.debug.print("error: cannot read '{s}': {}\n", .{ path, err });
-        return;
+        std.debug.print("FAIL {s}  cannot read: {}\n", .{ path, err });
+        return err;
     };
     var parsed = std.json.parseFromSlice(std.json.Value, alloc, json_text, .{}) catch |err| {
-        std.debug.print("error: JSON parse failed in '{s}': {}\n", .{ path, err });
-        return;
+        std.debug.print("FAIL {s}  JSON parse failed: {}\n", .{ path, err });
+        return err;
     };
     defer parsed.deinit();
-    if (parsed.value != .object) return;
+    if (parsed.value != .object) {
+        std.debug.print("FAIL {s}  JSON root is not an object\n", .{path});
+        return error.InvalidFixture;
+    }
 
     var it = parsed.value.object.iterator();
     while (it.next()) |kv| {
@@ -224,14 +233,24 @@ fn check(alloc: std.mem.Allocator, raw: []const u8, spec: primitives.SpecId) Ver
     const env = txEnv(alloc, tx, sender) catch |err| return .{ .invalid = err };
     Validation.validateEip7702Tx(&env, spec) catch |err| return .{ .invalid = err };
 
-    const intrinsic_gas = Validation.calculateInitialGas(&env, spec, BLOCK_GAS_LIMIT);
-    if (tx.gas < intrinsic_gas) return .{ .invalid = error.InsufficientGas };
-    if (primitives.isEnabledIn(spec, .prague)) {
-        const floor = Validation.calculateFloorGas(&env, spec);
-        if (floor > 0 and tx.gas < 21_000 + floor) return .{ .invalid = error.InsufficientGas };
-    }
-    return .{ .valid = .{ .sender = sender, .intrinsic_gas = intrinsic_gas } };
+    var gas_ctx: GasCheckContext = .{ .ctx = .{ .tx = env, .cfg = .{ .spec = spec }, .block = .{ .gas_limit = BLOCK_GAS_LIMIT } } };
+    const gas = Validation.validateInitialTxGas(&gas_ctx) catch |err| return .{ .invalid = err };
+    return .{ .valid = .{ .sender = sender, .intrinsic_gas = gas.initial_gas } };
 }
+
+/// The part of the EVM context `Validation.validateInitialTxGas` reads, so the runner applies
+/// block execution's intrinsic, floor and initcode checks rather than a copy of them.
+const GasCheckContext = struct {
+    ctx: struct {
+        tx: context.TxEnv,
+        cfg: struct { spec: primitives.SpecId, disable_eip7623: bool = false },
+        block: struct { gas_limit: u64 },
+    },
+
+    pub fn getContext(self: *GasCheckContext) *@FieldType(GasCheckContext, "ctx") {
+        return &self.ctx;
+    }
+};
 
 /// The fork that introduced each transaction type (as transition.zig checks it).
 fn typeSupported(tx_type: u8, spec: primitives.SpecId) bool {
