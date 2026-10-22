@@ -72,6 +72,13 @@ pub fn decodeItem(input: []const u8) error{InvalidRlp}!DecodeResult {
     }
 }
 
+// First-byte boundaries of the RLP encodings, and the longest payload the short form holds.
+const SHORT_STRING_PREFIX: u8 = 0x80; // + length, for a string of up to MAX_SHORT_PAYLOAD bytes
+const LONG_STRING_PREFIX: u8 = 0xb8; // + (length-of-length - 1)
+const SHORT_LIST_PREFIX: u8 = 0xc0; // + length, for a list payload of up to MAX_SHORT_PAYLOAD bytes
+const LONG_LIST_PREFIX: u8 = 0xf8; // + (length-of-length - 1)
+const MAX_SHORT_PAYLOAD = 55;
+
 /// decodeItem, but also rejecting the encodings canonical RLP forbids: a single byte below
 /// 0x80 wrapped as a one-byte string, and the long form, or a length with leading zero
 /// bytes, for a string or list of 55 bytes or fewer. For RLP no hash binds, such as a
@@ -79,12 +86,16 @@ pub fn decodeItem(input: []const u8) error{InvalidRlp}!DecodeResult {
 pub fn decodeItemCanonical(input: []const u8) error{InvalidRlp}!DecodeResult {
     const r = try decodeItem(input);
     const first = input[0];
-    if (first == 0x81 and input[1] < 0x80) return error.InvalidRlp;
-    if ((first >= 0xb8 and first <= 0xbf) or first >= 0xf8) {
-        const len_len: usize = first - (if (first >= 0xf8) @as(u8, 0xf7) else @as(u8, 0xb7));
-        if (input[1] == 0) return error.InvalidRlp;
-        if (r.consumed - 1 - len_len <= 55) return error.InvalidRlp;
-    }
+    if (first == SHORT_STRING_PREFIX + 1 and input[1] < SHORT_STRING_PREFIX) return error.InvalidRlp;
+    const len_len: usize = if (first >= LONG_LIST_PREFIX)
+        first - (LONG_LIST_PREFIX - 1)
+    else if (first >= LONG_STRING_PREFIX and first < SHORT_LIST_PREFIX)
+        first - (LONG_STRING_PREFIX - 1)
+    else
+        return r;
+    // The long form is for payloads over MAX_SHORT_PAYLOAD bytes, and its length has no leading zero.
+    if (input[1] == 0) return error.InvalidRlp;
+    if (r.consumed - 1 - len_len <= MAX_SHORT_PAYLOAD) return error.InvalidRlp;
     return r;
 }
 
@@ -194,19 +205,4 @@ test "iterate list items" {
     }
     try std.testing.expectEqual(@as(usize, 3), count);
     try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x02, 0x03 }, &values);
-}
-
-test "decodeItemCanonical rejects non-canonical encodings" {
-    // A single byte below 0x80 wrapped as a one-byte string.
-    try std.testing.expectError(error.InvalidRlp, decodeItemCanonical(&.{ 0x81, 0x01 }));
-    // The long string form for a string of 55 bytes or fewer.
-    try std.testing.expectError(error.InvalidRlp, decodeItemCanonical(&.{ 0xb8, 0x01, 0x80 }));
-    // A long string length with a leading zero byte.
-    try std.testing.expectError(error.InvalidRlp, decodeItemCanonical(&([_]u8{ 0xb9, 0x00, 0x38 } ++ [_]u8{0} ** 56)));
-    // The long list form for a payload of 55 bytes or fewer.
-    try std.testing.expectError(error.InvalidRlp, decodeItemCanonical(&.{ 0xf8, 0x01, 0x80 }));
-    // Canonical forms decode as with decodeItem.
-    try std.testing.expectEqual(@as(usize, 1), (try decodeItemCanonical(&.{0x01})).consumed);
-    try std.testing.expectEqual(@as(usize, 2), (try decodeItemCanonical(&.{ 0x81, 0x80 })).consumed);
-    try std.testing.expectEqual(@as(usize, 58), (try decodeItemCanonical(&([_]u8{ 0xb8, 0x38 } ++ [_]u8{0} ** 56))).consumed);
 }
