@@ -774,7 +774,7 @@ pub fn transitionWithContext(
         var sender: input.Address = undefined;
         const maybe_sender: ?input.Address = blk: {
             if (tx.r != null and tx.s != null and (tx.r.? != 0 or tx.s.? != 0)) {
-                break :blk try tx_signing.recoverSender(arena, tx, chain_id);
+                break :blk try tx_signing.recoverSender(arena, tx, chain_id, spec);
             }
             break :blk tx.from;
         };
@@ -881,8 +881,7 @@ pub fn transitionWithContext(
                 const authority: context_mod.RecoveredAuthority = blk: {
                     if (ai.signer) |s| break :blk context_mod.RecoveredAuthority{ .Valid = s };
                     if (ai.y_parity > 1) break :blk context_mod.RecoveredAuthority.Invalid;
-                    const SECP256K1N_OVER_2: u256 = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
-                    if (ai.s > SECP256K1N_OVER_2) break :blk context_mod.RecoveredAuthority.Invalid;
+                    if (!tx_signing.signatureInBounds(ai.r, ai.s, true)) break :blk context_mod.RecoveredAuthority.Invalid;
                     const auth_hash = tx_signing.authorizationSigningHash(arena, &ai) catch @panic("out of memory");
                     const recid: u8 = if (ai.y_parity == 0) 0 else 1;
                     var auth_sig: [64]u8 = undefined;

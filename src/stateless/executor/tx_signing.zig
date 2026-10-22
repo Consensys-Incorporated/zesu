@@ -10,6 +10,18 @@ const rlp = @import("./rlp_encode.zig");
 const accel = @import("accelerators");
 const ScratchArena = @import("./scratch_arena.zig");
 
+/// Order of the secp256k1 group.
+pub const SECP256K1N: u256 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
+/// Largest `s` EIP-2 allows (floor(n / 2)).
+pub const SECP256K1N_OVER_2: u256 = SECP256K1N / 2;
+
+/// Whether (r, s) lies in the range the reference accepts: 0 < r < n, and
+/// 0 < s <= n/2 when `low_s_only` (EIP-2) or 0 < s < n otherwise.
+pub fn signatureInBounds(r: u256, s: u256, low_s_only: bool) bool {
+    const s_max = if (low_s_only) SECP256K1N_OVER_2 else SECP256K1N - 1;
+    return r != 0 and r < SECP256K1N and s != 0 and s <= s_max;
+}
+
 // ─── RLP helpers (private) ────────────────────────────────────────────────────
 
 fn rlpAccessList(alloc: std.mem.Allocator, al: []const input.AccessListEntry) ![]u8 {
@@ -251,12 +263,14 @@ pub fn txHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64)
 
 /// Recover the sender address from a signed transaction.
 /// Returns null if the signature is invalid or missing.
-pub fn recoverSender(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64) !?input.Address {
+pub fn recoverSender(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64, spec: primitives.SpecId) !?input.Address {
     const r = tx.r orelse return null;
     const s = tx.s orelse return null;
     const v_val = tx.v orelse return null;
 
-    if (r == 0 and s == 0) return null;
+    // From Homestead, EIP-2 also rejects s > n/2: otherwise (r, n - s) with the other
+    // parity recovers the same sender.
+    if (!signatureInBounds(r, s, primitives.isEnabledIn(spec, .homestead))) return null;
 
     const hash = try signingHash(alloc, tx, chain_id);
 
