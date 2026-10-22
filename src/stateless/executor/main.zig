@@ -55,6 +55,7 @@ test {
     // referenced explicitly to be pulled into the test graph.
     _ = @import("./transition_tests.zig");
     _ = @import("./main_tests.zig");
+    _ = @import("./tx_signing_tests.zig");
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
