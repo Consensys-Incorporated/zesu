@@ -693,6 +693,24 @@ pub fn build(b: *std.Build) void {
         addRunStep(b, "zkevm-tests", "Run zkevm blockchain test fixtures", zkevm_test_exe, &.{ "--fixtures", "spec-tests/fixtures/zkevm/blockchain_tests" });
         addZkevmBenchmarkSteps(b, zkevm_test_exe);
 
+        // ── transaction-test-runner ───────────────────────────────────────────
+        const tx_test_exe = b.addExecutable(.{
+            .name = "transaction-test-runner",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/transaction_test/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        tx_test_exe.root_module.addImport("executor", mods.executor);
+        tx_test_exe.root_module.addImport("handler", mods.handler);
+        tx_test_exe.root_module.addImport("context", mods.context);
+        tx_test_exe.root_module.addImport("hardfork", mods.hardfork);
+        tx_test_exe.root_module.addImport("primitives", mods.primitives);
+        addCryptoLibraries(tx_test_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        b.installArtifact(tx_test_exe);
+        addRunStep(b, "transaction-tests", "Run Ethereum transaction test fixtures", tx_test_exe, &.{ "--fixtures", "spec-tests/fixtures/transaction_tests" });
+
         // ── hive-rlp: Hive consume-rlp execution client ───────────────────────
         const hive_exe = b.addExecutable(.{
             .name = "hive-rlp",
