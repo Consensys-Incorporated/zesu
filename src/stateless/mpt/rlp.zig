@@ -72,6 +72,33 @@ pub fn decodeItem(input: []const u8) error{InvalidRlp}!DecodeResult {
     }
 }
 
+// First-byte boundaries of the RLP encodings, and the longest payload the short form holds.
+const SHORT_STRING_PREFIX: u8 = 0x80; // + length, for a string of up to MAX_SHORT_PAYLOAD bytes
+const LONG_STRING_PREFIX: u8 = 0xb8; // + (length-of-length - 1)
+const SHORT_LIST_PREFIX: u8 = 0xc0; // + length, for a list payload of up to MAX_SHORT_PAYLOAD bytes
+const LONG_LIST_PREFIX: u8 = 0xf8; // + (length-of-length - 1)
+const MAX_SHORT_PAYLOAD = 55;
+
+/// decodeItem, but also rejecting the encodings canonical RLP forbids: a single byte below
+/// 0x80 wrapped as a one-byte string, and the long form, or a length with leading zero
+/// bytes, for a string or list of 55 bytes or fewer. For RLP no hash binds, such as a
+/// payload's transactions; hash-bound input (trie nodes, headers) needs no extra checks.
+pub fn decodeItemCanonical(input: []const u8) error{InvalidRlp}!DecodeResult {
+    const r = try decodeItem(input);
+    const first = input[0];
+    if (first == SHORT_STRING_PREFIX + 1 and input[1] < SHORT_STRING_PREFIX) return error.InvalidRlp;
+    const len_len: usize = if (first >= LONG_LIST_PREFIX)
+        first - (LONG_LIST_PREFIX - 1)
+    else if (first >= LONG_STRING_PREFIX and first < SHORT_LIST_PREFIX)
+        first - (LONG_STRING_PREFIX - 1)
+    else
+        return r;
+    // The long form is for payloads over MAX_SHORT_PAYLOAD bytes, and its length has no leading zero.
+    if (input[1] == 0) return error.InvalidRlp;
+    if (r.consumed - 1 - len_len <= MAX_SHORT_PAYLOAD) return error.InvalidRlp;
+    return r;
+}
+
 /// Read a big-endian unsigned integer from 1–8 bytes.
 fn readBigEndian(bytes: []const u8) error{Overflow}!usize {
     if (bytes.len == 0 or bytes.len > 8) return error.Overflow;
