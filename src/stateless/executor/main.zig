@@ -54,6 +54,7 @@ test {
     // transition_tests.zig is a leaf test file nothing else imports, so it must be
     // referenced explicitly to be pulled into the test graph.
     _ = @import("./transition_tests.zig");
+    _ = @import("./block_validation_tests.zig");
     _ = @import("./main_tests.zig");
     _ = @import("./tx_signing_tests.zig");
 }
