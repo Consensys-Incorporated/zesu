@@ -227,7 +227,7 @@ fn check(alloc: std.mem.Allocator, raw: []const u8, spec: primitives.SpecId) Ver
     // EIP-2681: the decoder clamps an oversized nonce to maxInt(u64), which is invalid.
     if ((tx.nonce orelse 0) == std.math.maxInt(u64)) return .{ .invalid = error.NonceIsMax };
 
-    const sender = (tx_signing.recoverSender(alloc, tx, CHAIN_ID) catch |err| return .{ .invalid = err }) orelse
+    const sender = (tx_signing.recoverSender(alloc, tx, CHAIN_ID, spec) catch |err| return .{ .invalid = err }) orelse
         return .{ .invalid = error.InvalidSignature };
 
     const env = txEnv(alloc, tx, sender) catch |err| return .{ .invalid = err };
