@@ -340,12 +340,12 @@ fn decodeTxFields(allocator: std.mem.Allocator, tx_type: u8, payload: []const u8
             // Decode y_parity and chain_id from the raw Ethereum v.
             // EIP-155: v = chain_id*2 + 35 + y_parity  →  y_parity = (v-35) % 2
             // Legacy:  v = 27 + y_parity               →  y_parity = v - 27
-            if (v_raw >= 35) {
+            if (v_raw == 27 or v_raw == 28) {
+                tx.v = @intCast(v_raw - 27);
+            } else if (v_raw >= 35 and (v_raw - 35) / 2 <= std.math.maxInt(u64)) {
                 tx.chain_id = @intCast((v_raw - 35) / 2);
                 tx.v = @intCast((v_raw - 35) % 2);
-            } else if (v_raw >= 27) {
-                tx.v = @intCast(v_raw - 27);
-            }
+            } else return error.InvalidBlock;
         },
         1 => {
             // EIP-2930: [chainId, nonce, gasPrice, gasLimit, to, value, data, accessList, v, r, s]
@@ -592,7 +592,7 @@ fn txAuthList(alloc: std.mem.Allocator, rest: *[]const u8) ![]const input.Author
         var addr: primitives.Address = undefined;
         @memcpy(&addr, addr_b);
         const nonce = try txU64(&ep);
-        const v = try txU64(&ep);
+        const v = std.math.cast(u8, try txU64(&ep)) orelse return error.InvalidBlock;
         const rv = try txU256(&ep);
         const sv = try txU256(&ep);
         if (ep.len != 0) return error.InvalidBlock; // extra tuple fields
