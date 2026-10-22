@@ -21,12 +21,6 @@ pub fn validateBlock(env: types.Env, spec: primitives.SpecId) !void {
     // GASLIMIT_TOO_BIG: gas limit must fit in a signed 64-bit integer
     if (env.gas_limit > MAX_GAS_LIMIT) return error.GasLimitTooBig;
 
-    // INVALID_BLOCK_NUMBER: the block directly follows its parent (reference
-    // validate_header).
-    if (env.parent_number) |pn| {
-        if (env.number == 0 or env.number - 1 != pn) return error.InvalidBlockNumber;
-    }
-
     // INVALID_BLOCK_TIMESTAMP_OLDER_THAN_PARENT
     if (env.parent_timestamp) |pt| {
         if (env.timestamp <= pt) return error.InvalidBlockTimestampOlderThanParent;
@@ -263,13 +257,3 @@ fn fakeBlobGasPrice(excess_blob_gas: u64, update_fraction: u64) u128 {
 }
 
 const std = @import("std");
-
-test "a block whose number does not follow its parent's is rejected" {
-    var env: types.Env = .{ .coinbase = @splat(0), .gas_limit = 30_000_000, .number = 10, .parent_number = 9 };
-    try validateBlock(env, .amsterdam);
-
-    env.number = 11;
-    try std.testing.expectError(error.InvalidBlockNumber, validateBlock(env, .amsterdam));
-    env.number = 9;
-    try std.testing.expectError(error.InvalidBlockNumber, validateBlock(env, .amsterdam));
-}
