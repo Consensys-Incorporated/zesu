@@ -54,6 +54,7 @@ test {
     // transition_tests.zig is a leaf test file nothing else imports, so it must be
     // referenced explicitly to be pulled into the test graph.
     _ = @import("./transition_tests.zig");
+    _ = @import("./block_validation_tests.zig");
     _ = @import("./main_tests.zig");
     _ = @import("./tx_signing_tests.zig");
 }
@@ -248,6 +249,8 @@ pub fn executeBlockStateless(
         .expected_state_root = ep.state_root,
         .computed_receipts_root = proof.receipts_root,
         .expected_receipts_root = ep.receipts_root,
+        .computed_logs_bloom = result.block_bloom,
+        .expected_logs_bloom = ep.logs_bloom,
     });
     if (primitives.isEnabledIn(spec, .prague) and !std.mem.eql(u8, &requests_hash, &result.requests_hash)) return error.InvalidRequests;
     return proof;

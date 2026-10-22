@@ -317,8 +317,8 @@ fn runBlock(gpa: std.mem.Allocator, alloc: std.mem.Allocator, block: std.json.Ob
 
     // Execute via the same entry point the zkVM guest wraps (run.zig →
     // executeStatelessInput). The executor validates the block — including the
-    // post-state/receipts roots against the payload (StateRootMismatch /
-    // ReceiptsRootMismatch) alongside its gas/blob/BAL checks.
+    // post-state/receipts roots and logs bloom against the payload (StateRootMismatch /
+    // ReceiptsRootMismatch / InvalidLogsBloom) alongside its gas/blob/BAL checks.
     var exec_err: anyerror = error.Success;
     const validated = if (executor.executeStatelessInput(alloc, si, si.chain_config.fork_name)) |_| true else |err| blk: {
         exec_err = err;
