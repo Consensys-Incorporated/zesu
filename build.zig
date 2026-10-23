@@ -273,6 +273,7 @@ fn buildModules(
     db.addImport("bytecode", bytecode);
     db.addImport("mpt", mpt);
     db.addImport("executor_types", executor_types);
+    db.addImport("input", input); // tests.zig builds StateWitness values
 
     const block_rlp_size = mkmod(b, expose, "block_rlp_size", .{
         .root_source_file = b.path("src/stateless/executor/block_rlp_size.zig"),
@@ -692,6 +693,24 @@ pub fn build(b: *std.Build) void {
         addRunStep(b, "zkevm-tests", "Run zkevm blockchain test fixtures", zkevm_test_exe, &.{ "--fixtures", "spec-tests/fixtures/zkevm/blockchain_tests" });
         addZkevmBenchmarkSteps(b, zkevm_test_exe);
 
+        // ── transaction-test-runner ───────────────────────────────────────────
+        const tx_test_exe = b.addExecutable(.{
+            .name = "transaction-test-runner",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/transaction_test/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        tx_test_exe.root_module.addImport("executor", mods.executor);
+        tx_test_exe.root_module.addImport("handler", mods.handler);
+        tx_test_exe.root_module.addImport("context", mods.context);
+        tx_test_exe.root_module.addImport("hardfork", mods.hardfork);
+        tx_test_exe.root_module.addImport("primitives", mods.primitives);
+        addCryptoLibraries(tx_test_exe, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        b.installArtifact(tx_test_exe);
+        addRunStep(b, "transaction-tests", "Run Ethereum transaction test fixtures", tx_test_exe, &.{ "--fixtures", "spec-tests/fixtures/transaction_tests" });
+
         // ── hive-rlp: Hive consume-rlp execution client ───────────────────────
         const hive_exe = b.addExecutable(.{
             .name = "hive-rlp",
@@ -720,6 +739,7 @@ pub fn build(b: *std.Build) void {
             .{ .m = mods.context, .name = "context" },
             .{ .m = mods.bytecode, .name = "bytecode" },
             .{ .m = mods.mpt, .name = "mpt" },
+            .{ .m = mods.db, .name = "db" },
             .{ .m = mods.rlp_decode, .name = "rlp_decode" },
             .{ .m = mods.executor, .name = "executor" },
             .{ .m = mods.hardfork, .name = "hardfork" },
@@ -729,39 +749,6 @@ pub fn build(b: *std.Build) void {
             addCryptoLibraries(tst, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
             const run_tst = b.addRunArtifact(tst);
             test_step.dependOn(&run_tst.step);
-        }
-
-        // MPT integration tests
-        {
-            const m = b.createModule(.{
-                .root_source_file = b.path("src/stateless/mpt/test.zig"),
-                .target = target,
-                .optimize = optimize,
-            });
-            m.addImport("primitives", mods.primitives);
-            m.addImport("mpt", mods.mpt);
-            m.addImport("input", mods.input);
-            const tst = b.addTest(.{ .root_module = m });
-            addCryptoLibraries(tst, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
-            test_step.dependOn(&b.addRunArtifact(tst).step);
-        }
-
-        // WitnessDatabase integration tests
-        {
-            const m = b.createModule(.{
-                .root_source_file = b.path("src/stateless/db/test.zig"),
-                .target = target,
-                .optimize = optimize,
-            });
-            m.addImport("primitives", mods.primitives);
-            m.addImport("state", mods.state);
-            m.addImport("bytecode", mods.bytecode);
-            m.addImport("mpt", mods.mpt);
-            m.addImport("input", mods.input);
-            m.addImport("db", mods.db);
-            const tst = b.addTest(.{ .root_module = m });
-            addCryptoLibraries(tst, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
-            test_step.dependOn(&b.addRunArtifact(tst).step);
         }
     }
 

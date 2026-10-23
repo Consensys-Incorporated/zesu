@@ -123,6 +123,8 @@ pub const RootCommitments = struct {
     expected_state_root: [32]u8,
     computed_receipts_root: [32]u8,
     expected_receipts_root: [32]u8,
+    computed_logs_bloom: types.Bloom,
+    expected_logs_bloom: types.Bloom,
 };
 
 /// EIP-7928 block access list hash: keccak256(rlp(BAL)) as executed vs the header's.
@@ -174,12 +176,13 @@ pub fn validatePostExecution(
         if (!std.mem.eql(u8, &h.computed, &h.expected)) return error.InvalidBlockAccessList;
     }
 
-    // INVALID_STATE_ROOT / INVALID_RECEIPTS_ROOT: the computed commitments must
-    // match the values declared in the block header. Checked last so the more
-    // specific gas/blob/BAL errors take precedence.
+    // INVALID_STATE_ROOT / INVALID_RECEIPTS_ROOT / INVALID_LOG_BLOOM: the computed
+    // commitments must match the values declared in the block header. Checked last so
+    // the more specific gas/blob/BAL errors take precedence.
     if (roots) |r| {
         if (!std.mem.eql(u8, &r.computed_state_root, &r.expected_state_root)) return error.StateRootMismatch;
         if (!std.mem.eql(u8, &r.computed_receipts_root, &r.expected_receipts_root)) return error.ReceiptsRootMismatch;
+        if (!std.mem.eql(u8, &r.computed_logs_bloom, &r.expected_logs_bloom)) return error.InvalidLogsBloom;
     }
 }
 

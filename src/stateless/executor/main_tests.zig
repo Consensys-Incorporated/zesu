@@ -6,6 +6,7 @@ const mpt = @import("mpt");
 
 const main = @import("./main.zig");
 const enc = @import("./rlp_encode.zig");
+const exceptions = @import("./exceptions.zig");
 const decodeWitnessHeaders = main.decodeWitnessHeaders;
 
 const ZERO: [32]u8 = @splat(0);
@@ -143,6 +144,17 @@ test "a payload whose number is not the parent's plus one is rejected" {
     try std.testing.expectError(error.InvalidBlockNumber, decodeWitnessHeaders(a, &.{parent}, parent_hash, 12));
     try std.testing.expectError(error.InvalidBlockNumber, decodeWitnessHeaders(a, &.{parent}, parent_hash, 10));
     try std.testing.expectError(error.InvalidBlockNumber, decodeWitnessHeaders(a, &.{parent}, parent_hash, 0));
+}
+
+test "a payload number mismatch is classified as INVALID_BLOCK_NUMBER" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const parent = try testHeader(a, ZERO, @splat(0x22), 10);
+    const err = decodeWitnessHeaders(a, &.{parent}, mpt.keccak256(parent), 12);
+    try std.testing.expectError(error.InvalidBlockNumber, err);
+    const name = exceptions.mapBlockError(error.InvalidBlockNumber) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("BlockException.INVALID_BLOCK_NUMBER", name);
 }
 
 test "a parent numbered u64 max does not overflow the number check" {
