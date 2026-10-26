@@ -78,6 +78,17 @@ fn findNodeInIndex(index: *const NodeIndex, hash: primitives.Hash) ?[]const u8 {
     return index.get(hash);
 }
 
+/// The witness index plus the nodes one batch update creates. The witness index
+/// is never written, so it holds no slices into the update's allocator.
+const NodeView = struct {
+    witness: *const NodeIndex,
+    created: NodeIndex,
+
+    fn get(self: *const NodeView, hash: primitives.Hash) ?[]const u8 {
+        return self.witness.get(hash) orelse self.created.get(hash);
+    }
+};
+
 // ─── findNode ──────────────────────────────────────────────────────────────────
 
 /// Linear scan of the node pool for an entry whose keccak256 equals `hash`.
@@ -671,83 +682,6 @@ pub fn updateStorageChained(
         keccak256(new_root_rlp);
 }
 
-// ─── Indexed variants of verifyWitness and chained update functions ────────────
-//
-// These accept a pre-built NodeIndex (hash→node map) produced by buildNodeIndex().
-// All pool lookups are O(1) hashmap lookups. New intermediate nodes created during
-// updates are inserted into the same index so subsequent lookups remain O(1).
-
-/// Like updateAccountChained but uses a mutable NodeIndex for O(1) lookups.
-/// New intermediate nodes are inserted into `index` so subsequent chained updates find them.
-pub fn updateAccountChainedIndexed(
-    alloc: std.mem.Allocator,
-    root: *[32]u8,
-    addr_key: [32]u8,
-    account_rlp: ?[]const u8,
-    index: *NodeIndex,
-) (MptError || error{OutOfMemory})!void {
-    var key_nibs: [64]u8 = undefined;
-    nibbles.bytesToNibbles(&addr_key, &key_nibs);
-
-    if (std.mem.eql(u8, root, &EMPTY_TRIE_HASH)) {
-        if (account_rlp) |val| {
-            const leaf_rlp = try updMakeLeaf(alloc, &key_nibs, val);
-            const h = keccak256(leaf_rlp);
-            try index.put(h, leaf_rlp);
-            root.* = h;
-        }
-        return;
-    }
-
-    const root_bytes = findNodeInIndex(index, root.*) orelse return error.InvalidProof;
-    const new_root_rlp = try updNodeExIndexed(alloc, root_bytes, &key_nibs, account_rlp, index);
-    root.* = if (new_root_rlp.len == 1 and new_root_rlp[0] == 0x80)
-        EMPTY_TRIE_HASH
-    else blk: {
-        const h = keccak256(new_root_rlp);
-        try index.put(h, new_root_rlp);
-        break :blk h;
-    };
-}
-
-/// Like updateStorageChained but uses a mutable NodeIndex for O(1) lookups.
-/// New intermediate nodes are inserted into `index` so subsequent chained updates find them.
-pub fn updateStorageChainedIndexed(
-    alloc: std.mem.Allocator,
-    root: *[32]u8,
-    slot: [32]u8,
-    new_value: u256,
-    index: *NodeIndex,
-) (MptError || error{OutOfMemory})!void {
-    const key_hash = keccak256(&slot);
-    var key_nibs: [64]u8 = undefined;
-    nibbles.bytesToNibbles(&key_hash, &key_nibs);
-
-    const new_val_enc: ?[]const u8 = if (new_value == 0) null else blk: {
-        break :blk try updRlpU256(alloc, new_value);
-    };
-
-    if (std.mem.eql(u8, root, &EMPTY_TRIE_HASH)) {
-        if (new_val_enc) |val| {
-            const leaf_rlp = try updMakeLeaf(alloc, &key_nibs, val);
-            const h = keccak256(leaf_rlp);
-            try index.put(h, leaf_rlp);
-            root.* = h;
-        }
-        return;
-    }
-
-    const root_bytes = findNodeInIndex(index, root.*) orelse return error.InvalidProof;
-    const new_root_rlp = try updNodeExIndexed(alloc, root_bytes, &key_nibs, new_val_enc, index);
-    root.* = if (new_root_rlp.len == 1 and new_root_rlp[0] == 0x80)
-        EMPTY_TRIE_HASH
-    else blk: {
-        const h = keccak256(new_root_rlp);
-        try index.put(h, new_root_rlp);
-        break :blk h;
-    };
-}
-
 // ─── Batch trie update ─────────────────────────────────────────────────────────
 
 /// A single keyed change for a batch trie update.
@@ -760,19 +694,22 @@ pub const BatchChange = struct {
 
 /// Batch-update a trie with multiple pre-sorted changes, visiting each branch node once.
 /// `sorted_changes` must be sorted ascending by `key`.
-/// Returns the new root hash.
+/// Returns the new root hash. `index` is only read: nodes created by the update
+/// live in `alloc` and are dropped with it.
 pub fn batchUpdateIndexed(
     alloc: std.mem.Allocator,
     root: [32]u8,
     sorted_changes: []const BatchChange,
-    index: *NodeIndex,
+    index: *const NodeIndex,
 ) (MptError || error{OutOfMemory})![32]u8 {
     if (sorted_changes.len == 0) return root;
+    var nodes: NodeView = .{ .witness = index, .created = NodeIndex.init(alloc) };
+    defer nodes.created.deinit();
     const root_rlp: []const u8 = if (std.mem.eql(u8, &root, &EMPTY_TRIE_HASH))
         &.{0x80}
     else
-        findNodeInIndex(index, root) orelse return error.InvalidProof;
-    const new_root_rlp = try batchUpdateNodeIndexed(alloc, root_rlp, sorted_changes, 0, index);
+        nodes.get(root) orelse return error.InvalidProof;
+    const new_root_rlp = try batchUpdateNodeIndexed(alloc, root_rlp, sorted_changes, 0, &nodes);
     return commitRoot(new_root_rlp);
 }
 
@@ -790,29 +727,29 @@ fn batchUpdateNodeIndexed(
     node_rlp: []const u8,
     changes: []const BatchChange,
     depth: u8,
-    index: *NodeIndex,
+    nodes: *NodeView,
 ) (MptError || error{OutOfMemory})![]const u8 {
     if (changes.len == 1) {
         var key_nibs: [64]u8 = undefined;
         nibbles.bytesToNibbles(&changes[0].key, &key_nibs);
-        // Insertion (value != null): no collapse possible, skip index.put for new nodes.
+        // Insertion (value != null): no collapse possible, new nodes are not recorded.
         // Deletion (value == null): collapseIndexed may look up a sole remaining child
-        //   by hash — must use the put variant so the child is findable.
+        //   by hash — must use the recording variant so the child is findable.
         return if (changes[0].value != null)
-            updNodeExBatch(alloc, node_rlp, key_nibs[depth..], changes[0].value, index)
+            updNodeExBatch(alloc, node_rlp, key_nibs[depth..], changes[0].value, nodes)
         else
-            updNodeExIndexed(alloc, node_rlp, key_nibs[depth..], changes[0].value, index);
+            updNodeExRecorded(alloc, node_rlp, key_nibs[depth..], changes[0].value, nodes);
     }
 
     // Empty subtree with multiple inserts: build sequentially.
     // Each iteration may create hashed intermediate nodes that subsequent iterations
-    // resolve via findNodeInIndex — index.put is required here.
+    // resolve via nodes.get — recording them in `nodes` is required here.
     if (node_rlp.len == 1 and node_rlp[0] == 0x80) {
         var current = node_rlp;
         for (changes) |ch| {
             var key_nibs: [64]u8 = undefined;
             nibbles.bytesToNibbles(&ch.key, &key_nibs);
-            current = try updNodeExIndexed(alloc, current, key_nibs[depth..], ch.value, index);
+            current = try updNodeExRecorded(alloc, current, key_nibs[depth..], ch.value, nodes);
         }
         return current;
     }
@@ -829,7 +766,7 @@ fn batchUpdateNodeIndexed(
 
             // Collapse is only possible when at least one change is a deletion.
             // When has_deletion=false, collapseIndexed is never called, so new child nodes
-            // need not be inserted into the index — callers receive them via return values.
+            // need not be recorded in `nodes` — callers receive them via return values.
             const has_deletion = for (changes) |ch| {
                 if (ch.value == null) break true;
             } else false;
@@ -843,12 +780,12 @@ fn batchUpdateNodeIndexed(
 
                 const child_rlp: []const u8 = switch (b.children[nib]) {
                     .empty => &.{0x80},
-                    .hash => |h| findNodeInIndex(index, h.*) orelse return error.InvalidProof,
+                    .hash => |h| nodes.get(h.*) orelse return error.InvalidProof,
                     .inline_node => |il| il,
                 };
-                const new_child_rlp = try batchUpdateNodeIndexed(alloc, child_rlp, changes[i..j], depth + 1, index);
+                const new_child_rlp = try batchUpdateNodeIndexed(alloc, child_rlp, changes[i..j], depth + 1, nodes);
                 enc[nib] = if (has_deletion)
-                    try updHashOrEmbedExIndexed(alloc, new_child_rlp, index)
+                    try updHashOrEmbedRecorded(alloc, new_child_rlp, nodes)
                 else
                     try updHashOrEmbed(alloc, new_child_rlp);
                 i = j;
@@ -867,7 +804,7 @@ fn batchUpdateNodeIndexed(
                     }
                     sole = @intCast(ci);
                 }
-                if (sole >= 0) return collapseIndexed(alloc, @intCast(sole), enc[@intCast(sole)], index);
+                if (sole >= 0) return collapseIndexed(alloc, @intCast(sole), enc[@intCast(sole)], nodes);
                 if (sole == -1) return &EMPTY_NODE_RLP;
             }
 
@@ -876,49 +813,43 @@ fn batchUpdateNodeIndexed(
 
         // Extension and leaf: fall back to sequential single-change updates.
         // These cases are rare for multi-change batches (most shared ancestors are branches).
-        // Each iteration may look up children created by the previous one via findNodeInIndex —
-        // index.put is required here.
+        // Each iteration may look up children created by the previous one via nodes.get —
+        // recording them in `nodes` is required here.
         else => {
             var current = node_rlp;
             for (changes) |ch| {
                 var key_nibs: [64]u8 = undefined;
                 nibbles.bytesToNibbles(&ch.key, &key_nibs);
-                current = try updNodeExIndexed(alloc, current, key_nibs[depth..], ch.value, index);
+                current = try updNodeExRecorded(alloc, current, key_nibs[depth..], ch.value, nodes);
             }
             return current;
         },
     }
 }
 
-/// Like updResolveRefEx but uses NodeIndex for O(1) lookups.
-/// New nodes created during updates are inserted into the same index, so a single lookup suffices.
-fn updResolveRefExIndexed(ref: node.NodeRef, index: *const NodeIndex) MptError![]const u8 {
+/// Like updResolveRefEx but uses a NodeView for O(1) lookups.
+fn updResolveRefExIndexed(ref: node.NodeRef, nodes: *const NodeView) MptError![]const u8 {
     return switch (ref) {
         .empty => &.{0x80},
-        .hash => |h| findNodeInIndex(index, h.*) orelse return error.InvalidProof,
+        .hash => |h| nodes.get(h.*) orelse return error.InvalidProof,
         .inline_node => |b| b,
     };
 }
 
-/// Like updNodeEx but uses a single mutable NodeIndex for O(1) pool lookups.
-/// New intermediate nodes are inserted into `index` so subsequent chained updates find them.
-/// Single-change indexed trie update. `store_in_index` controls whether newly
-/// created intermediate nodes are inserted into `index`.
+/// Single-change trie update over a NodeView. `record_created` controls whether
+/// newly created intermediate nodes are recorded in `nodes.created`.
 ///
-///   store_in_index = true  → chained update path (updateAccountChainedIndexed /
-///                             updateStorageChainedIndexed): subsequent calls need
-///                             to find nodes created by earlier calls.
-///   store_in_index = false → batch update path (batchUpdateIndexed): all lookups
-///                             use pre-existing witness nodes; newly created nodes
-///                             are returned directly up the call stack and never
-///                             looked up via the index within the same traversal.
+///   record_created = true  → deletions and sequential inserts: a later collapse or
+///                             insert may look up a node created earlier.
+///   record_created = false → single insert: newly created nodes are returned
+///                             directly up the call stack and never looked up.
 fn updNodeExImpl(
-    comptime store_in_index: bool,
+    comptime record_created: bool,
     alloc: std.mem.Allocator,
     node_rlp: []const u8,
     remaining: []const u8,
     new_val: ?[]const u8,
-    index: *NodeIndex,
+    nodes: *NodeView,
 ) (MptError || error{OutOfMemory})![]const u8 {
     if (node_rlp.len == 1 and node_rlp[0] == 0x80) {
         if (new_val) |val| return updMakeLeaf(alloc, remaining, val);
@@ -938,9 +869,9 @@ fn updNodeExImpl(
                 return updEncodeBranch(alloc, &enc, new_val orelse &.{});
             }
             const nib = remaining[0];
-            const child_rlp = try updResolveRefExIndexed(b.children[nib], index);
-            const new_child_rlp = try updNodeExImpl(store_in_index, alloc, child_rlp, remaining[1..], new_val, index);
-            const new_child_enc = if (comptime store_in_index) try updHashOrEmbedExIndexed(alloc, new_child_rlp, index) else try updHashOrEmbed(alloc, new_child_rlp);
+            const child_rlp = try updResolveRefExIndexed(b.children[nib], nodes);
+            const new_child_rlp = try updNodeExImpl(record_created, alloc, child_rlp, remaining[1..], new_val, nodes);
+            const new_child_enc = if (comptime record_created) try updHashOrEmbedRecorded(alloc, new_child_rlp, nodes) else try updHashOrEmbed(alloc, new_child_rlp);
             var enc: [16][]const u8 = undefined;
             for (b.children, 0..) |child, i| enc[i] = refEncSlice(node_rlp, child);
             enc[nib] = new_child_enc;
@@ -959,7 +890,7 @@ fn updNodeExImpl(
                         sole = @intCast(i);
                     }
                 }
-                if (sole >= 0) return collapseIndexed(alloc, @intCast(sole), enc[@intCast(sole)], index);
+                if (sole >= 0) return collapseIndexed(alloc, @intCast(sole), enc[@intCast(sole)], nodes);
                 if (sole == -1) return &EMPTY_NODE_RLP; // all children empty
             }
 
@@ -974,8 +905,8 @@ fn updNodeExImpl(
             const cp = nibbles.commonPrefixLen(prefix, remaining);
 
             if (cp == prefix.len) {
-                const child_rlp = try updResolveRefExIndexed(e.child, index);
-                const new_child_rlp = try updNodeExImpl(store_in_index, alloc, child_rlp, remaining[cp..], new_val, index);
+                const child_rlp = try updResolveRefExIndexed(e.child, nodes);
+                const new_child_rlp = try updNodeExImpl(record_created, alloc, child_rlp, remaining[cp..], new_val, nodes);
                 if (new_child_rlp.len == 1 and new_child_rlp[0] == 0x80)
                     return &EMPTY_NODE_RLP;
 
@@ -1004,7 +935,7 @@ fn updNodeExImpl(
                     }
                 }
 
-                const new_child_ref = if (comptime store_in_index) try updHashOrEmbedExIndexed(alloc, new_child_rlp, index) else try updHashOrEmbed(alloc, new_child_rlp);
+                const new_child_ref = if (comptime record_created) try updHashOrEmbedRecorded(alloc, new_child_rlp, nodes) else try updHashOrEmbed(alloc, new_child_rlp);
                 return updMakeExtension(alloc, prefix, new_child_ref);
             }
 
@@ -1022,7 +953,7 @@ fn updNodeExImpl(
             const old_nib = prefix[cp];
             if (cp + 1 < prefix.len) {
                 const ext_rlp = try updMakeExtension(alloc, prefix[cp + 1 ..], try updRefEnc(alloc, e.child));
-                children_enc[old_nib] = if (comptime store_in_index) try updHashOrEmbedExIndexed(alloc, ext_rlp, index) else try updHashOrEmbed(alloc, ext_rlp);
+                children_enc[old_nib] = if (comptime record_created) try updHashOrEmbedRecorded(alloc, ext_rlp, nodes) else try updHashOrEmbed(alloc, ext_rlp);
             } else {
                 children_enc[old_nib] = try updRefEnc(alloc, e.child);
             }
@@ -1030,14 +961,14 @@ fn updNodeExImpl(
                 if (cp < remaining.len) {
                     const new_nib = remaining[cp];
                     const leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1 ..], val);
-                    children_enc[new_nib] = if (comptime store_in_index) try updHashOrEmbedExIndexed(alloc, leaf_rlp, index) else try updHashOrEmbed(alloc, leaf_rlp);
+                    children_enc[new_nib] = if (comptime record_created) try updHashOrEmbedRecorded(alloc, leaf_rlp, nodes) else try updHashOrEmbed(alloc, leaf_rlp);
                 } else {
                     branch_val = val;
                 }
             }
             const branch_rlp = try updEncodeBranch(alloc, &children_enc, branch_val);
             if (cp == 0) return branch_rlp;
-            const branch_ref = if (comptime store_in_index) try updHashOrEmbedExIndexed(alloc, branch_rlp, index) else try updHashOrEmbed(alloc, branch_rlp);
+            const branch_ref = if (comptime record_created) try updHashOrEmbedRecorded(alloc, branch_rlp, nodes) else try updHashOrEmbed(alloc, branch_rlp);
             return updMakeExtension(alloc, prefix[0..cp], branch_ref);
         },
 
@@ -1064,33 +995,33 @@ fn updNodeExImpl(
             if (cp < suffix.len) {
                 const old_nib = suffix[cp];
                 const old_leaf_rlp = try updMakeLeaf(alloc, suffix[cp + 1 ..], lf.value);
-                children_enc[old_nib] = if (comptime store_in_index) try updHashOrEmbedExIndexed(alloc, old_leaf_rlp, index) else try updHashOrEmbed(alloc, old_leaf_rlp);
+                children_enc[old_nib] = if (comptime record_created) try updHashOrEmbedRecorded(alloc, old_leaf_rlp, nodes) else try updHashOrEmbed(alloc, old_leaf_rlp);
             } else {
                 branch_val = lf.value;
             }
             if (cp < remaining.len) {
                 const new_nib = remaining[cp];
                 const new_leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1 ..], new_val.?);
-                children_enc[new_nib] = if (comptime store_in_index) try updHashOrEmbedExIndexed(alloc, new_leaf_rlp, index) else try updHashOrEmbed(alloc, new_leaf_rlp);
+                children_enc[new_nib] = if (comptime record_created) try updHashOrEmbedRecorded(alloc, new_leaf_rlp, nodes) else try updHashOrEmbed(alloc, new_leaf_rlp);
             } else {
                 branch_val = new_val.?;
             }
             const branch_rlp = try updEncodeBranch(alloc, &children_enc, branch_val);
             if (cp == 0) return branch_rlp;
-            const branch_ref = if (comptime store_in_index) try updHashOrEmbedExIndexed(alloc, branch_rlp, index) else try updHashOrEmbed(alloc, branch_rlp);
+            const branch_ref = if (comptime record_created) try updHashOrEmbedRecorded(alloc, branch_rlp, nodes) else try updHashOrEmbed(alloc, branch_rlp);
             return updMakeExtension(alloc, suffix[0..cp], branch_ref);
         },
     }
 }
 
-fn updNodeExIndexed(
+fn updNodeExRecorded(
     alloc: std.mem.Allocator,
     node_rlp: []const u8,
     remaining: []const u8,
     new_val: ?[]const u8,
-    index: *NodeIndex,
+    nodes: *NodeView,
 ) (MptError || error{OutOfMemory})![]const u8 {
-    return updNodeExImpl(true, alloc, node_rlp, remaining, new_val, index);
+    return updNodeExImpl(true, alloc, node_rlp, remaining, new_val, nodes);
 }
 
 fn updNodeExBatch(
@@ -1098,9 +1029,9 @@ fn updNodeExBatch(
     node_rlp: []const u8,
     remaining: []const u8,
     new_val: ?[]const u8,
-    index: *NodeIndex,
+    nodes: *NodeView,
 ) (MptError || error{OutOfMemory})![]const u8 {
-    return updNodeExImpl(false, alloc, node_rlp, remaining, new_val, index);
+    return updNodeExImpl(false, alloc, node_rlp, remaining, new_val, nodes);
 }
 
 /// Recursively update a node and return its new RLP bytes.
@@ -1505,14 +1436,14 @@ fn collapseIndexed(
     alloc: std.mem.Allocator,
     sole_nib: u8,
     child_enc: []const u8,
-    index: *NodeIndex,
+    nodes: *NodeView,
 ) (MptError || error{OutOfMemory})![]const u8 {
     // Resolve the child's actual RLP bytes.
     const child_bytes: []const u8 = blk: {
         if (child_enc.len == 33 and child_enc[0] == 0xa0) {
             var h: [32]u8 = undefined;
             @memcpy(&h, child_enc[1..33]);
-            break :blk findNodeInIndex(index, h) orelse return error.InvalidProof;
+            break :blk nodes.get(h) orelse return error.InvalidProof;
         }
         break :blk child_enc;
     };
@@ -1650,11 +1581,11 @@ fn updHashOrEmbedEx(alloc: std.mem.Allocator, node_rlp: []const u8, extra: *std.
     return updRlpBytes(alloc, &h);
 }
 
-/// Like updHashOrEmbedEx but inserts the new node directly into the shared NodeIndex.
-fn updHashOrEmbedExIndexed(alloc: std.mem.Allocator, node_rlp: []const u8, index: *NodeIndex) ![]const u8 {
+/// Like updHashOrEmbedEx but records the new node in `nodes.created`.
+fn updHashOrEmbedRecorded(alloc: std.mem.Allocator, node_rlp: []const u8, nodes: *NodeView) ![]const u8 {
     if (node_rlp.len < 32) return node_rlp;
     const h = keccak256(node_rlp);
-    try index.put(h, node_rlp);
+    try nodes.created.put(h, node_rlp);
     return updRlpBytes(alloc, &h);
 }
 
@@ -1801,209 +1732,6 @@ fn updRlpBytes(alloc: std.mem.Allocator, data: []const u8) ![]u8 {
     return out;
 }
 
-// ─── Tests ─────────────────────────────────────────────────────────────────────
-//
-// These are internal tests that directly exercise the private updNode* functions.
-// They cover the extension-node diverge case: deleting a key that doesn't exist
-// in the trie (key diverges from the extension prefix before its end) must return
-// the trie unchanged rather than incorrectly splitting the extension node.
-
-fn buildTestExtTrie(alloc: std.mem.Allocator) ![]const u8 {
-    // Builds: Extension(prefix=[0,0]) → Branch{child[1]:leaf"a", child[2]:leaf"b"}
-    // Full key nibbles for "a": [0, 0, 1]
-    // Full key nibbles for "b": [0, 0, 2]
-    const leaf_a = try updMakeLeaf(alloc, &.{}, "a");
-    const leaf_b = try updMakeLeaf(alloc, &.{}, "b");
-    var enc: [16][]const u8 = undefined;
-    for (0..16) |i| enc[i] = &[_]u8{0x80};
-    enc[1] = leaf_a;
-    enc[2] = leaf_b;
-    const branch = try updEncodeBranch(alloc, &enc, &.{});
-    const child_ref = try updHashOrEmbed(alloc, branch);
-    return updMakeExtension(alloc, &.{ 0, 0 }, child_ref);
-}
-
-test "rlp helpers byte-identical to updRlpBytes/updRlpList" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    // Byte-string encoding across every branch: empty, single-byte <0x80,
-    // single-byte >=0x80, short (<=55) and long (>55, multi-byte length prefix).
-    const lens = [_]usize{ 0, 1, 2, 31, 32, 55, 56, 100, 256, 300 };
-    for (lens) |n| {
-        const data = try alloc.alloc(u8, n);
-        for (data, 0..) |*b, i| b.* = @intCast((i * 7 + 1) & 0xff);
-        if (n == 1) data[0] = 0x7f; // single-byte <0x80 (raw) path
-        const ref = try updRlpBytes(alloc, data);
-        try std.testing.expectEqual(ref.len, rlpBytesLen(data));
-        const buf = try alloc.alloc(u8, rlpBytesLen(data));
-        try std.testing.expectEqual(buf.len, rlpBytesWrite(buf, 0, data));
-        try std.testing.expectEqualSlices(u8, ref, buf);
-    }
-    // single-byte >=0x80 must take the length-prefixed path (0x81, b)
-    {
-        const data = [_]u8{0xff};
-        const ref = try updRlpBytes(alloc, &data);
-        try std.testing.expectEqual(ref.len, rlpBytesLen(&data));
-        const buf = try alloc.alloc(u8, rlpBytesLen(&data));
-        _ = rlpBytesWrite(buf, 0, &data);
-        try std.testing.expectEqualSlices(u8, ref, buf);
-    }
-
-    // List header across short (<=55) and long (>55) payloads — compared against
-    // the prefix of updRlpList of a single payload-sized item.
-    const payloads = [_]usize{ 0, 1, 55, 56, 256, 1000 };
-    for (payloads) |p| {
-        const item = try alloc.alloc(u8, p);
-        @memset(item, 0xab);
-        const ref = try updRlpList(alloc, &.{item});
-        const hlen = rlpListHeaderLen(p);
-        try std.testing.expectEqual(ref.len - p, hlen);
-        const buf = try alloc.alloc(u8, hlen);
-        try std.testing.expectEqual(buf.len, rlpListHeaderWrite(buf, 0, p));
-        try std.testing.expectEqualSlices(u8, ref[0..hlen], buf);
-    }
-}
-
-test "updNode: deleting non-existent key (diverges from extension prefix) is a no-op" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const ext = try buildTestExtTrie(alloc);
-    // key[0]=0 matches prefix[0]=0, but key[1]=1 ≠ prefix[1]=0 → cp=1 < prefix.len=2
-    const result = try updNode(alloc, ext, &.{ 0, 1, 0, 0 }, null, &.{});
-    try std.testing.expectEqualSlices(u8, ext, result);
-}
-
-test "updNodeEx: deleting non-existent key (diverges from extension prefix) is a no-op" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const ext = try buildTestExtTrie(alloc);
-    var extra = std.ArrayListUnmanaged([]const u8).empty;
-    const result = try updNodeEx(alloc, ext, &.{ 0, 1, 0, 0 }, null, &.{}, &extra);
-    try std.testing.expectEqualSlices(u8, ext, result);
-    try std.testing.expectEqual(@as(usize, 0), extra.items.len);
-}
-
-test "updNodeExIndexed: deleting non-existent key (diverges from extension prefix) is a no-op" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const ext = try buildTestExtTrie(alloc);
-    var index = NodeIndex.init(alloc);
-    const result = try updNodeExIndexed(alloc, ext, &.{ 0, 1, 0, 0 }, null, &index);
-    try std.testing.expectEqualSlices(u8, ext, result);
-}
-
-// ─── Branch-collapse tests ─────────────────────────────────────────────────────
-//
-// Build: Branch{child[1]:leaf"a", child[2]:leaf"b"}
-// Delete child[1] → only child[2] remains → branch collapses to leaf "b" at key [2].
-// All three updNode variants must produce the same result.
-
-fn buildTestBranchTrie(alloc: std.mem.Allocator) !struct { branch: []const u8, pool: []const []const u8 } {
-    const leaf_a = try updMakeLeaf(alloc, &.{}, "a");
-    const leaf_b = try updMakeLeaf(alloc, &.{}, "b");
-    var enc: [16][]const u8 = undefined;
-    for (0..16) |i| enc[i] = try alloc.dupe(u8, &.{0x80});
-    enc[1] = try updHashOrEmbed(alloc, leaf_a);
-    enc[2] = try updHashOrEmbed(alloc, leaf_b);
-    const branch = try updEncodeBranch(alloc, &enc, &.{});
-    // pool contains leaf_a and leaf_b so hash refs can be resolved
-    const pool = try alloc.dupe([]const u8, &.{ leaf_a, leaf_b });
-    return .{ .branch = branch, .pool = pool };
-}
-
-test "updNode: deleting a key collapses branch to leaf" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const t = try buildTestBranchTrie(alloc);
-    // Delete key [1] — only child[2] remains → branch must collapse to a leaf at path [2].
-    const result = try updNode(alloc, t.branch, &.{1}, null, t.pool);
-    const expected = try updMakeLeaf(alloc, &.{2}, "b");
-    try std.testing.expectEqualSlices(u8, expected, result);
-}
-
-test "updNodeEx: deleting a key collapses branch to leaf" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const t = try buildTestBranchTrie(alloc);
-    var extra = std.ArrayListUnmanaged([]const u8).empty;
-    const result = try updNodeEx(alloc, t.branch, &.{1}, null, t.pool, &extra);
-    const expected = try updMakeLeaf(alloc, &.{2}, "b");
-    try std.testing.expectEqualSlices(u8, expected, result);
-}
-
-test "updNodeExIndexed: deleting a key collapses branch to leaf" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const t = try buildTestBranchTrie(alloc);
-    var index = try buildNodeIndex(alloc, t.pool);
-    defer index.deinit();
-    const result = try updNodeExIndexed(alloc, t.branch, &.{1}, null, &index);
-    const expected = try updMakeLeaf(alloc, &.{2}, "b");
-    try std.testing.expectEqualSlices(u8, expected, result);
-}
-
-// ─── Extension-merge tests ─────────────────────────────────────────────────────
-//
-// Build: Extension([0]) → Branch{child[1]:leaf"a", child[2]:leaf"b"}
-// Delete key [0,1] → branch collapses to leaf"b" at [2] → extension merges with
-// that leaf suffix → result is a single leaf at path [0,2].
-
-fn buildTestExtBranchTrie(alloc: std.mem.Allocator) !struct { root: []const u8, pool: []const []const u8 } {
-    const leaf_a = try updMakeLeaf(alloc, &.{}, "a");
-    const leaf_b = try updMakeLeaf(alloc, &.{}, "b");
-    var enc: [16][]const u8 = undefined;
-    for (0..16) |i| enc[i] = try alloc.dupe(u8, &.{0x80});
-    enc[1] = try updHashOrEmbed(alloc, leaf_a);
-    enc[2] = try updHashOrEmbed(alloc, leaf_b);
-    const branch = try updEncodeBranch(alloc, &enc, &.{});
-    const branch_ref = try updHashOrEmbed(alloc, branch);
-    const root = try updMakeExtension(alloc, &.{0}, branch_ref);
-    const pool = try alloc.dupe([]const u8, &.{ leaf_a, leaf_b, branch });
-    return .{ .root = root, .pool = pool };
-}
-
-test "updNode: deleting collapses branch and merges extension" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const t = try buildTestExtBranchTrie(alloc);
-    // Delete key [0,1] → extension([0])→branch collapses → result: leaf at [0,2].
-    const result = try updNode(alloc, t.root, &.{ 0, 1 }, null, t.pool);
-    const expected = try updMakeLeaf(alloc, &.{ 0, 2 }, "b");
-    try std.testing.expectEqualSlices(u8, expected, result);
-}
-
-test "updNodeEx: deleting collapses branch and merges extension" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const t = try buildTestExtBranchTrie(alloc);
-    var extra = std.ArrayListUnmanaged([]const u8).empty;
-    const result = try updNodeEx(alloc, t.root, &.{ 0, 1 }, null, t.pool, &extra);
-    const expected = try updMakeLeaf(alloc, &.{ 0, 2 }, "b");
-    try std.testing.expectEqualSlices(u8, expected, result);
-}
-
-test "updNodeExIndexed: deleting collapses branch and merges extension" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const t = try buildTestExtBranchTrie(alloc);
-    var index = try buildNodeIndex(alloc, t.pool);
-    defer index.deinit();
-    const result = try updNodeExIndexed(alloc, t.root, &.{ 0, 1 }, null, &index);
-    const expected = try updMakeLeaf(alloc, &.{ 0, 2 }, "b");
-    try std.testing.expectEqualSlices(u8, expected, result);
-}
-
 fn updRlpList(alloc: std.mem.Allocator, items: []const []const u8) ![]u8 {
     var total: usize = 0;
     for (items) |item| total += item.len;
@@ -2037,3 +1765,30 @@ fn updRlpList(alloc: std.mem.Allocator, items: []const []const u8) ![]u8 {
     }
     return out;
 }
+
+// ─── Tests ─────────────────────────────────────────────────────────────────────
+
+test {
+    _ = @import("./tests.zig");
+    _ = @import("./rlp_tests.zig");
+}
+
+const Mpt = @This();
+
+/// Private helpers re-exported for tests.zig. Not part of the module's supported API.
+pub const testing = struct {
+    pub const NodeView = Mpt.NodeView;
+    pub const updNode = Mpt.updNode;
+    pub const updNodeEx = Mpt.updNodeEx;
+    pub const updNodeExRecorded = Mpt.updNodeExRecorded;
+    pub const updMakeLeaf = Mpt.updMakeLeaf;
+    pub const updMakeExtension = Mpt.updMakeExtension;
+    pub const updEncodeBranch = Mpt.updEncodeBranch;
+    pub const updHashOrEmbed = Mpt.updHashOrEmbed;
+    pub const updRlpBytes = Mpt.updRlpBytes;
+    pub const updRlpList = Mpt.updRlpList;
+    pub const rlpBytesLen = Mpt.rlpBytesLen;
+    pub const rlpBytesWrite = Mpt.rlpBytesWrite;
+    pub const rlpListHeaderLen = Mpt.rlpListHeaderLen;
+    pub const rlpListHeaderWrite = Mpt.rlpListHeaderWrite;
+};

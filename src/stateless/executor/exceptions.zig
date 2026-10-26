@@ -125,6 +125,8 @@ pub fn mapBlockError(err: anyerror) ?[]const u8 {
         error.BlockRlpTooLarge => E.BLOCK_RLP_TOO_LARGE.name(),
         error.InvalidBlockHash => E.INVALID_BLOCK_HASH.name(),
         error.InvalidRequests => E.INVALID_REQUESTS.name(),
+        error.InvalidLogsBloom => E.INVALID_LOG_BLOOM.name(),
+        error.InvalidBlockNumber => E.INVALID_BLOCK_NUMBER.name(),
         else => null,
     };
 }

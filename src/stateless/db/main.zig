@@ -310,3 +310,7 @@ fn u256ToHash(value: u256) primitives.Hash {
     }
     return out;
 }
+
+test {
+    _ = @import("./tests.zig");
+}

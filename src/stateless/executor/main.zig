@@ -54,7 +54,9 @@ test {
     // transition_tests.zig is a leaf test file nothing else imports, so it must be
     // referenced explicitly to be pulled into the test graph.
     _ = @import("./transition_tests.zig");
+    _ = @import("./block_validation_tests.zig");
     _ = @import("./main_tests.zig");
+    _ = @import("./tx_signing_tests.zig");
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
@@ -107,7 +109,7 @@ fn finalizeOutput(
     alloc: std.mem.Allocator,
     pre_state_root: [32]u8,
     result: transition_mod.TransitionResult,
-    node_index: *mpt.NodeIndex,
+    node_index: *const mpt.NodeIndex,
     spec: primitives.SpecId,
     witness_db: anytype,
 ) !output.ProofOutput {
@@ -185,7 +187,7 @@ pub fn executeBlockFromAlloc(
 pub fn executeBlockStateless(
     alloc: std.mem.Allocator,
     pre_state_root: [32]u8,
-    node_index: *mpt.NodeIndex,
+    node_index: *const mpt.NodeIndex,
     req: input.NewPayloadRequest,
     witness_codes: []const []const u8,
     block_hashes: []types.BlockHashEntry,
@@ -247,6 +249,8 @@ pub fn executeBlockStateless(
         .expected_state_root = ep.state_root,
         .computed_receipts_root = proof.receipts_root,
         .expected_receipts_root = ep.receipts_root,
+        .computed_logs_bloom = result.block_bloom,
+        .expected_logs_bloom = ep.logs_bloom,
     });
     if (primitives.isEnabledIn(spec, .prague) and !std.mem.eql(u8, &requests_hash, &result.requests_hash)) return error.InvalidRequests;
     return proof;

@@ -17,13 +17,14 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
+permissions: {} # lock everything by default (least-privilege)
 
 jobs:
   build-and-release:
     name: Build guest objects and create draft release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # least-privilege for this job only
 
     steps:
       - name: Checkout
@@ -33,6 +34,8 @@ jobs:
         uses: goto-bus-stop/setup-zig@abea47f85e598557f500fa1fd2ab7464fcb39406 # v2.2.1
         with:
           version: "0.16.0"
+          # A release downloads Zig instead of restoring it from the Actions cache.
+          cache: false
 
       - name: Build rv64im relocatable object
         run: zig build rv64im-object -Doptimize=ReleaseFast

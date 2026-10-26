@@ -774,7 +774,7 @@ pub fn transitionWithContext(
         var sender: input.Address = undefined;
         const maybe_sender: ?input.Address = blk: {
             if (tx.r != null and tx.s != null and (tx.r.? != 0 or tx.s.? != 0)) {
-                break :blk try tx_signing.recoverSender(arena, tx, chain_id);
+                break :blk try tx_signing.recoverSender(arena, tx, chain_id, spec);
             }
             break :blk tx.from;
         };
@@ -881,8 +881,7 @@ pub fn transitionWithContext(
                 const authority: context_mod.RecoveredAuthority = blk: {
                     if (ai.signer) |s| break :blk context_mod.RecoveredAuthority{ .Valid = s };
                     if (ai.y_parity > 1) break :blk context_mod.RecoveredAuthority.Invalid;
-                    const SECP256K1N_OVER_2: u256 = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
-                    if (ai.s > SECP256K1N_OVER_2) break :blk context_mod.RecoveredAuthority.Invalid;
+                    if (!tx_signing.signatureInBounds(ai.r, ai.s, true)) break :blk context_mod.RecoveredAuthority.Invalid;
                     const auth_hash = tx_signing.authorizationSigningHash(arena, &ai) catch @panic("out of memory");
                     const recid: u8 = if (ai.y_parity == 0) 0 else 1;
                     var auth_sig: [64]u8 = undefined;
@@ -1315,7 +1314,12 @@ pub fn transitionWithContext(
 
     // ── Post-block system calls (EIP-7002, EIP-7251) ──────────────────────────
     // Capture return data for EIP-7685 requests_hash computation.
-    const post_block_reqs = try system_calls.applyPostBlockCallsCapture(arena, ctx, &instructions, &precompiles, spec, chain_id, contracts);
+    // A call that failed because the witness could not serve one of its reads leaves an
+    // incomplete witness, not a failed system call.
+    const post_block_reqs = system_calls.applyPostBlockCallsCapture(arena, ctx, &instructions, &precompiles, spec, chain_id, contracts) catch |err| {
+        if (ctx.ctx_error != context_mod.ContextError.ok) return error.InvalidWitness;
+        return err;
+    };
 
     // Detect changes from mining reward + withdrawals + post-block calls (all at BAI=N+1)
     if (tracker) |*t| t.detectAndRecord(txs.len + 1, ctx, txs.len);

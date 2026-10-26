@@ -98,7 +98,7 @@ pub fn computeStateRootDelta(
     pre_state_root: [32]u8,
     alloc_map: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
     deleted_accounts: []const types.Address,
-    index: *mpt.NodeIndex,
+    index: *const mpt.NodeIndex,
     pre_storage_roots: anytype,
 ) ![32]u8 {
     const total = alloc_map.count() + deleted_accounts.len;
@@ -106,9 +106,7 @@ pub fn computeStateRootDelta(
 
     // Every RLP encoding and intermediate trie-node byte string produced while
     // batch-applying these changes is scratch: only the returned root hash
-    // outlives this call, and nothing looks up `index` entries inserted during
-    // this computation again afterward (each batchUpdateIndexed traversal is
-    // self-contained — see mpt/main.zig's updNodeExImpl doc comment). Scope
+    // outlives this call, and batchUpdateIndexed never writes to `index`. Scope
     // them to an arena so the whole batch is reclaimed in one free instead of
     // leaking one allocation per touched trie node into the caller's allocator.
     var scratch_arena = ScratchArena.init(alloc);
@@ -200,7 +198,7 @@ fn computeStorageRootBatch(
     alloc: std.mem.Allocator,
     account: types.AllocAccount,
     pre_storage_root: ?[32]u8,
-    index: *mpt.NodeIndex,
+    index: *const mpt.NodeIndex,
 ) ![32]u8 {
     const old_root = pre_storage_root orelse return computeStorageRootScratch(alloc, account);
 

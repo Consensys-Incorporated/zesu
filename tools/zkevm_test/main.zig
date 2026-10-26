@@ -235,8 +235,8 @@ fn runBlock(
     }
 
     // successful_validation mirrors spec: True iff execution succeeds AND
-    // post_state_root and receipts_root match the payload. executeStatelessInput
-    // validates the roots itself (StateRootMismatch / ReceiptsRootMismatch), so a
+    // post_state_root, receipts_root and logs_bloom match the payload. executeStatelessInput
+    // validates the roots and logs bloom itself (StateRootMismatch / ReceiptsRootMismatch / InvalidLogsBloom), so a
     // successful return is authoritative.
     var exec_err: anyerror = error.Success;
     const successful_validation = if (tx_root_mismatch) false else blk: {

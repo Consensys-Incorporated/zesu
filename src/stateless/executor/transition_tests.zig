@@ -74,7 +74,7 @@ fn runTestBlock(arena: std.mem.Allocator, ctx: anytype, txs: []input.TxInput) !T
     );
 }
 
-// Integration counterpart to the unit tests in db/test.zig and host_tests.zig:
+// Integration counterpart to the unit tests in db/tests.zig and host_tests.zig:
 // those prove the database error is raised and that setupCreate marks ctx_error,
 // this proves it survives a whole block execution -- the block is rejected
 // rather than completing as if the CREATE legitimately failed.
@@ -389,4 +389,55 @@ test "a transaction whose recipient code is absent from the witness marks the bl
     _ = runTestBlock(arena_state.allocator(), &ctx, &txs) catch {};
 
     try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
+}
+
+// A witness that proves the EIP-7002 request contract, whose code reads storage slot 0,
+// but proves that slot only if `slot_known`. Every other account is absent.
+const RequestQueueDb = struct {
+    slot_known: bool,
+
+    const EIP7002_ADDRESS: input.Address = .{
+        0x00, 0x00, 0x09, 0x61, 0xef, 0x48, 0x0e, 0xb5, 0x5e, 0x80,
+        0xd1, 0x9a, 0xd8, 0x35, 0x79, 0xa6, 0x4c, 0x00, 0x70, 0x02,
+    };
+    const CODE_HASH: primitives.Hash = @splat(0xc1);
+
+    pub fn basic(_: *@This(), address: input.Address) !?state_mod.AccountInfo {
+        if (!std.mem.eql(u8, &address, &EIP7002_ADDRESS)) return null;
+        var info = state_mod.AccountInfo.default();
+        info.code_hash = CODE_HASH;
+        info.code = null; // loaded through codeByHash, as WitnessDatabase does
+        return info;
+    }
+
+    pub fn codeByHash(_: *@This(), _: primitives.Hash) !bytecode_mod.Bytecode {
+        return bytecode_mod.Bytecode.newLegacy(&.{ 0x60, 0x00, 0x54, 0x00 }); // PUSH1 0 SLOAD STOP
+    }
+
+    pub fn storage(self: *@This(), _: primitives.Address, _: primitives.StorageKey) !primitives.StorageValue {
+        if (!self.slot_known) return error.InvalidWitness;
+        return 0;
+    }
+
+    pub fn blockHash(_: *@This(), _: u64) !primitives.Hash {
+        return @splat(0);
+    }
+};
+
+fn runEmptyPragueBlock(db: RequestQueueDb) !void {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var ctx = context_mod.Context(RequestQueueDb).new(db, primitives.SpecId.prague);
+    ctx.block = transition_mod.buildBlockEnv(testEnv(), primitives.SpecId.prague);
+    const pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) = .{};
+    _ = try transitionWithContext(arena_state.allocator(), &ctx, pre_alloc, testEnv(), &.{}, primitives.SpecId.prague, 1, SystemContracts.forChainId(1), 0);
+}
+
+test "a post-block system call that reads unprovable storage fails as an incomplete witness" {
+    try std.testing.expectError(error.InvalidWitness, runEmptyPragueBlock(.{ .slot_known = false }));
+}
+
+test "a post-block system call whose reads are provable succeeds" {
+    try runEmptyPragueBlock(.{ .slot_known = true });
 }
