@@ -282,15 +282,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `key` is also the zesu-zkvm zisk build's -Disa value. build_step and
-        # obj_file only serve merge-bases that predate addGuestObject.
-        include:
-          - key: rv64im
-            build_step: rv64im-object
-            obj_file: zesu.o
-          - key: zisk
-            build_step: zisk-object
-            obj_file: zesu-zisk.o
+        # `key` is the zesu-zkvm zisk build's -Disa value.
+        key: [rv64im, zisk]
 
     steps:
       - name: Checkout zesu (PR head)
@@ -386,82 +379,32 @@ jobs:
             benchelf-${{ matrix.key }}-${{ needs.prepare.outputs.base }}-${{ needs.prepare.outputs.zisk }}-${{
             needs.prepare.outputs.zkvm }}-${{ runner.os }}
 
-      # A zesu-zkvm pin that builds zesu through addGuestObject takes -Disa and
-      # --fork; an older pin, from a PR not yet rebased, only links objects.
-      - name: Detect the zesu-zkvm guest build
-        id: guest
+      # zesu-zkvm builds zesu itself, as CI does, through addGuestObject; a
+      # merge-base or zesu-zkvm pin that predates it needs a rebase.
+      - name: Build merge-base ELF
+        if: steps.cache-base-elf.outputs.cache-hit != 'true'
         env:
           ISA: ${{ matrix.key }}
         run: |
-          if grep -q 'addGuestObject' zesu-zkvm/zisk/build.zig; then
-            echo "isa_flag=-Disa=$ISA" >> "$GITHUB_OUTPUT"
-          else
-            echo "isa_flag=" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build merge-base ELF
-        id: base-elf
-        if: steps.cache-base-elf.outputs.cache-hit != 'true'
-        env:
-          ISA_FLAG: ${{ steps.guest.outputs.isa_flag }}
-          BUILD_STEP: ${{ matrix.build_step }}
-          OBJ_FILE: ${{ matrix.obj_file }}
-        run: |
           set -euo pipefail
-          # zesu-zkvm builds zesu itself, as CI does, when the base exports
-          # addGuestObject. Older bases link their own object instead; the
-          # zesu part of the ELF is byte-identical either way.
-          if [ -n "$ISA_FLAG" ] && grep -q 'pub fn addGuestObject' base/build.zig; then
-            (cd zesu-zkvm/zisk && zig build -Doptimize=ReleaseFast \
-              --fork="$GITHUB_WORKSPACE/base" "$ISA_FLAG")
-            cp zesu-zkvm/zisk/zig-out/bin/zesu-zisk elf-base
-            exit 0
-          fi
-          cd base
-          # zig build -l writes to stderr; redirect so grep can see it.
-          if zig build -l 2>&1 | grep -q "^  $BUILD_STEP "; then
-            zig build "$BUILD_STEP" -Doptimize=ReleaseFast
-            base_obj="zig-out/lib/$OBJ_FILE"
-          elif [ "$BUILD_STEP" = "rv64im-object" ]; then
-            # rv64im-object always exists; this branch shouldn't be reached.
-            zig build rv64im-object -Doptimize=ReleaseFast
-            base_obj=zig-out/lib/zesu.o
-          else
-            # merge-base predates this build step — no like-for-like baseline.
-            # Linking the rv64im fallback through the HEAD zisk linker fails
-            # because the ABI may have diverged; skip the comparison instead.
-            echo "no_base=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          cd ..
           (cd zesu-zkvm/zisk && zig build -Doptimize=ReleaseFast \
-            -Dzesu_obj="$GITHUB_WORKSPACE/base/$base_obj" $ISA_FLAG)
+            --fork="$GITHUB_WORKSPACE/base" -Disa="$ISA")
           cp zesu-zkvm/zisk/zig-out/bin/zesu-zisk elf-base
 
       - name: Build PR head ELF
-        if: steps.base-elf.outputs.no_base != 'true'
         env:
-          ISA_FLAG: ${{ steps.guest.outputs.isa_flag }}
-          BUILD_STEP: ${{ matrix.build_step }}
-          OBJ_FILE: ${{ matrix.obj_file }}
+          ISA: ${{ matrix.key }}
         run: |
           set -euo pipefail
           # Remove the previous link output: a failed build otherwise leaves a
           # stale ELF behind and the benchmark silently measures the old one.
           rm -f zesu-zkvm/zisk/zig-out/bin/zesu-zisk
-          if [ -n "$ISA_FLAG" ]; then
-            (cd zesu-zkvm/zisk && zig build -Doptimize=ReleaseFast \
-              --fork="$GITHUB_WORKSPACE/head" "$ISA_FLAG")
-          else
-            (cd head && zig build "$BUILD_STEP" -Doptimize=ReleaseFast)
-            (cd zesu-zkvm/zisk && zig build -Doptimize=ReleaseFast \
-              -Dzesu_obj="$GITHUB_WORKSPACE/head/zig-out/lib/$OBJ_FILE")
-          fi
+          (cd zesu-zkvm/zisk && zig build -Doptimize=ReleaseFast \
+            --fork="$GITHUB_WORKSPACE/head" -Disa="$ISA")
           cp zesu-zkvm/zisk/zig-out/bin/zesu-zisk elf-head
           ls -l elf-base elf-head
 
       - name: Build the harness
-        if: steps.base-elf.outputs.no_base != 'true'
         working-directory: harness
         run: go build -o "$GITHUB_WORKSPACE/bench" ./bench
 
@@ -471,7 +414,6 @@ jobs:
       # Uses the in-repo vector, which needs no SSZ encoding — so it says what
       # moved, while the corpus and tier say how much.
       - name: Detail pass
-        if: steps.base-elf.outputs.no_base != 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -487,12 +429,6 @@ jobs:
           ziskemu --diff-stats detail/snap-base.csv detail/snap-head.csv \
             --html-report detail/bench-detail.html > /dev/null
 
-      # A marker file rather than a job output: matrix jobs share one set of
-      # outputs, so a per-variant flag has to travel with the variant's artifact.
-      - name: Mark a missing baseline
-        if: steps.base-elf.outputs.no_base == 'true'
-        run: touch no-base
-
       - name: Upload binaries
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -501,7 +437,6 @@ jobs:
             elf-base
             elf-head
             bench
-            no-base
             detail/
           if-no-files-found: error
           retention-days: 1
