@@ -741,3 +741,66 @@ test "validateSecuredTriePaths: nodes absent from the witness are not walked" {
     try mpt.validateSecuredTriePaths(EMPTY_TRIE_HASH, &index, &try mpt.PathCheck.init(arena.allocator(), &index));
     try mpt.validateSecuredTriePaths(@splat(0x11), &index, &try mpt.PathCheck.init(arena.allocator(), &index));
 }
+
+test "batchUpdateIndexed: random inserts and updates match a rebuilt trie" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const rand = prng.random();
+
+    for (0..20) |round| {
+        // Short keys share long prefixes, which gives extensions and inline children.
+        const key_bytes: usize = if (round % 2 == 0) 32 else 2;
+        const n_pre = 1 + rand.uintLessThan(usize, 200);
+        const n_new = 1 + rand.uintLessThan(usize, 60);
+        var keys = std.ArrayListUnmanaged([32]u8).empty;
+        var vals = std.ArrayListUnmanaged([]const u8).empty;
+        var seen = std.AutoHashMapUnmanaged([32]u8, void).empty;
+        while (keys.items.len < n_pre + n_new) {
+            var k: [32]u8 = @splat(0);
+            rand.bytes(k[0..key_bytes]);
+            if ((try seen.fetchPut(alloc, k, {})) != null) continue;
+            const v = try alloc.alloc(u8, 1 + rand.uintLessThan(usize, 40));
+            rand.bytes(v);
+            try keys.append(alloc, k);
+            try vals.append(alloc, v);
+        }
+
+        // Pre-state: the first n_pre keys, built node by node so the witness holds every node.
+        var empty_index = NodeIndex.init(alloc);
+        var nodes: NodeView = .{ .witness = &empty_index, .created = NodeIndex.init(alloc) };
+        var root_rlp: []const u8 = &EMPTY_NODE_RLP;
+        for (keys.items[0..n_pre], vals.items[0..n_pre]) |k, v| {
+            var nibs: [64]u8 = undefined;
+            nibbles.bytesToNibbles(&k, &nibs);
+            root_rlp = try updNodeExRecorded(alloc, root_rlp, &nibs, v, &nodes);
+        }
+        try nodes.created.put(keccak256(root_rlp), root_rlp);
+
+        // Changes: the new keys, plus updates of some pre-state keys.
+        var changes = std.ArrayListUnmanaged(BatchChange).empty;
+        for (keys.items[n_pre..], vals.items[n_pre..]) |k, v| try changes.append(alloc, .{ .key = k, .value = v });
+        for (keys.items[0..n_pre], vals.items[0..n_pre]) |k, *v| {
+            if (rand.boolean()) {
+                const nv = try alloc.alloc(u8, 1 + rand.uintLessThan(usize, 40));
+                rand.bytes(nv);
+                v.* = nv;
+                try changes.append(alloc, .{ .key = k, .value = nv });
+            }
+        }
+        std.mem.sort(BatchChange, changes.items, {}, struct {
+            fn lt(_: void, a: BatchChange, b: BatchChange) bool {
+                return std.mem.lessThan(u8, &a.key, &b.key);
+            }
+        }.lt);
+        const got = try batchUpdateIndexed(alloc, keccak256(root_rlp), changes.items, &nodes.created);
+
+        var map = std.AutoArrayHashMapUnmanaged([32]u8, []const u8).empty;
+        for (keys.items, vals.items) |k, v| try map.put(alloc, k, v);
+        var kv = std.ArrayListUnmanaged(builder.KV).empty;
+        var it = map.iterator();
+        while (it.next()) |e| try kv.append(alloc, .{ .key = e.key_ptr, .value = e.value_ptr.* });
+        try std.testing.expectEqual(try builder.trieRoot(alloc, kv.items), got);
+    }
+}

@@ -940,6 +940,27 @@ fn batchUpdateNodeIndexed(
         return current;
     }
 
+    // Inserts and updates below a branch cannot collapse it: copy the branch around the
+    // changed children instead of decoding and re-encoding all 17 items.
+    const inserts_only = for (changes) |ch| {
+        if (ch.value == null) break false;
+    } else true;
+    if (inserts_only) {
+        if (BranchSlots.of(node_rlp)) |slots| {
+            var new_enc: [16]?[]const u8 = @splat(null);
+            var i: usize = 0;
+            while (i < changes.len) {
+                const nib = nibbleAt(&changes[i].key, depth);
+                var j = i + 1;
+                while (j < changes.len and nibbleAt(&changes[j].key, depth) == nib) j += 1;
+                const new_child_rlp = try batchUpdateNodeIndexed(alloc, try slots.child(node_rlp, nib, nodes), changes[i..j], depth + 1, nodes);
+                new_enc[nib] = try updHashOrEmbed(alloc, new_child_rlp);
+                i = j;
+            }
+            return slots.replaceChildren(alloc, node_rlp, &new_enc);
+        }
+    }
+
     const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
         error.InvalidRlp => return error.InvalidRlp,
         error.InvalidNode => return error.InvalidNode,
@@ -1022,6 +1043,134 @@ fn updResolveRefExIndexed(ref: node.NodeRef, nodes: *const NodeView) MptError![]
     };
 }
 
+/// Where the 17 items of a branch start in its RLP, for a branch updEncodeBranch would
+/// re-encode byte for byte: a canonical list header, children that are empty, a 32-byte
+/// hash or an inline list, and an empty value. Copying such a branch around a new child
+/// gives the bytes that decoding it and re-encoding with the new child would.
+const BranchSlots = struct {
+    /// Item i spans at[i]..at[i + 1]; at[17] is the end of the payload.
+    at: [18]u32,
+
+    const full_len = 3 + 16 * 33 + 1;
+    const full: BranchSlots = blk: {
+        var s: BranchSlots = undefined;
+        for (0..17) |i| s.at[i] = 3 + 33 * i;
+        s.at[17] = full_len;
+        break :blk s;
+    };
+
+    /// Null for anything else, including a leaf, an extension or malformed bytes, which
+    /// the caller decodes as before.
+    inline fn of(node_rlp: []const u8) ?BranchSlots {
+        // Sixteen hash children and no value: a fixed 532-byte layout, so the slots are a
+        // constant and only the 17 item prefixes need checking. One load covers the list
+        // header 0xf9 0x02 0x11 and the first child's 0xa0.
+        if (node_rlp.len >= full_len and std.mem.readInt(u32, node_rlp[0..4], .little) == 0xa01102f9 and
+            node_rlp[full_len - 1] == 0x80)
+        {
+            const all_hashes = inline for (1..16) |i| {
+                if (node_rlp[3 + 33 * i] != 0xa0) break false;
+            } else true;
+            if (all_hashes) return full;
+        }
+        return ofScan(node_rlp);
+    }
+
+    fn ofScan(node_rlp: []const u8) ?BranchSlots {
+        if (node_rlp.len < 3) return null;
+        var pos: usize = undefined;
+        var payload: usize = undefined;
+        switch (node_rlp[0]) {
+            0xc0...0xf7 => |b| {
+                pos = 1;
+                payload = b - 0xc0;
+            },
+            0xf8 => {
+                pos = 2;
+                payload = node_rlp[1];
+                if (payload <= 55) return null;
+            },
+            0xf9 => {
+                pos = 3;
+                payload = @as(usize, node_rlp[1]) << 8 | node_rlp[2];
+                if (payload <= 0xff) return null;
+            },
+            else => return null,
+        }
+        const end = pos + payload;
+        if (end > node_rlp.len) return null;
+        var slots: BranchSlots = undefined;
+        for (0..17) |i| {
+            if (pos >= end) return null;
+            slots.at[i] = @intCast(pos);
+            const b = node_rlp[pos];
+            const n: usize = switch (b) {
+                0x80 => 1,
+                0xa0 => 33,
+                0xc0...0xf7 => 1 + @as(usize, b - 0xc0),
+                else => return null,
+            };
+            if (i == 16 and b != 0x80) return null;
+            if (n > end - pos) return null;
+            pos += n;
+        }
+        if (pos != end) return null;
+        slots.at[17] = @intCast(end);
+        return slots;
+    }
+
+    /// The node child `nib` refers to: its witness or created node, its inline bytes, or
+    /// the empty node.
+    fn child(self: *const BranchSlots, node_rlp: []const u8, nib: u8, nodes: *const NodeView) MptError![]const u8 {
+        const slot = node_rlp[self.at[nib]..self.at[nib + 1]];
+        return switch (slot[0]) {
+            0x80 => &EMPTY_NODE_RLP,
+            0xa0 => nodes.get(slot[1..33].*) orelse return error.InvalidProof,
+            else => slot,
+        };
+    }
+
+    /// The branch with each child that has an entry in `new_enc` replaced by it.
+    fn replaceChildren(self: *const BranchSlots, alloc: std.mem.Allocator, node_rlp: []const u8, new_enc: *const [16]?[]const u8) ![]const u8 {
+        var payload: usize = self.at[17] - self.at[0];
+        for (new_enc, 0..) |enc, i| {
+            if (enc) |e| payload = payload - (self.at[i + 1] - self.at[i]) + e.len;
+        }
+        const out = try alloc.alloc(u8, rlpListHeaderLen(payload) + payload);
+        var pos = rlpListHeaderWrite(out, 0, payload);
+        var from: usize = self.at[0];
+        for (new_enc, 0..) |enc, i| {
+            const e = enc orelse continue;
+            const keep = node_rlp[from..self.at[i]];
+            @memcpy(out[pos..][0..keep.len], keep);
+            pos += keep.len;
+            @memcpy(out[pos..][0..e.len], e);
+            pos += e.len;
+            from = self.at[i + 1];
+        }
+        const tail = node_rlp[from..self.at[17]];
+        @memcpy(out[pos..][0..tail.len], tail);
+        return out;
+    }
+
+    /// The branch with child `nib` replaced by `child_enc`, an encoded child reference.
+    fn replaceChild(self: *const BranchSlots, alloc: std.mem.Allocator, node_rlp: []const u8, nib: u8, child_enc: []const u8) ![]const u8 {
+        const first = self.at[0];
+        const lo = self.at[nib];
+        const hi = self.at[nib + 1];
+        const end = self.at[17];
+        const payload = (end - first) - (hi - lo) + child_enc.len;
+        const out = try alloc.alloc(u8, rlpListHeaderLen(payload) + payload);
+        var pos = rlpListHeaderWrite(out, 0, payload);
+        @memcpy(out[pos..][0 .. lo - first], node_rlp[first..lo]);
+        pos += lo - first;
+        @memcpy(out[pos..][0..child_enc.len], child_enc);
+        pos += child_enc.len;
+        @memcpy(out[pos..][0 .. end - hi], node_rlp[hi..end]);
+        return out;
+    }
+};
+
 /// Single-change trie update over a NodeView. `record_created` controls whether
 /// newly created intermediate nodes are recorded in `nodes.created`.
 ///
@@ -1040,6 +1189,18 @@ fn updNodeExImpl(
     if (node_rlp.len == 1 and node_rlp[0] == 0x80) {
         if (new_val) |val| return updMakeLeaf(alloc, remaining, val);
         return &EMPTY_NODE_RLP;
+    }
+
+    // An insert or update below a branch changes one child and cannot collapse the branch:
+    // copy the branch around the new child instead of decoding and re-encoding all 17 items.
+    if (new_val != null and remaining.len > 0) {
+        if (BranchSlots.of(node_rlp)) |slots| {
+            const nib = remaining[0];
+            const child_rlp = try slots.child(node_rlp, nib, nodes);
+            const new_child_rlp = try updNodeExImpl(record_created, alloc, child_rlp, remaining[1..], new_val, nodes);
+            const new_child_enc = if (comptime record_created) try updHashOrEmbedRecorded(alloc, new_child_rlp, nodes) else try updHashOrEmbed(alloc, new_child_rlp);
+            return slots.replaceChild(alloc, node_rlp, nib, new_child_enc);
+        }
     }
 
     const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
@@ -1159,6 +1320,11 @@ fn updNodeExImpl(
         },
 
         .leaf => |lf| {
+            // Updating the leaf's own key: keep its path bytes, which are the hex-prefix
+            // encoding of `remaining` exactly when hpPathIs says so.
+            if (new_val) |val| {
+                if (hpPathIs(lf.key_end, remaining)) return updLeafWithHp(alloc, lf.key_end, val);
+            }
             var path_buf: [128]u8 = undefined;
             const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
             if (!hp.is_leaf) return error.InvalidNode;
@@ -1850,7 +2016,25 @@ fn rlpListHeaderLen(payload: usize) usize {
 
 fn updMakeLeaf(alloc: std.mem.Allocator, path_nibs: []const u8, value: []const u8) ![]const u8 {
     var hp_buf: [65]u8 = undefined;
-    const hp = nibbles.hpEncode(path_nibs, true, &hp_buf);
+    return updLeafWithHp(alloc, nibbles.hpEncode(path_nibs, true, &hp_buf), value);
+}
+
+/// Whether `hp` is exactly the hex-prefix leaf encoding of the nibbles `path`, as
+/// nibbles.hpEncode(path, true, _) would write it.
+fn hpPathIs(hp: []const u8, path: []const u8) bool {
+    const odd = path.len & 1;
+    if (hp.len != 1 + path.len / 2) return false;
+    if (hp[0] != if (odd == 1) 0x30 | path[0] else 0x20) return false;
+    var j = odd;
+    for (hp[1..]) |b| {
+        if (b != (path[j] << 4 | path[j + 1])) return false;
+        j += 2;
+    }
+    return true;
+}
+
+/// A leaf node from its hex-prefix path bytes and value.
+fn updLeafWithHp(alloc: std.mem.Allocator, hp: []const u8, value: []const u8) ![]const u8 {
     const payload = rlpBytesLen(hp) + rlpBytesLen(value);
     const out = try alloc.alloc(u8, rlpListHeaderLen(payload) + payload);
     var pos = rlpListHeaderWrite(out, 0, payload);
@@ -1957,6 +2141,28 @@ fn updRlpList(alloc: std.mem.Allocator, items: []const []const u8) ![]u8 {
 test {
     _ = @import("./tests.zig");
     _ = @import("./rlp_tests.zig");
+}
+
+test "BranchSlots: full-hash fast path matches the scan" {
+    var full: [BranchSlots.full_len]u8 = undefined;
+    full[0..3].* = .{ 0xf9, 0x02, 0x11 };
+    for (0..16) |i| {
+        full[3 + 33 * i] = 0xa0;
+        @memset(full[4 + 33 * i ..][0..32], @intCast(i + 1));
+    }
+    full[BranchSlots.full_len - 1] = 0x80;
+    try std.testing.expectEqual(BranchSlots.ofScan(&full).?.at, BranchSlots.of(&full).?.at);
+
+    // Anything off the fixed layout takes the scan's answer, accepted or not.
+    var bad = full;
+    bad[BranchSlots.full_len - 1] = 0x81;
+    try std.testing.expect(BranchSlots.of(&bad) == null);
+    bad = full;
+    bad[3 + 33 * 7] = 0xa1;
+    try std.testing.expect(BranchSlots.of(&bad) == null);
+    bad = full;
+    bad[2] = 0x12;
+    try std.testing.expect(BranchSlots.of(bad[0..]) == null);
 }
 
 const Mpt = @This();
