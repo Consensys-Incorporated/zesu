@@ -1201,7 +1201,10 @@ pub const JournalInner = struct {
         const account = self.evm_state.getPtr(address).?;
         const is_newly_created = account.isCreated();
 
-        if (account.storage.getPtr(key)) |slot| {
+        // One probe for both outcomes: a miss leaves the entry reserved for the loaded value.
+        const gop = try account.storage.getOrPut(key);
+        if (gop.found_existing) {
+            const slot = gop.value_ptr;
             // Storage slot already loaded
             var is_cold = slot.isColdTransactionId(self.transaction_id);
             // If the slot is cold by transaction ID but the EIP-2930 access list marks it warm,
@@ -1220,11 +1223,15 @@ pub const JournalInner = struct {
         } else {
             // Storage slot not yet loaded — fetch from DB
             if (skip_cold_load) {
+                account.storage.removeByPtr(gop.key_ptr);
                 return JournalLoadError.ColdLoadSkipped;
             }
             // For newly-created accounts all storage is implicitly zero (no DB lookup needed).
-            const value = if (is_newly_created) @as(primitives.StorageValue, 0) else try db.storage(address, key);
-            try account.storage.put(key, state.EvmStorageSlot.new(value, self.transaction_id));
+            const value = if (is_newly_created) @as(primitives.StorageValue, 0) else db.storage(address, key) catch |err| {
+                account.storage.removeByPtr(gop.key_ptr);
+                return err;
+            };
+            gop.value_ptr.* = state.EvmStorageSlot.new(value, self.transaction_id);
             const is_cold = !self.warm_addresses.isStorageWarm(address, key);
             if (is_cold) {
                 self.journal.append(alloc_mod.get(), JournalEntryFactory.storageWarmed(address, key)) catch {};
