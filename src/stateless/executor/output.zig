@@ -152,13 +152,40 @@ pub fn computeStateRootDelta(
         n += 1;
     }
 
-    std.mem.sort(mpt.BatchChange, changes[0..n], {}, struct {
-        fn lt(_: void, a: mpt.BatchChange, b: mpt.BatchChange) bool {
-            return std.mem.lessThan(u8, &a.key, &b.key);
-        }
-    }.lt);
+    return mpt.batchUpdateIndexed(scratch, pre_state_root, try sortChanges(scratch, changes[0..n]), index);
+}
 
-    return mpt.batchUpdateIndexed(scratch, pre_state_root, changes[0..n], index);
+/// Orders changes by key, as std.mem.lessThan does. The keys are hashes, so the leading
+/// eight bytes, read as one big-endian word, almost always decide.
+fn changeKeyLessThan(_: void, a: mpt.BatchChange, b: mpt.BatchChange) bool {
+    const x = std.mem.readInt(u64, a.key[0..8], .big);
+    const y = std.mem.readInt(u64, b.key[0..8], .big);
+    if (x != y) return x < y;
+    return std.mem.lessThan(u8, &a.key, &b.key);
+}
+
+/// Sorts changes by key, stably. The keys are hashes, spread evenly over their first byte:
+/// a counting pass on that byte leaves buckets of a few changes for an insertion sort.
+/// Returns the sorted changes, which may live in a new buffer from `alloc`.
+fn sortChanges(alloc: std.mem.Allocator, changes: []mpt.BatchChange) ![]mpt.BatchChange {
+    if (changes.len <= 32) {
+        std.sort.insertion(mpt.BatchChange, changes, {}, changeKeyLessThan);
+        return changes;
+    }
+    var start = [_]u32{0} ** 257;
+    for (changes) |*c| start[@as(usize, c.key[0]) + 1] += 1;
+    for (1..257) |i| start[i] += start[i - 1];
+    const sorted = try alloc.alloc(mpt.BatchChange, changes.len);
+    var next: [256]u32 = start[0..256].*;
+    for (changes) |*c| {
+        sorted[next[c.key[0]]] = c.*;
+        next[c.key[0]] += 1;
+    }
+    for (0..256) |b| {
+        if (start[b + 1] - start[b] > 1)
+            std.sort.insertion(mpt.BatchChange, sorted[start[b]..start[b + 1]], {}, changeKeyLessThan);
+    }
+    return sorted;
 }
 
 /// stateRoot: state trie, keys = keccak256(address), values = account RLP.
@@ -213,18 +240,16 @@ fn computeStorageRootBatch(
         std.mem.writeInt(u256, &slot_key, entry.key_ptr.*, .big);
         const slot_hash = mpt.keccak256(&slot_key);
         const val: u256 = entry.value_ptr.*;
-        const val_enc: ?[]const u8 = if (val == 0) null else try rlp.encodeU256(alloc, val);
+        const val_enc: ?[]const u8 = if (val == 0) null else blk: {
+            const out = try alloc.alloc(u8, uintRlpLen(val));
+            _ = writeUintRlp(out, val);
+            break :blk out;
+        };
         changes[n] = .{ .key = slot_hash, .value = val_enc };
         n += 1;
     }
 
-    std.mem.sort(mpt.BatchChange, changes[0..n], {}, struct {
-        fn lt(_: void, a: mpt.BatchChange, b: mpt.BatchChange) bool {
-            return std.mem.lessThan(u8, &a.key, &b.key);
-        }
-    }.lt);
-
-    return mpt.batchUpdateIndexed(alloc, old_root, changes[0..n], index);
+    return mpt.batchUpdateIndexed(alloc, old_root, try sortChanges(alloc, changes[0..n]), index);
 }
 
 /// Scratch-build storage root from all non-zero slots (no witness pool needed).
@@ -274,13 +299,45 @@ fn encodeAccountRlp(
     storage_root: [32]u8,
     code_hash: [32]u8,
 ) ![]u8 {
-    const parts = [_][]const u8{
-        try rlp.encodeU64(alloc, nonce),
-        try rlp.encodeU256(alloc, balance),
-        try rlp.encodeBytes(alloc, &storage_root),
-        try rlp.encodeBytes(alloc, &code_hash),
-    };
-    return rlp.encodeList(alloc, &parts);
+    // [nonce, balance, storageRoot, codeHash]: at most 9 + 33 + 33 + 33 payload bytes,
+    // so the list header is always 0xf8 and one length byte.
+    const payload = uintRlpLen(nonce) + uintRlpLen(balance) + 2 * 33;
+    const out = try alloc.alloc(u8, 2 + payload);
+    out[0] = 0xf8;
+    out[1] = @intCast(payload);
+    var pos: usize = 2;
+    pos += writeUintRlp(out[pos..], nonce);
+    pos += writeUintRlp(out[pos..], balance);
+    out[pos] = 0xa0;
+    @memcpy(out[pos + 1 ..][0..32], &storage_root);
+    out[pos + 33] = 0xa0;
+    @memcpy(out[pos + 34 ..][0..32], &code_hash);
+    return out;
+}
+
+/// Length of the RLP encoding of an integer, as rlp.encodeU256 writes it.
+fn uintRlpLen(n: u256) usize {
+    if (n < 0x80) return 1;
+    return 1 + (256 - @as(usize, @clz(n)) + 7) / 8;
+}
+
+/// Writes the RLP encoding of an integer (minimal big-endian bytes as a byte string, 0x80
+/// for zero) to the start of `out` and returns its length, as rlp.encodeU256 would.
+fn writeUintRlp(out: []u8, n: u256) usize {
+    if (n == 0) {
+        out[0] = 0x80;
+        return 1;
+    }
+    if (n < 0x80) {
+        out[0] = @intCast(n);
+        return 1;
+    }
+    const len = (256 - @as(usize, @clz(n)) + 7) / 8;
+    var buf: [32]u8 = undefined;
+    std.mem.writeInt(u256, &buf, n, .big);
+    out[0] = @intCast(0x80 + len);
+    @memcpy(out[1..][0..len], buf[32 - len ..]);
+    return 1 + len;
 }
 
 fn encodeReceiptRlp(alloc: std.mem.Allocator, receipt: types.Receipt) ![]u8 {
@@ -407,3 +464,49 @@ const KECCAK_EMPTY: [32]u8 = [_]u8{
     0xe5, 0x00, 0xb6, 0x53, 0xca, 0x82, 0x27, 0x3b,
     0x7b, 0xfa, 0xd8, 0x04, 0x5d, 0x85, 0xa4, 0x70,
 };
+
+test "account encoding and change sort match the generic paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(0x6f75_7470);
+    const r = prng.random();
+
+    for (0..2000) |i| {
+        // Every width from 0 to 256 bits, plus the 0x7f/0x80 single-byte boundary.
+        const bits = i % 257;
+        var v: u256 = if (bits == 0) 0 else r.int(u256) >> @intCast(256 - bits);
+        if (i % 50 == 1) v = 0x7f + @as(u256, (i / 50) % 2);
+        const nonce: u64 = @truncate(v);
+        var root: [32]u8 = undefined;
+        var code_hash: [32]u8 = undefined;
+        r.bytes(&root);
+        r.bytes(&code_hash);
+        const want = try rlp.encodeList(alloc, &.{
+            try rlp.encodeU64(alloc, nonce),
+            try rlp.encodeU256(alloc, v),
+            try rlp.encodeBytes(alloc, &root),
+            try rlp.encodeBytes(alloc, &code_hash),
+        });
+        try std.testing.expectEqualSlices(u8, want, try encodeAccountRlp(alloc, nonce, v, root, code_hash));
+        try std.testing.expectEqual((try rlp.encodeU256(alloc, v)).len, uintRlpLen(v));
+    }
+
+    for ([_]usize{ 0, 1, 31, 32, 33, 300, 5000 }) |n| {
+        const changes = try alloc.alloc(mpt.BatchChange, n);
+        for (changes, 0..) |*c, j| {
+            r.bytes(&c.key);
+            // Shared leading bytes exercise the tie-breaks past the first word.
+            if (j % 3 == 0) @memset(c.key[0..9], 0x42);
+            c.value = null;
+        }
+        const want = try alloc.dupe(mpt.BatchChange, changes);
+        std.mem.sort(mpt.BatchChange, want, {}, struct {
+            fn lt(_: void, a: mpt.BatchChange, b: mpt.BatchChange) bool {
+                return std.mem.lessThan(u8, &a.key, &b.key);
+            }
+        }.lt);
+        const got = try sortChanges(alloc, changes);
+        for (want, got) |w, g| try std.testing.expectEqualSlices(u8, &w.key, &g.key);
+    }
+}
