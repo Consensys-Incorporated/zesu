@@ -16,11 +16,10 @@
 //! silently select the slower non-extended op.
 
 const std = @import("std");
-const build_options = @import("build_options");
 
-/// True when the ZisK DMA chip is available (set by the build system for the
-/// zisk-object target; false for the rv64im baseline and native builds).
-pub const has_dma: bool = build_options.has_dma;
+/// True when the ZisK DMA chip is available (build.zig `GuestFeatures.dma`; false for
+/// the rv64im baseline and native builds).
+pub const has_dma: bool = @import("guest_features.zig").has_dma;
 
 /// Copy exactly `N` bytes. `N` must be comptime-known so the count fits in an
 /// immediate; the regions must not overlap.

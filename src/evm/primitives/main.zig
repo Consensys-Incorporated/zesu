@@ -26,6 +26,9 @@ pub const StorageValue = U256;
 /// Fixed-size block moves through the ZisK DMA chip (no-op fallback on other targets).
 pub const dma = @import("dma.zig");
 
+/// zkVM capabilities the guest object was built with (build.zig `GuestFeatures`).
+pub const guest_features = @import("guest_features.zig");
+
 /// murmur3's fmix64 avalanche — distributes entropy across the full space of
 /// the u64. Keep both multiply/shift rounds: a single-multiply variant cannot
 /// carry entropy downwards, so inputs whose low bits are all zero stay
