@@ -875,7 +875,31 @@ fn runDispatch(
         // forks. SHL/SHR/SAR and PUSH0 reach it too whenever their fork gate is closed.
         // Naming every cold value explicitly (rather than using `else`) keeps the jump
         // table dense over the whole u8 domain — no upper-bound compare needed.
-        0x04...0x0f, 0x12, 0x13, 0x1a, 0x1e, 0x1f, 0x20...0x4f, 0x54, 0x55, 0x58, 0x59, 0x5c...0x5e, 0xa0...0xff => |op| {
+        // ADDRESS, CALLER, CALLVALUE, CALLDATASIZE, CODESIZE, PC, MSIZE: Frontier,
+        // G_BASE in every fork, one field pushed. Through the table each cost more in
+        // dispatch than in the handler. One arm, not seven: each extra arm is another
+        // predecessor of the dispatch tail, and past LLVM's tail-duplication limit every
+        // inlined arm pays a jump to a shared tail.
+        0x30, 0x33, 0x34, 0x36, 0x38, 0x58, 0x59 => |op| {
+            pc += 1;
+            if (!self.gas.spend(gas_costs.G_BASE)) {
+                self.halt(.out_of_gas);
+                return;
+            }
+            switch (op) {
+                0x30 => opcodes.opAddress(ctx),
+                0x33 => opcodes.opCaller(ctx),
+                0x34 => opcodes.opCallvalue(ctx),
+                0x36 => opcodes.opCalldatasize(ctx),
+                0x38 => pushWord(self, code.len),
+                0x58 => pushWord(self, pc - 1),
+                0x59 => opcodes.opMsize(ctx),
+                else => unreachable,
+            }
+            if (self.bytecode.isNotEnd())
+                continue :sw opcodeAt(code, pc);
+        },
+        0x04...0x0f, 0x12, 0x13, 0x1a, 0x1e, 0x1f, 0x20...0x2f, 0x31, 0x32, 0x35, 0x37, 0x39...0x4f, 0x54, 0x55, 0x5c...0x5e, 0xa0...0xff => |op| {
             pc += 1;
             if (!coldStep(self, table, ctx, op, &pc)) return;
             // Only the cold path can suspend the frame, so this is the one arm
@@ -884,6 +908,15 @@ fn runDispatch(
                 continue :sw opcodeAt(code, pc);
         },
     }
+}
+
+/// Push a value an inlined arm already has in hand (the code length, the pc).
+inline fn pushWord(self: *Interpreter, v: usize) void {
+    if (!self.stack.hasSpace(1)) {
+        self.halt(.stack_overflow);
+        return;
+    }
+    self.stack.pushUnsafe(@intCast(v));
 }
 
 /// Run `handler` with the register-held counter published to `bytecode.pc`,
