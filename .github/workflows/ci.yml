@@ -194,15 +194,16 @@ jobs:
       contents: read  # least-privilege for this job only
     env:
       # zesu-zkvm commit supplying the linker script, host object and vectors.
+      # Its zisk build compiles this checkout's zesu through addGuestObject.
       # Bump when the guest ABI or memory map changes. The ZisK version is read
       # from that commit's own workflow, so the two cannot drift apart.
-      ZKVM_REF: "087bc8a539b95446738f5ae3f03f4563b097e2ba"
+      ZKVM_REF: "d2b2e35dd17110d3340d8bcc28da575f305649e7"
       # Host Rust, and the ZisK guest toolchain (0xPolygonHermez/rust tag). ziskup installs the
       # newest `zisk-<major>.x.y` toolchain for the pinned ZisK; the toolchain step below then
       # re-installs this exact tag. Keep the major in step with ZisK's TOOLCHAIN_MAJOR
-      # (3 for ZisK 1.2.x) when ZKVM_REF moves ZisK.
+      # (4 for ZisK 1.3.x) when ZKVM_REF moves ZisK.
       RUST_VERSION: "1.98.1"
-      ZISK_RUST_TOOLCHAIN: "zisk-3.0.0"
+      ZISK_RUST_TOOLCHAIN: "zisk-4.0.0"
 
     steps:
       - name: Checkout zesu
@@ -270,37 +271,29 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: zesu-zkvm/zisk/lib/libziskos_staticlib.a
-          key: libziskos-staticlib-${{ steps.zisk.outputs.version }}-${{ runner.os }}
+          key: libziskos-staticlib-${{ steps.zisk.outputs.version }}-${{ runner.os }}-${{ hashFiles('zesu-zkvm/zisk/Makefile') }}
 
       - name: Build libziskos_staticlib.a
         if: steps.cache-libziskos.outputs.cache-hit != 'true'
         working-directory: zesu-zkvm/zisk
         run: make lib/libziskos_staticlib.a ZISK_DIR=$GITHUB_WORKSPACE/zisk
 
-      # Compiles zesu for riscv64-freestanding with no atomics, no libc and a
-      # bump allocator — a target no other job in this workflow exercises.
-      - name: Build the rv64im guest object
-        working-directory: zesu
-        run: zig build rv64im-object -Doptimize=ReleaseFast
-
       # Executes a real mainnet block inside the emulator. This is the only
       # coverage for guest-only failures: code can compile, pass every native
-      # suite, and still abort here (see #97).
-      - name: Run guest vectors
+      # suite, and still abort here (see #97). ZESU_SOURCE builds this checkout
+      # (zig build --fork) for riscv64-freestanding with no atomics, no libc and
+      # a bump allocator — a target no other job in this workflow exercises.
+      - name: Run guest vectors (rv64im)
         working-directory: zesu-zkvm/zisk
-        run: make test ZESU_OBJ=$GITHUB_WORKSPACE/zesu/zig-out/lib/zesu.o
+        run: make test ZESU_SOURCE=$GITHUB_WORKSPACE/zesu ISA=rv64im
 
       # Same guest logic, plus the Zbb/Zbs bitmanip extensions ZisK's
       # transpiler and cost model support natively (see PRs #117, #119).
-      # Exercised separately from zesu.o above so a Zbb/Zbs-specific
-      # correctness regression can't hide behind the baseline object's pass.
-      - name: Build the zisk guest object (rv64im + Zbb + Zbs)
-        working-directory: zesu
-        run: zig build zisk-object -Doptimize=ReleaseFast
-
-      - name: Run zisk guest vectors (Zbb/Zbs object)
+      # Exercised separately from rv64im above so a Zbb/Zbs-specific
+      # correctness regression can't hide behind the baseline build's pass.
+      - name: Run guest vectors (rv64im + Zbb + Zbs)
         working-directory: zesu-zkvm/zisk
-        run: make test ZESU_OBJ=$GITHUB_WORKSPACE/zesu/zig-out/lib/zesu-zisk.o
+        run: make test ZESU_SOURCE=$GITHUB_WORKSPACE/zesu ISA=zisk
 
   lint:
     name: Lint
