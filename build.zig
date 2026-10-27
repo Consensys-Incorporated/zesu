@@ -482,6 +482,7 @@ pub fn addGuestObject(
         .root_module = obj_mods.zkvm_root.?,
     });
     obj.root_module.code_model = .medium;
+    obj.root_module.omit_frame_pointer = true;
     return obj;
 }
 
