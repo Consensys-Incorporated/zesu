@@ -7,6 +7,7 @@ const gas_costs = @import("gas_costs.zig");
 const opcodes = @import("opcodes/main.zig");
 const Gas = @import("gas.zig").Gas;
 const Stack = @import("stack.zig").Stack;
+const stack_mod = @import("stack.zig");
 const Memory = @import("memory.zig").Memory;
 const InstructionResult = @import("instruction_result.zig").InstructionResult;
 const InterpreterAction = @import("interpreter_action.zig").InterpreterAction;
@@ -18,6 +19,7 @@ const JournalCheckpoint = @import("context").JournalCheckpoint;
 // Lazy imports for dispatch types — pointer-only usage prevents circular dependency issues.
 const InstructionContext = @import("instruction_context.zig").InstructionContext;
 const Host = @import("host.zig").Host;
+const host_mod = @import("host.zig");
 
 /// Input data for current execution context
 pub const InputsImpl = struct {
@@ -562,6 +564,149 @@ inline fn opcodeAt(code: []const u8, pc: usize) u8 {
     return code[pc];
 }
 
+/// Interpreter state the dispatch loop keeps in registers. `self.gas.remaining`,
+/// `self.stack.length` and `self.bytecode.pc` are STALE while an inlined arm runs:
+/// anything that reads or writes them through `self`/`ctx` (every handler outside
+/// the inlined arms) must be bracketed by `spill` and `reload`.
+///
+/// They were reloaded from memory on every opcode: a pushed word's four limb
+/// stores may alias `stack.length` (Zig has no type-based alias analysis), and the
+/// handlers reach the stack and gas through `ctx`, so LLVM could not keep either
+/// in a register across an arm.
+const Regs = struct {
+    pc: usize,
+    gas: u64,
+    /// Stack length.
+    sp: usize,
+    /// Stack base; the backing store is fixed for the frame.
+    sb: [*]primitives.U256,
+};
+
+inline fn spill(self: *Interpreter, r: *const Regs) void {
+    self.bytecode.pc = r.pc;
+    self.gas.remaining = r.gas;
+    self.stack.length = r.sp;
+}
+
+inline fn reload(self: *Interpreter, r: *Regs) void {
+    r.pc = self.bytecode.pc;
+    r.gas = self.gas.remaining;
+    r.sp = self.stack.length;
+}
+
+/// Halt from an inlined arm. Errors consume all gas, as `halt` does.
+inline fn fail(self: *Interpreter, r: *Regs, res: InstructionResult) void {
+    if (res.isError()) r.gas = 0;
+    spill(self, r);
+    self.halt(res);
+}
+
+/// Charge static gas; on out-of-gas halt and return false.
+inline fn charge(self: *Interpreter, r: *Regs, cost: u64) bool {
+    if (r.gas < cost) {
+        fail(self, r, .out_of_gas);
+        return false;
+    }
+    r.gas -= cost;
+    return true;
+}
+
+/// Pop two, push f(top, second). Gas before the stack check, as the handlers did.
+inline fn binop(self: *Interpreter, r: *Regs, comptime cost: u64, comptime f: fn (primitives.U256, primitives.U256) primitives.U256) bool {
+    if (!charge(self, r, cost)) return false;
+    if (r.sp < 2) {
+        fail(self, r, .stack_underflow);
+        return false;
+    }
+    const a = r.sb[r.sp - 1];
+    const b = r.sb[r.sp - 2];
+    r.sp -= 1;
+    r.sb[r.sp - 1] = f(a, b);
+    return true;
+}
+
+/// Replace the top with f(top).
+inline fn unop(self: *Interpreter, r: *Regs, comptime cost: u64, comptime f: fn (primitives.U256) primitives.U256) bool {
+    if (!charge(self, r, cost)) return false;
+    if (r.sp < 1) {
+        fail(self, r, .stack_underflow);
+        return false;
+    }
+    r.sb[r.sp - 1] = f(r.sb[r.sp - 1]);
+    return true;
+}
+
+/// Push `v` after charging `cost`.
+inline fn pushReg(self: *Interpreter, r: *Regs, comptime cost: u64, v: primitives.U256) bool {
+    if (!charge(self, r, cost)) return false;
+    if (r.sp >= stack_mod.STACK_LIMIT) {
+        fail(self, r, .stack_overflow);
+        return false;
+    }
+    r.sb[r.sp] = v;
+    r.sp += 1;
+    return true;
+}
+
+/// Run a handler that goes through `self`/`ctx`. Returns false if it halted.
+inline fn viaSelf(self: *Interpreter, r: *Regs, comptime cost: u64, comptime handler: anytype, args: anytype) bool {
+    if (!charge(self, r, cost)) return false;
+    spill(self, r);
+    @call(.always_inline, handler, args);
+    reload(self, r);
+    return self.bytecode.isNotEnd();
+}
+
+const ops = struct {
+    fn add(a: primitives.U256, b: primitives.U256) primitives.U256 {
+        return a +% b;
+    }
+    fn sub(a: primitives.U256, b: primitives.U256) primitives.U256 {
+        return a -% b;
+    }
+    fn mul(a: primitives.U256, b: primitives.U256) primitives.U256 {
+        return a *% b;
+    }
+    fn lt(a: primitives.U256, b: primitives.U256) primitives.U256 {
+        return @intFromBool(a < b);
+    }
+    fn gt(a: primitives.U256, b: primitives.U256) primitives.U256 {
+        return @intFromBool(a > b);
+    }
+    fn eq(a: primitives.U256, b: primitives.U256) primitives.U256 {
+        return @intFromBool(a == b);
+    }
+    fn band(a: primitives.U256, b: primitives.U256) primitives.U256 {
+        return a & b;
+    }
+    fn bor(a: primitives.U256, b: primitives.U256) primitives.U256 {
+        return a | b;
+    }
+    fn bxor(a: primitives.U256, b: primitives.U256) primitives.U256 {
+        return a ^ b;
+    }
+    fn shl(shift: primitives.U256, value: primitives.U256) primitives.U256 {
+        return if (shift < 256) value << @intCast(shift) else 0;
+    }
+    fn shr(shift: primitives.U256, value: primitives.U256) primitives.U256 {
+        return if (shift < 256) value >> @intCast(shift) else 0;
+    }
+    fn iszero(a: primitives.U256) primitives.U256 {
+        return @intFromBool(a == 0);
+    }
+    fn not(a: primitives.U256) primitives.U256 {
+        return ~a;
+    }
+};
+
+/// Validate a jump destination popped from the stack.
+inline fn jumpTarget(self: *Interpreter, dest: primitives.U256) ?usize {
+    if (dest > std.math.maxInt(usize)) return null;
+    const d: usize = @intCast(dest);
+    if (!self.bytecode.isValidJump(d)) return null;
+    return d;
+}
+
 fn runDispatch(
     self: *Interpreter,
     table: *const InstructionTable,
@@ -576,333 +721,262 @@ fn runDispatch(
     // EIP-3855. Loop-invariant like has_shifts.
     const has_push0 = primitives.isEnabledIn(self.runtime_flags.spec_id, .shanghai);
 
-    // PC in a register for the length of the frame. It was in memory, so every
-    // opcode paid a load, an add and a store to advance it, plus another load
-    // to fetch the next one. The `defer` publishes it on every exit path,
-    // including the out-of-gas returns and a CALL/CREATE suspend.
-    //
-    // `self.bytecode.pc` is therefore STALE inside every arm below. The only
-    // handlers that read or write it are JUMP, JUMPI, PUSH (via `withPc`) and
-    // whatever the cold path reaches through the table, including PC (via
-    // `coldStep`). A handler that touches `bytecode.pc` must be reached through
-    // one of those two; never call it bare from an inlined arm.
-    var pc = self.bytecode.pc;
-    defer self.bytecode.pc = pc;
+    var r = Regs{
+        .pc = self.bytecode.pc,
+        .gas = self.gas.remaining,
+        .sp = self.stack.length,
+        .sb = self.stack.data.ptr,
+    };
 
-    // `pending` is set only by CALL/CALLCODE/DELEGATECALL/STATICCALL and
-    // CREATE/CREATE2 in call.zig, all of which are >= 0xf0 and so reached
-    // through the cold path. The inlined arms below cannot suspend the frame,
-    // so they skip the check and only test whether execution continues -- three
-    // instructions per dispatch, on every opcode.
-
-    sw: switch (opcodeAt(code, pc)) {
+    // Inlined arms return on any halt (through `fail`), so they continue without
+    // re-testing `continue_execution`. `pending` is set only by the CALL/CREATE
+    // family, reached through the cold path, which is the one arm that re-checks it.
+    sw: switch (opcodeAt(code, r.pc)) {
         0x00 => { // STOP
-            pc += 1;
+            r.pc += 1;
+            spill(self, &r);
             opcodes.opStop(ctx);
         },
         0x01 => { // ADD
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opAdd(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!binop(self, &r, gas_costs.G_VERYLOW, ops.add)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x02 => { // MUL
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_LOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opMul(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!binop(self, &r, gas_costs.G_LOW, ops.mul)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x03 => { // SUB
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opSub(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!binop(self, &r, gas_costs.G_VERYLOW, ops.sub)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x10 => { // LT
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opLt(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!binop(self, &r, gas_costs.G_VERYLOW, ops.lt)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x11 => { // GT
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opGt(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!binop(self, &r, gas_costs.G_VERYLOW, ops.gt)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x14 => { // EQ
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opEq(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!binop(self, &r, gas_costs.G_VERYLOW, ops.eq)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x15 => { // ISZERO
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opIsZero(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!unop(self, &r, gas_costs.G_VERYLOW, ops.iszero)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x16 => { // AND
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opAnd(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!binop(self, &r, gas_costs.G_VERYLOW, ops.band)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x17 => { // OR
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opOr(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!binop(self, &r, gas_costs.G_VERYLOW, ops.bor)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x18 => { // XOR
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opXor(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!binop(self, &r, gas_costs.G_VERYLOW, ops.bxor)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x19 => { // NOT
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opNot(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!unop(self, &r, gas_costs.G_VERYLOW, ops.not)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         // SHL/SHR/SAR — fork-gated on Constantinople (EIP-145), see the note above.
-        // When the gate is closed `coldStep` reads the table, which holds
-        // opUnknown for these on older forks.
+        // When the gate is closed the table holds opUnknown for them.
         0x1B => { // SHL
-            pc += 1;
+            r.pc += 1;
             if (has_shifts) {
-                if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                    self.halt(.out_of_gas);
-                    return;
-                }
-                opcodes.opShl(ctx);
-            } else if (!coldStep(self, table, ctx, 0x1B, &pc)) return;
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+                if (!binop(self, &r, gas_costs.G_VERYLOW, ops.shl)) return;
+            } else if (!coldReg(self, table, ctx, 0x1B, &r)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x1C => { // SHR
-            pc += 1;
+            r.pc += 1;
             if (has_shifts) {
-                if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                    self.halt(.out_of_gas);
-                    return;
-                }
-                opcodes.opShr(ctx);
-            } else if (!coldStep(self, table, ctx, 0x1C, &pc)) return;
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+                if (!binop(self, &r, gas_costs.G_VERYLOW, ops.shr)) return;
+            } else if (!coldReg(self, table, ctx, 0x1C, &r)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x1D => { // SAR
-            pc += 1;
+            r.pc += 1;
             if (has_shifts) {
-                if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                    self.halt(.out_of_gas);
-                    return;
-                }
-                opcodes.opSar(ctx);
-            } else if (!coldStep(self, table, ctx, 0x1D, &pc)) return;
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+                if (!viaSelf(self, &r, gas_costs.G_VERYLOW, opcodes.opSar, .{ctx})) return;
+            } else if (!coldReg(self, table, ctx, 0x1D, &r)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x50 => { // POP
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_BASE)) {
-                self.halt(.out_of_gas);
+            r.pc += 1;
+            if (!charge(self, &r, gas_costs.G_BASE)) return;
+            if (r.sp < 1) {
+                fail(self, &r, .stack_underflow);
                 return;
             }
-            opcodes.opPop(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.sp -= 1;
+            continue :sw opcodeAt(code, r.pc);
         },
-        // MLOAD/MSTORE/MSTORE8 — Frontier, behaviour-stable, and all three charge
-        // G_VERYLOW statically with memory expansion billed inside the handler,
-        // so they meet the invariant unconditionally.
+        // MLOAD/MSTORE/MSTORE8 — Frontier, behaviour-stable, G_VERYLOW static with
+        // memory expansion billed inside the handler (through `self.gas`).
         0x51 => { // MLOAD
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opMload(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!viaSelf(self, &r, gas_costs.G_VERYLOW, opcodes.opMload, .{ctx})) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x52 => { // MSTORE
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opMstore(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!viaSelf(self, &r, gas_costs.G_VERYLOW, opcodes.opMstore, .{ctx})) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x53 => { // MSTORE8
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
-                return;
-            }
-            opcodes.opMstore8(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.pc += 1;
+            if (!viaSelf(self, &r, gas_costs.G_VERYLOW, opcodes.opMstore8, .{ctx})) return;
+            continue :sw opcodeAt(code, r.pc);
         },
+        // JUMP lands one past the JUMPDEST and charges its gas here, so a taken
+        // jump never dispatches the JUMPDEST. Same outcome as running it: JUMPDEST
+        // costs G_JUMPDEST and does nothing else.
         0x56 => { // JUMP
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_MID)) {
-                self.halt(.out_of_gas);
+            r.pc += 1;
+            if (!charge(self, &r, gas_costs.G_MID)) return;
+            if (r.sp < 1) {
+                fail(self, &r, .stack_underflow);
                 return;
             }
-            withPc(self, &pc, opcodes.opJump, .{ctx});
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.sp -= 1;
+            const d = jumpTarget(self, r.sb[r.sp]) orelse {
+                fail(self, &r, .invalid_jump);
+                return;
+            };
+            r.pc = d + 1;
+            if (!charge(self, &r, gas_costs.G_JUMPDEST)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x57 => { // JUMPI
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_HIGH)) {
-                self.halt(.out_of_gas);
+            r.pc += 1;
+            if (!charge(self, &r, gas_costs.G_HIGH)) return;
+            if (r.sp < 2) {
+                fail(self, &r, .stack_underflow);
                 return;
             }
-            withPc(self, &pc, opcodes.opJumpi, .{ctx});
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
-        },
-        0x5B => { // JUMPDEST
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_JUMPDEST)) {
-                self.halt(.out_of_gas);
-                return;
+            const dest = r.sb[r.sp - 1];
+            const cond = r.sb[r.sp - 2];
+            r.sp -= 2;
+            if (cond != 0) {
+                const d = jumpTarget(self, dest) orelse {
+                    fail(self, &r, .invalid_jump);
+                    return;
+                };
+                r.pc = d + 1;
+                if (!charge(self, &r, gas_costs.G_JUMPDEST)) return;
             }
-            opcodes.opJumpdest(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            continue :sw opcodeAt(code, r.pc);
         },
-        // PUSH1..PUSH32: inlined opPushNImpl reads directly from the bytecode slice
+        0x5B => { // JUMPDEST (reached by falling through, not by a jump)
+            r.pc += 1;
+            if (!charge(self, &r, gas_costs.G_JUMPDEST)) return;
+            continue :sw opcodeAt(code, r.pc);
+        },
+        // PUSH1..PUSH32: immediates read straight from the code slice.
         inline 0x60...0x7F => |push_op| {
             const n = push_op - 0x60 + 1;
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
+            r.pc += 1;
+            if (!charge(self, &r, gas_costs.G_VERYLOW)) return;
+            if (r.sp >= stack_mod.STACK_LIMIT) {
+                fail(self, &r, .stack_overflow);
                 return;
             }
-            withPc(self, &pc, opcodes.opPushNImpl, .{ ctx, n });
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            var buf: [32]u8 = .{0} ** 32;
+            if (r.pc + n <= code.len) {
+                @memcpy(buf[32 - n ..], code[r.pc .. r.pc + n]);
+            } else if (r.pc < code.len) {
+                const available = code.len - r.pc;
+                @memcpy(buf[32 - n .. 32 - n + available], code[r.pc..]);
+            }
+            const U = primitives.U256;
+            r.sb[r.sp] = (@as(U, std.mem.readInt(u64, buf[0..8], .big)) << 192) |
+                (@as(U, std.mem.readInt(u64, buf[8..16], .big)) << 128) |
+                (@as(U, std.mem.readInt(u64, buf[16..24], .big)) << 64) |
+                @as(U, std.mem.readInt(u64, buf[24..32], .big));
+            r.sp += 1;
+            r.pc += n;
+            continue :sw opcodeAt(code, r.pc);
         },
-        // DUP1..DUP16: comptime N enables constant-folded depth checks
+        // DUP1..DUP16: comptime N folds the depth checks.
         inline 0x80...0x8F => |dup_op| {
             const n = dup_op - 0x80 + 1;
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
+            r.pc += 1;
+            if (!charge(self, &r, gas_costs.G_VERYLOW)) return;
+            if (r.sp < n) {
+                fail(self, &r, .stack_underflow);
                 return;
             }
-            opcodes.opDupNImpl(ctx, n);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            if (r.sp >= stack_mod.STACK_LIMIT) {
+                fail(self, &r, .stack_overflow);
+                return;
+            }
+            r.sb[r.sp] = r.sb[r.sp - n];
+            r.sp += 1;
+            continue :sw opcodeAt(code, r.pc);
         },
-        // SWAP1..SWAP16: comptime N enables constant-folded depth checks
+        // SWAP1..SWAP16: comptime N folds the depth checks.
         inline 0x90...0x9F => |swap_op| {
             const n = swap_op - 0x90 + 1;
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_VERYLOW)) {
-                self.halt(.out_of_gas);
+            r.pc += 1;
+            if (!charge(self, &r, gas_costs.G_VERYLOW)) return;
+            if (r.sp < n + 1) {
+                fail(self, &r, .stack_underflow);
                 return;
             }
-            opcodes.opSwapNImpl(ctx, n);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            const t = r.sb[r.sp - 1];
+            r.sb[r.sp - 1] = r.sb[r.sp - 1 - n];
+            r.sb[r.sp - 1 - n] = t;
+            continue :sw opcodeAt(code, r.pc);
         },
-        0x5A => { // GAS
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_BASE)) {
-                self.halt(.out_of_gas);
+        0x5A => { // GAS: pushes the gas left after its own charge
+            r.pc += 1;
+            if (!charge(self, &r, gas_costs.G_BASE)) return;
+            if (r.sp >= stack_mod.STACK_LIMIT) {
+                fail(self, &r, .stack_overflow);
                 return;
             }
-            opcodes.opGas(ctx);
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            r.sb[r.sp] = r.gas;
+            r.sp += 1;
+            continue :sw opcodeAt(code, r.pc);
         },
         0x5F => { // PUSH0 (EIP-3855, Shanghai)
-            pc += 1;
+            r.pc += 1;
             if (has_push0) {
-                if (!self.gas.spend(gas_costs.G_BASE)) {
-                    self.halt(.out_of_gas);
-                    return;
-                }
-                opcodes.opPush0(ctx);
-            } else if (!coldStep(self, table, ctx, 0x5F, &pc)) return;
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+                if (!pushReg(self, &r, gas_costs.G_BASE, 0)) return;
+            } else if (!coldReg(self, table, ctx, 0x5F, &r)) return;
+            continue :sw opcodeAt(code, r.pc);
         },
         // ADDRESS, CALLER, CALLVALUE, CALLDATASIZE, CODESIZE, PC, MSIZE: Frontier,
-        // G_BASE in every fork, one field pushed. Through the table each cost more in
-        // dispatch than in the handler. One arm, not seven: each extra arm is another
-        // predecessor of the dispatch tail, and past LLVM's tail-duplication limit every
-        // inlined arm pays a jump to a shared tail.
+        // G_BASE in every fork, one value pushed. One arm, not seven: each extra arm
+        // is another predecessor of the dispatch tail, and past LLVM's
+        // tail-duplication limit every inlined arm pays a jump to a shared tail.
         0x30, 0x33, 0x34, 0x36, 0x38, 0x58, 0x59 => |op| {
-            pc += 1;
-            if (!self.gas.spend(gas_costs.G_BASE)) {
-                self.halt(.out_of_gas);
-                return;
-            }
+            r.pc += 1;
             switch (op) {
-                0x30 => opcodes.opAddress(ctx),
-                0x33 => opcodes.opCaller(ctx),
-                0x34 => opcodes.opCallvalue(ctx),
-                0x36 => opcodes.opCalldatasize(ctx),
-                0x38 => self.pushWord(code.len),
-                0x58 => self.pushWord(pc - 1),
-                0x59 => opcodes.opMsize(ctx),
+                0x38 => if (!pushReg(self, &r, gas_costs.G_BASE, code.len)) return,
+                0x58 => if (!pushReg(self, &r, gas_costs.G_BASE, r.pc - 1)) return,
+                0x30 => if (!pushReg(self, &r, gas_costs.G_BASE, host_mod.addressToU256(self.input.target))) return,
+                0x33 => if (!pushReg(self, &r, gas_costs.G_BASE, host_mod.addressToU256(self.input.caller))) return,
+                0x34 => if (!pushReg(self, &r, gas_costs.G_BASE, self.input.value)) return,
+                0x36 => if (!pushReg(self, &r, gas_costs.G_BASE, self.input.data.len)) return,
+                0x59 => if (!pushReg(self, &r, gas_costs.G_BASE, self.memory.size())) return,
                 else => unreachable,
             }
-            if (self.bytecode.isNotEnd())
-                continue :sw opcodeAt(code, pc);
+            continue :sw opcodeAt(code, r.pc);
         },
         // Cold path: table lookup + indirect call.
         // Fork-gated opcodes (PUSH0, TLOAD/TSTORE etc.) land here and are handled
@@ -911,50 +985,35 @@ fn runDispatch(
         // Naming every cold value explicitly (rather than using `else`) keeps the jump
         // table dense over the whole u8 domain — no upper-bound compare needed.
         0x04...0x0f, 0x12, 0x13, 0x1a, 0x1e, 0x1f, 0x20...0x2f, 0x31, 0x32, 0x35, 0x37, 0x39...0x4f, 0x54, 0x55, 0x5c...0x5e, 0xa0...0xff => |op| {
-            pc += 1;
-            if (!coldStep(self, table, ctx, op, &pc)) return;
+            r.pc += 1;
+            if (!coldReg(self, table, ctx, op, &r)) return;
             // Only the cold path can suspend the frame, so this is the one arm
             // that has to re-check `pending`.
             if (self.bytecode.isNotEnd() and (!check_pending or self.pending == .none))
-                continue :sw opcodeAt(code, pc);
+                continue :sw opcodeAt(code, r.pc);
         },
     }
 }
 
-/// Run `handler` with the register-held counter published to `bytecode.pc`,
-/// then read it back. For handlers that read or write `bytecode.pc` (JUMP,
-/// JUMPI, PUSH); see the note in `runDispatch`.
-inline fn withPc(self: *Interpreter, pc: *usize, comptime handler: anytype, args: anytype) void {
-    self.bytecode.pc = pc.*;
-    @call(.always_inline, handler, args);
-    pc.* = self.bytecode.pc;
-}
-
-/// The cold path: table load, static gas, indirect call. Returns false if the
-/// opcode halted the interpreter on gas, in which case the caller must return.
-/// The caller has already advanced `pc` past the opcode byte; this publishes it
-/// to `bytecode.pc` for the handler and reads it back, so it is safe for any
-/// table entry, including PC and the CALL/CREATE family that suspend the frame.
-inline fn coldStep(
+/// The cold path with the register state published for the handler and read back
+/// afterwards. Returns false if the interpreter halted (on gas or in the handler).
+inline fn coldReg(
     self: *Interpreter,
     table: *const InstructionTable,
     ctx: *InstructionContext,
     op: u8,
-    pc: *usize,
+    r: *Regs,
 ) bool {
-    // The table can reach any handler, including PC and the calls that suspend
-    // the frame, so the register-held counter is published for the duration and
-    // read back afterwards. Taking it by pointer keeps every caller honest --
-    // the pre-Constantinople shift fallbacks reach this too.
-    self.bytecode.pc = pc.*;
-    defer pc.* = self.bytecode.pc;
     const entry = table[op];
-    if (!self.gas.spend(entry.static_gas)) {
-        self.halt(.out_of_gas);
+    if (r.gas < entry.static_gas) {
+        fail(self, r, .out_of_gas);
         return false;
     }
+    r.gas -= entry.static_gas;
+    spill(self, r);
     entry.func(ctx);
-    return true;
+    reload(self, r);
+    return self.bytecode.isNotEnd();
 }
 
 /// Calculate number of words from bytes
