@@ -197,7 +197,7 @@ jobs:
       # Its zisk build compiles this checkout's zesu through addGuestObject.
       # Bump when the guest ABI or memory map changes. The ZisK version is read
       # from that commit's own workflow, so the two cannot drift apart.
-      ZKVM_REF: "d2b2e35dd17110d3340d8bcc28da575f305649e7"
+      ZKVM_REF: "35233d668829e3b51e6f925ead17484144fd8330"
       # Host Rust, and the ZisK guest toolchain (0xPolygonHermez/rust tag). ziskup installs the
       # newest `zisk-<major>.x.y` toolchain for the pinned ZisK; the toolchain step below then
       # re-installs this exact tag. Keep the major in step with ZisK's TOOLCHAIN_MAJOR
