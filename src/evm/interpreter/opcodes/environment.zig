@@ -46,12 +46,7 @@ pub fn opCallvalue(ctx: *InstructionContext) void {
 /// CALLDATASIZE (0x36): Push the size of the call data.
 /// Stack: [] -> [size]   Gas: 2 (G_BASE, dispatch)
 pub fn opCalldatasize(ctx: *InstructionContext) void {
-    const stack = &ctx.interpreter.stack;
-    if (!stack.hasSpace(1)) {
-        ctx.interpreter.halt(.stack_overflow);
-        return;
-    }
-    stack.pushUnsafe(@intCast(ctx.interpreter.input.data.len));
+    ctx.interpreter.pushWord(ctx.interpreter.input.data.len);
 }
 
 /// CALLDATALOAD (0x35): Load 32 bytes from calldata at offset.
@@ -147,13 +142,7 @@ pub fn opCalldatacopy(ctx: *InstructionContext) void {
 /// CODESIZE (0x38): Push the size of the currently executing code.
 /// Stack: [] -> [size]   Gas: 2 (G_BASE, dispatch)
 pub fn opCodesize(ctx: *InstructionContext) void {
-    const stack = &ctx.interpreter.stack;
-    if (!stack.hasSpace(1)) {
-        ctx.interpreter.halt(.stack_overflow);
-        return;
-    }
-    const code_len = ctx.interpreter.bytecode.bytes().len;
-    stack.pushUnsafe(@intCast(code_len));
+    ctx.interpreter.pushWord(ctx.interpreter.bytecode.bytes().len);
 }
 
 /// CODECOPY (0x39): Copy code to memory.

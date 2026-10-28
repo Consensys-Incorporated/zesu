@@ -15,6 +15,9 @@ const Interpreter = interpreter_mod.Interpreter;
 const ExtBytecode = interpreter_mod.ExtBytecode;
 const InputsImpl = interpreter_mod.InputsImpl;
 const Memory = @import("memory.zig").Memory;
+const gas_costs = @import("gas_costs.zig");
+const opcodes = @import("opcodes/main.zig");
+const InstructionFn = interpreter_mod.InstructionFn;
 
 const expectEqual = std.testing.expectEqual;
 const U = primitives.U256;
@@ -101,4 +104,97 @@ test "dispatch pc: out-of-gas exit still publishes the counter" {
 
     try expectEqual(.out_of_gas, interp.run(&table));
     try expectEqual(@as(usize, 5), interp.bytecode.pc);
+}
+
+// ---------------------------------------------------------------------------
+// The inlined environment arm (ADDRESS, CALLER, CALLVALUE, CALLDATASIZE,
+// CODESIZE, PC, MSIZE) charges G_BASE and runs the handler body directly,
+// where the table path charges `static_gas` and calls the entry's handler.
+// These tests pin the assumptions that make the two interchangeable.
+// ---------------------------------------------------------------------------
+
+const env_ops = [_]struct { op: u8, handler: InstructionFn }{
+    .{ .op = 0x30, .handler = opcodes.opAddress },
+    .{ .op = 0x33, .handler = opcodes.opCaller },
+    .{ .op = 0x34, .handler = opcodes.opCallvalue },
+    .{ .op = 0x36, .handler = opcodes.opCalldatasize },
+    .{ .op = 0x38, .handler = opcodes.opCodesize },
+    .{ .op = 0x58, .handler = opcodes.opPc },
+    .{ .op = 0x59, .handler = opcodes.opMsize },
+};
+
+test "inlined env arm: every fork's table still charges G_BASE and runs the shared handler" {
+    for (std.enums.values(primitives.SpecId)) |spec| {
+        const table = protocol_schedule.makeInstructionTable(spec);
+        for (env_ops) |e| {
+            errdefer std.debug.print("fork {s}, opcode 0x{x:0>2}\n", .{ primitives.specIdToString(spec), e.op });
+            try expectEqual(@as(u64, gas_costs.G_BASE), table[e.op].static_gas);
+            try expectEqual(e.handler, table[e.op].func);
+        }
+    }
+}
+
+fn newEnvInterp(code: []const u8, spec: primitives.SpecId, gas_limit: u64, data: []u8) Interpreter {
+    const input = InputsImpl.new(
+        [_]u8{0xAA} ** 20,
+        [_]u8{0xBB} ** 20,
+        0x1234,
+        data,
+        gas_limit,
+        .call,
+        false,
+        0,
+    );
+    return Interpreter.new(
+        Memory.new(),
+        ExtBytecode.newOwned(bytecode_mod.Bytecode.newLegacy(code)),
+        input,
+        false,
+        spec,
+        gas_limit,
+    );
+}
+
+/// Run `code` through the dispatch loop and again one `step` at a time (which always goes
+/// through the table), and require identical outcomes.
+fn expectDispatchMatchesTable(code: []const u8, spec: primitives.SpecId, gas_limit: u64) !void {
+    const table = protocol_schedule.makeInstructionTable(spec);
+    var data = [_]u8{ 1, 2, 3, 4, 5 };
+
+    var fast = newEnvInterp(code, spec, gas_limit, &data);
+    defer fast.deinit();
+    var slow = newEnvInterp(code, spec, gas_limit, &data);
+    defer slow.deinit();
+
+    const fast_result = fast.run(&table);
+    while (slow.bytecode.isNotEnd()) slow.step(&table);
+
+    try expectEqual(slow.result, fast_result);
+    try expectEqual(slow.gas.remaining, fast.gas.remaining);
+    try expectEqual(slow.bytecode.pc, fast.bytecode.pc);
+    try expectEqual(slow.stack.len(), fast.stack.len());
+    for (0..slow.stack.len()) |i| {
+        try expectEqual(slow.stack.peekUnsafe(i), fast.stack.peekUnsafe(i));
+    }
+}
+
+test "inlined env arm: dispatch matches the table path on every fork" {
+    // 0: PUSH1 1  2: PUSH1 0  4: MSTORE8 (MSIZE becomes 32), then all seven opcodes.
+    const code = [_]u8{ 0x60, 0x01, 0x60, 0x00, 0x53 } ++ [_]u8{ 0x30, 0x33, 0x34, 0x36, 0x38, 0x58, 0x59 };
+    for (std.enums.values(primitives.SpecId)) |spec| {
+        errdefer std.debug.print("fork {s}\n", .{primitives.specIdToString(spec)});
+        try expectDispatchMatchesTable(&code, spec, 1_000_000);
+    }
+}
+
+test "inlined env arm: out of gas and stack overflow match the table path" {
+    var flood = [_]u8{0} ** 1025;
+    for (env_ops) |e| {
+        errdefer std.debug.print("opcode 0x{x:0>2}\n", .{e.op});
+        // One unit short of G_BASE.
+        try expectDispatchMatchesTable(&.{e.op}, .amsterdam, gas_costs.G_BASE - 1);
+        // The 1025th push overflows the 1024-word stack.
+        @memset(&flood, e.op);
+        try expectDispatchMatchesTable(&flood, .amsterdam, 1_000_000);
+    }
 }
