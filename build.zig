@@ -44,11 +44,14 @@ const ModuleSet = struct {
 /// defaults to false: the portable guest, and every native build. Each one only selects code at
 /// comptime; the zkVM project that links the object must provide what it enables.
 pub const GuestFeatures = struct {
-    /// ZisK DMA chip: fixed-size copies in `primitives.dma`.
+    /// Fixed-size copy accelerator, used by `primitives.dma`
+    /// (currently: the ZisK DMA chip).
     dma: bool = false,
-    /// ZisK >= 1.3 `jump_dest` precompile (`csrs 0x81C`) for JUMPDEST analysis.
+    /// Hardware-assisted JUMPDEST analysis
+    /// (currently: the ZisK >= 1.3 `jump_dest` precompile, `csrs 0x81C`).
     jump_dest: bool = false,
-    /// libziskos's `*_mod256_c` functions, linked into the guest, for MOD/ADDMOD/MULMOD.
+    /// 256-bit MOD/ADDMOD/MULMOD, provided by the linking zkVM project as `*_mod256_c`
+    /// functions in the guest (currently: libziskos).
     arith256_mod: bool = false,
 };
 
@@ -478,7 +481,8 @@ fn addZkevmBenchmarkSteps(b: *std.Build, runner: *std.Build.Step.Compile) void {
 ///
 /// This is zesu's public build API for zkVM projects: a dependent (e.g. zesu-zkvm) imports this
 /// build.zig, passes the same resolved target it uses for its own host object, and links the
-/// returned object. zesu therefore carries no knowledge of any zkVM's ISA extensions.
+/// returned object. The target's ISA extensions are the caller's; `GuestFeatures` only names the
+/// zkVM capabilities zesu may compile in, and each is off unless the caller enables it.
 ///
 /// `b` must be zesu's own builder (`dep.builder` from `b.dependency("zesu", .{})`), because the
 /// module graph resolves its sources relative to it. `features` names the zkVM-specific

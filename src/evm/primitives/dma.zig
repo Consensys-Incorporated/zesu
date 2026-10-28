@@ -17,8 +17,8 @@
 
 const std = @import("std");
 
-/// True when the ZisK DMA chip is available (build.zig `GuestFeatures.dma`; false for
-/// the rv64im baseline and native builds).
+/// True when the zkVM provides a fixed-size copy accelerator (build.zig `GuestFeatures.dma`;
+/// false for the rv64im baseline and native builds). The asm below is ZisK's.
 pub const has_dma: bool = @import("guest_features.zig").has_dma;
 
 /// Copy exactly `N` bytes. `N` must be comptime-known so the count fits in an
