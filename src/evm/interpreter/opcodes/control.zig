@@ -67,12 +67,7 @@ pub fn opJumpdest(ctx: *InstructionContext) void {
 /// Stack: [] -> [pc]   Gas: 2 (G_BASE, charged by dispatch)
 /// Note: step() advances PC by 1 before calling handler; pc-1 is the opcode address.
 pub fn opPc(ctx: *InstructionContext) void {
-    const stack = &ctx.interpreter.stack;
-    if (!stack.hasSpace(1)) {
-        ctx.interpreter.halt(.stack_overflow);
-        return;
-    }
-    stack.pushUnsafe(@intCast(ctx.interpreter.bytecode.pc - 1));
+    ctx.interpreter.pushWord(ctx.interpreter.bytecode.pc - 1);
 }
 
 /// GAS opcode (0x5A): Push remaining gas after this instruction's static cost
