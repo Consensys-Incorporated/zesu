@@ -143,15 +143,24 @@ pub fn decodeNibble(bytes: []const u8, nibble: u8) error{ InvalidRlp, InvalidNod
         .bytes => return error.InvalidNode,
     };
     var rest = payload;
-    var result: NodeRef = undefined;
 
-    // Decode items 0..nibble; capture the target child.
-    for (0..nibble + 1) |i| {
+    // Skip items 0..nibble-1. A branch's children are almost all 0x80 (empty) or 0xa0 plus a
+    // 32-byte hash, whose lengths the prefix byte alone fixes; anything else is decoded.
+    for (0..nibble) |_| {
         if (rest.len == 0) return null; // fewer than nibble+1 items → leaf/extension
-        const r = try rlp.decodeItem(rest);
-        if (i == nibble) result = try decodeNodeRef(r.item, rest[0..r.consumed]);
-        rest = rest[r.consumed..];
+        const n: usize = switch (rest[0]) {
+            0x80 => 1,
+            0xa0 => 33,
+            else => (try rlp.decodeItem(rest)).consumed,
+        };
+        if (n > rest.len) return error.InvalidRlp;
+        rest = rest[n..];
     }
+    // Capture the target child.
+    if (rest.len == 0) return null;
+    const r = try rlp.decodeItem(rest);
+    const result = try decodeNodeRef(r.item, rest[0..r.consumed]);
+    rest = rest[r.consumed..];
 
     // Disambiguate leaf/extension (2 items) from branch (17 items).
     // After consuming nibble+1 items:
