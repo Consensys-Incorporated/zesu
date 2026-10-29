@@ -1051,7 +1051,7 @@ const BranchSlots = struct {
     /// Item i spans at[i]..at[i + 1]; at[17] is the end of the payload.
     at: [18]u32,
 
-    const full_len = 3 + 16 * 33 + 1;
+    pub const full_len = 3 + 16 * 33 + 1;
     const full: BranchSlots = blk: {
         var s: BranchSlots = undefined;
         for (0..17) |i| s.at[i] = 3 + 33 * i;
@@ -1061,7 +1061,7 @@ const BranchSlots = struct {
 
     /// Null for anything else, including a leaf, an extension or malformed bytes, which
     /// the caller decodes as before.
-    inline fn of(node_rlp: []const u8) ?BranchSlots {
+    pub inline fn of(node_rlp: []const u8) ?BranchSlots {
         // Sixteen hash children and no value: a fixed 532-byte layout, so the slots are a
         // constant and only the 17 item prefixes need checking. One load covers the list
         // header 0xf9 0x02 0x11 and the first child's 0xa0.
@@ -1076,7 +1076,7 @@ const BranchSlots = struct {
         return ofScan(node_rlp);
     }
 
-    fn ofScan(node_rlp: []const u8) ?BranchSlots {
+    pub fn ofScan(node_rlp: []const u8) ?BranchSlots {
         if (node_rlp.len < 3) return null;
         var pos: usize = undefined;
         var payload: usize = undefined;
@@ -1131,7 +1131,7 @@ const BranchSlots = struct {
     }
 
     /// The branch with each child that has an entry in `new_enc` replaced by it.
-    fn replaceChildren(self: *const BranchSlots, alloc: std.mem.Allocator, node_rlp: []const u8, new_enc: *const [16]?[]const u8) ![]const u8 {
+    pub fn replaceChildren(self: *const BranchSlots, alloc: std.mem.Allocator, node_rlp: []const u8, new_enc: *const [16]?[]const u8) ![]const u8 {
         var payload: usize = self.at[17] - self.at[0];
         for (new_enc, 0..) |enc, i| {
             if (enc) |e| payload = payload - (self.at[i + 1] - self.at[i]) + e.len;
@@ -1154,7 +1154,7 @@ const BranchSlots = struct {
     }
 
     /// The branch with child `nib` replaced by `child_enc`, an encoded child reference.
-    fn replaceChild(self: *const BranchSlots, alloc: std.mem.Allocator, node_rlp: []const u8, nib: u8, child_enc: []const u8) ![]const u8 {
+    pub fn replaceChild(self: *const BranchSlots, alloc: std.mem.Allocator, node_rlp: []const u8, nib: u8, child_enc: []const u8) ![]const u8 {
         const first = self.at[0];
         const lo = self.at[nib];
         const hi = self.at[nib + 1];
@@ -2143,28 +2143,6 @@ test {
     _ = @import("./rlp_tests.zig");
 }
 
-test "BranchSlots: full-hash fast path matches the scan" {
-    var full: [BranchSlots.full_len]u8 = undefined;
-    full[0..3].* = .{ 0xf9, 0x02, 0x11 };
-    for (0..16) |i| {
-        full[3 + 33 * i] = 0xa0;
-        @memset(full[4 + 33 * i ..][0..32], @intCast(i + 1));
-    }
-    full[BranchSlots.full_len - 1] = 0x80;
-    try std.testing.expectEqual(BranchSlots.ofScan(&full).?.at, BranchSlots.of(&full).?.at);
-
-    // Anything off the fixed layout takes the scan's answer, accepted or not.
-    var bad = full;
-    bad[BranchSlots.full_len - 1] = 0x81;
-    try std.testing.expect(BranchSlots.of(&bad) == null);
-    bad = full;
-    bad[3 + 33 * 7] = 0xa1;
-    try std.testing.expect(BranchSlots.of(&bad) == null);
-    bad = full;
-    bad[2] = 0x12;
-    try std.testing.expect(BranchSlots.of(bad[0..]) == null);
-}
-
 const Mpt = @This();
 
 /// Private helpers re-exported for tests.zig. Not part of the module's supported API.
@@ -2183,4 +2161,6 @@ pub const testing = struct {
     pub const rlpBytesWrite = Mpt.rlpBytesWrite;
     pub const rlpListHeaderLen = Mpt.rlpListHeaderLen;
     pub const rlpListHeaderWrite = Mpt.rlpListHeaderWrite;
+    pub const BranchSlots = Mpt.BranchSlots;
+    pub const hpPathIs = Mpt.hpPathIs;
 };
