@@ -539,15 +539,14 @@ pub fn verifyProofIndexed(
 ) MptError!?[]const u8 {
     if (std.mem.eql(u8, &root_hash, &EMPTY_TRIE_HASH)) return null;
 
-    var key_nibbles: [64]u8 = undefined;
-    nibbles.bytesToNibbles(&key_hash, &key_nibbles);
-
+    // Nibbles are read from `key_hash` where needed, and a leaf's path is compared with
+    // the key's remaining bytes in place, instead of unpacking both into nibble arrays.
     const ExpectedRef = union(enum) {
         hash: *const [32]u8,
         inline_node: []const u8,
     };
     var expected: ExpectedRef = .{ .hash = &root_hash };
-    var pos: usize = 0;
+    var pos: u8 = 0;
 
     while (true) {
         const node_rlp: []const u8 = switch (expected) {
@@ -559,8 +558,7 @@ pub fn verifyProofIndexed(
         // instead of O(17)). decodeNibble returns null for leaf/extension nodes,
         // in which case we fall through to the full decodeNode path below.
         if (pos < 64) {
-            const nibble = key_nibbles[pos];
-            if (try node.decodeNibble(node_rlp, nibble)) |child_ref| {
+            if (try node.decodeNibble(node_rlp, nibbleAt(&key_hash, pos))) |child_ref| {
                 pos += 1;
                 switch (child_ref) {
                     .empty => return null,
@@ -579,7 +577,7 @@ pub fn verifyProofIndexed(
         switch (decoded) {
             .branch => |b| {
                 if (pos >= 64) return error.InvalidProof;
-                const nibble = key_nibbles[pos];
+                const nibble = nibbleAt(&key_hash, pos);
                 pos += 1;
                 switch (b.children[nibble]) {
                     .empty => return null,
@@ -593,9 +591,10 @@ pub fn verifyProofIndexed(
                 if (hp.is_leaf) return error.InvalidNode;
                 const prefix_nibs = path_buf[0..hp.len];
                 if (pos + prefix_nibs.len > 64) return error.InvalidProof;
-                if (!std.mem.eql(u8, prefix_nibs, key_nibbles[pos .. pos + prefix_nibs.len]))
-                    return null;
-                pos += prefix_nibs.len;
+                for (prefix_nibs, @as(usize, pos)..) |nib, i| {
+                    if (nib != nibbleAt(&key_hash, @intCast(i))) return null;
+                }
+                pos += @intCast(prefix_nibs.len);
                 switch (e.child) {
                     .empty => return error.InvalidNode,
                     .hash => |h| expected = .{ .hash = h },
@@ -603,12 +602,16 @@ pub fn verifyProofIndexed(
                 }
             },
             .leaf => |lf| {
-                var path_buf: [128]u8 = undefined;
-                const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
-                if (!hp.is_leaf) return error.InvalidNode;
-                const suffix_nibs = path_buf[0..hp.len];
-                if (suffix_nibs.len != 64 - pos) return null;
-                if (!std.mem.eql(u8, suffix_nibs, key_nibbles[pos..])) return null;
+                // As hpDecode: an empty path or a flag above 3 is invalid. decodeNode
+                // already read the leaf bit, so the flag is 2 (even) or 3 (odd).
+                const hp = lf.key_end;
+                if (hp.len == 0 or hp[0] >> 4 > 3) return error.InvalidHp;
+                const odd: u8 = (hp[0] >> 4) & 1;
+                if (2 * (hp.len - 1) + odd != 64 - @as(usize, pos)) return null;
+                // An odd path starts with the low nibble of its first byte; what follows
+                // is whole bytes, aligned with the key from nibble pos + odd on.
+                if (odd == 1 and hp[0] & 0x0f != nibbleAt(&key_hash, pos)) return null;
+                if (!std.mem.eql(u8, hp[1..], key_hash[(pos + odd) / 2 ..])) return null;
                 return lf.value;
             },
         }

@@ -996,3 +996,51 @@ test "hpPathIs agrees with hpEncode" {
         }
     }
 }
+
+test "verifyProofIndexed agrees with verifyProof on random tries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(0xbeef);
+    const rand = prng.random();
+
+    for (0..20) |round| {
+        // Keys sharing their first bytes give extensions, and leaves at odd and even depths.
+        const shared: usize = round % 4;
+        var prefix: [32]u8 = undefined;
+        rand.bytes(&prefix);
+        var keys = std.ArrayListUnmanaged([32]u8).empty;
+        var empty_index = NodeIndex.init(alloc);
+        var nodes: NodeView = .{ .witness = &empty_index, .created = NodeIndex.init(alloc) };
+        var root_rlp: []const u8 = &EMPTY_NODE_RLP;
+        for (0..1 + rand.uintLessThan(usize, 100)) |_| {
+            var k: [32]u8 = undefined;
+            rand.bytes(&k);
+            @memcpy(k[0..shared], prefix[0..shared]);
+            if (rand.boolean()) k[shared] = prefix[shared] ^ rand.int(u4);
+            const v = try alloc.alloc(u8, 1 + rand.uintLessThan(usize, 40));
+            rand.bytes(v);
+            var nibs: [64]u8 = undefined;
+            nibbles.bytesToNibbles(&k, &nibs);
+            root_rlp = try updNodeExRecorded(alloc, root_rlp, &nibs, v, &nodes);
+            try keys.append(alloc, k);
+        }
+        const root = keccak256(root_rlp);
+        try nodes.created.put(root, root_rlp);
+        var pool = std.ArrayListUnmanaged([]const u8).empty;
+        var it = nodes.created.valueIterator();
+        while (it.next()) |n| try pool.append(alloc, n.*);
+
+        // Present keys, and absent keys that diverge at every depth from a present one.
+        for (keys.items) |k| {
+            for (0..65) |flip| {
+                var q = k;
+                if (flip < 64) q[flip / 2] ^= if (flip % 2 == 0) 0x10 else 0x01;
+                const want = try mpt.verifyProof(root, q, pool.items);
+                const got = try mpt.verifyProofIndexed(root, q, &nodes.created);
+                try std.testing.expectEqual(want == null, got == null);
+                if (want) |w| try std.testing.expectEqualSlices(u8, w, got.?);
+            }
+        }
+    }
+}
