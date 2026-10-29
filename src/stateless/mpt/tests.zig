@@ -323,6 +323,8 @@ const rlpBytesLen = mpt.testing.rlpBytesLen;
 const rlpBytesWrite = mpt.testing.rlpBytesWrite;
 const rlpListHeaderLen = mpt.testing.rlpListHeaderLen;
 const rlpListHeaderWrite = mpt.testing.rlpListHeaderWrite;
+const BranchSlots = mpt.testing.BranchSlots;
+const hpPathIs = mpt.testing.hpPathIs;
 
 //
 // These are internal tests that directly exercise the private updNode* functions.
@@ -740,4 +742,257 @@ test "validateSecuredTriePaths: nodes absent from the witness are not walked" {
     // An empty root, or a root absent from the witness, has nothing to walk.
     try mpt.validateSecuredTriePaths(EMPTY_TRIE_HASH, &index, &try mpt.PathCheck.init(arena.allocator(), &index));
     try mpt.validateSecuredTriePaths(@splat(0x11), &index, &try mpt.PathCheck.init(arena.allocator(), &index));
+}
+
+test "batchUpdateIndexed: random inserts and updates match a rebuilt trie" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const rand = prng.random();
+
+    for (0..20) |round| {
+        // Short keys share long prefixes, which gives extensions and inline children.
+        const key_bytes: usize = if (round % 2 == 0) 32 else 2;
+        const n_pre = 1 + rand.uintLessThan(usize, 200);
+        const n_new = 1 + rand.uintLessThan(usize, 60);
+        var keys = std.ArrayListUnmanaged([32]u8).empty;
+        var vals = std.ArrayListUnmanaged([]const u8).empty;
+        var seen = std.AutoHashMapUnmanaged([32]u8, void).empty;
+        while (keys.items.len < n_pre + n_new) {
+            var k: [32]u8 = @splat(0);
+            rand.bytes(k[0..key_bytes]);
+            if ((try seen.fetchPut(alloc, k, {})) != null) continue;
+            const v = try alloc.alloc(u8, 1 + rand.uintLessThan(usize, 40));
+            rand.bytes(v);
+            try keys.append(alloc, k);
+            try vals.append(alloc, v);
+        }
+
+        // Pre-state: the first n_pre keys, built node by node so the witness holds every node.
+        var empty_index = NodeIndex.init(alloc);
+        var nodes: NodeView = .{ .witness = &empty_index, .created = NodeIndex.init(alloc) };
+        var root_rlp: []const u8 = &EMPTY_NODE_RLP;
+        for (keys.items[0..n_pre], vals.items[0..n_pre]) |k, v| {
+            var nibs: [64]u8 = undefined;
+            nibbles.bytesToNibbles(&k, &nibs);
+            root_rlp = try updNodeExRecorded(alloc, root_rlp, &nibs, v, &nodes);
+        }
+        try nodes.created.put(keccak256(root_rlp), root_rlp);
+
+        // Changes: the new keys, plus updates of some pre-state keys.
+        var changes = std.ArrayListUnmanaged(BatchChange).empty;
+        for (keys.items[n_pre..], vals.items[n_pre..]) |k, v| try changes.append(alloc, .{ .key = k, .value = v });
+        for (keys.items[0..n_pre], vals.items[0..n_pre]) |k, *v| {
+            if (rand.boolean()) {
+                const nv = try alloc.alloc(u8, 1 + rand.uintLessThan(usize, 40));
+                rand.bytes(nv);
+                v.* = nv;
+                try changes.append(alloc, .{ .key = k, .value = nv });
+            }
+        }
+        std.mem.sort(BatchChange, changes.items, {}, struct {
+            fn lt(_: void, a: BatchChange, b: BatchChange) bool {
+                return std.mem.lessThan(u8, &a.key, &b.key);
+            }
+        }.lt);
+        const got = try batchUpdateIndexed(alloc, keccak256(root_rlp), changes.items, &nodes.created);
+
+        var map = std.AutoArrayHashMapUnmanaged([32]u8, []const u8).empty;
+        for (keys.items, vals.items) |k, v| try map.put(alloc, k, v);
+        var kv = std.ArrayListUnmanaged(builder.KV).empty;
+        var it = map.iterator();
+        while (it.next()) |e| try kv.append(alloc, .{ .key = e.key_ptr, .value = e.value_ptr.* });
+        try std.testing.expectEqual(try builder.trieRoot(alloc, kv.items), got);
+    }
+}
+
+test "BranchSlots: full-hash fast path matches the scan" {
+    var full: [BranchSlots.full_len]u8 = undefined;
+    full[0..3].* = .{ 0xf9, 0x02, 0x11 };
+    for (0..16) |i| {
+        full[3 + 33 * i] = 0xa0;
+        @memset(full[4 + 33 * i ..][0..32], @intCast(i + 1));
+    }
+    full[BranchSlots.full_len - 1] = 0x80;
+    try std.testing.expectEqual(BranchSlots.ofScan(&full).?.at, BranchSlots.of(&full).?.at);
+
+    // Anything off the fixed layout takes the scan's answer, accepted or not.
+    var bad = full;
+    bad[BranchSlots.full_len - 1] = 0x81;
+    try std.testing.expect(BranchSlots.of(&bad) == null);
+    bad = full;
+    bad[3 + 33 * 7] = 0xa1;
+    try std.testing.expect(BranchSlots.of(&bad) == null);
+    bad = full;
+    bad[2] = 0x12;
+    try std.testing.expect(BranchSlots.of(bad[0..]) == null);
+}
+
+/// A branch of `enc` children with an empty value.
+fn testBranch(alloc: std.mem.Allocator, enc: *const [16][]const u8) ![]const u8 {
+    return updEncodeBranch(alloc, enc, &.{});
+}
+
+test "BranchSlots.ofScan: item spans match the children, inline ones included" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    enc[1] = try updMakeLeaf(alloc, &.{}, "a"); // inline
+    enc[2] = try updMakeLeaf(alloc, &.{ 3, 4 }, "bc"); // inline
+    enc[9] = try updHashOrEmbed(alloc, try updMakeLeaf(alloc, &(.{5} ** 40), "x" ** 40)); // hash
+    const branch = try testBranch(alloc, &enc);
+    const slots = BranchSlots.of(branch).?;
+    for (enc, 0..) |e, i| {
+        try std.testing.expectEqualSlices(u8, e, branch[slots.at[i]..slots.at[i + 1]]);
+    }
+    try std.testing.expectEqualSlices(u8, &EMPTY_NODE_RLP, branch[slots.at[16]..slots.at[17]]);
+    try std.testing.expectEqual(branch.len, slots.at[17]);
+}
+
+test "BranchSlots.ofScan: rejects what updEncodeBranch would not reproduce" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    enc[4] = try updMakeLeaf(alloc, &.{}, "a");
+    const good = try testBranch(alloc, &enc);
+    try std.testing.expect(BranchSlots.of(good) != null);
+
+    // A value on the branch.
+    try std.testing.expect(BranchSlots.of(try updEncodeBranch(alloc, &enc, "v")) == null);
+    // Truncated.
+    try std.testing.expect(BranchSlots.of(good[0 .. good.len - 1]) == null);
+    // Bytes after the list are ignored, as decodeNode ignores them: the splice and a
+    // re-encode both drop them.
+    const trailing = try std.mem.concat(alloc, u8, &.{ good, &.{0x00} });
+    try std.testing.expectEqual(good.len, BranchSlots.of(trailing).?.at[17]);
+    // Non-canonical headers for a payload that fits a short list.
+    const payload = good[1..];
+    try std.testing.expect(BranchSlots.of(try std.mem.concat(alloc, u8, &.{ &.{ 0xf8, @intCast(payload.len) }, payload })) == null);
+    try std.testing.expect(BranchSlots.of(try std.mem.concat(alloc, u8, &.{ &.{ 0xf9, 0x00, @intCast(payload.len) }, payload })) == null);
+    // A byte-string child that is not a 32-byte hash, and a leaf/extension (two items).
+    var bad = try alloc.dupe(u8, good);
+    bad[1] = 0x81;
+    try std.testing.expect(BranchSlots.of(bad) == null);
+    try std.testing.expect(BranchSlots.of(try updMakeLeaf(alloc, &.{1}, "a")) == null);
+    try std.testing.expect(BranchSlots.of(&EMPTY_NODE_RLP) == null);
+    try std.testing.expect(BranchSlots.of(&.{}) == null);
+}
+
+test "BranchSlots: replaceChild and replaceChildren match re-encoding across header sizes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Payload grows from 17 to 17 + 32 * 16 bytes: the list header goes from one byte to
+    // 0xf8 to 0xf9, and back down as the children are removed.
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    var cur = try testBranch(alloc, &enc);
+    for (0..16) |i| {
+        var h: [32]u8 = @splat(@intCast(i + 1));
+        const ref = try updRlpBytes(alloc, &h);
+        cur = try BranchSlots.of(cur).?.replaceChild(alloc, cur, @intCast(i), ref);
+        enc[i] = ref;
+        try std.testing.expectEqualSlices(u8, try testBranch(alloc, &enc), cur);
+    }
+    for (0..16) |i| {
+        cur = try BranchSlots.of(cur).?.replaceChild(alloc, cur, @intCast(i), &EMPTY_NODE_RLP);
+        enc[i] = &EMPTY_NODE_RLP;
+        try std.testing.expectEqualSlices(u8, try testBranch(alloc, &enc), cur);
+    }
+
+    // Several children at once, mixing hash, inline and emptied slots.
+    const inline_leaf = try updMakeLeaf(alloc, &.{}, "a");
+    var start: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    for (0..16) |i| if (i % 3 == 0) {
+        start[i] = try updRlpBytes(alloc, &([_]u8{@intCast(i + 1)} ** 32));
+    };
+    const base = try testBranch(alloc, &start);
+    var new_enc: [16]?[]const u8 = @splat(null);
+    new_enc[0] = inline_leaf;
+    new_enc[1] = try updRlpBytes(alloc, &([_]u8{0xee} ** 32));
+    new_enc[3] = &EMPTY_NODE_RLP;
+    new_enc[15] = inline_leaf;
+    var want = start;
+    for (new_enc, 0..) |e, i| if (e) |x| {
+        want[i] = x;
+    };
+    const got = try BranchSlots.of(base).?.replaceChildren(alloc, base, &new_enc);
+    try std.testing.expectEqualSlices(u8, try testBranch(alloc, &want), got);
+}
+
+test "updNodeExRecorded: splicing a branch with inline, hashed and empty children" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const big_path: [40]u8 = @splat(5);
+    const big_val = "x" ** 40;
+    const big_leaf = try updMakeLeaf(alloc, &big_path, big_val);
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    enc[1] = try updMakeLeaf(alloc, &.{}, "a"); // inline
+    enc[2] = try updMakeLeaf(alloc, &.{ 3, 4 }, "b"); // inline
+    enc[3] = try updHashOrEmbed(alloc, big_leaf); // hash
+    const branch = try testBranch(alloc, &enc);
+    try std.testing.expect(BranchSlots.of(branch) != null);
+
+    var empty_index = NodeIndex.init(alloc);
+    var nodes: NodeView = .{ .witness = &empty_index, .created = NodeIndex.init(alloc) };
+    try nodes.created.put(keccak256(big_leaf), big_leaf);
+
+    const Case = struct { path: []const u8, value: []const u8 };
+    const cases = [_]Case{
+        .{ .path = &.{1}, .value = "z" }, // update an inline leaf
+        .{ .path = &.{ 2, 3, 4 }, .value = "zz" }, // update an inline leaf with a path
+        .{ .path = &.{ 2, 3, 9 }, .value = "zz" }, // split an inline leaf
+        .{ .path = &.{ 7, 1 }, .value = "q" }, // insert into an empty slot
+        .{ .path = &(.{3} ++ big_path), .value = "y" ** 40 }, // update the hashed leaf
+        .{ .path = &(.{3} ++ big_path[0..39].* ++ .{6}), .value = "w" }, // split the hashed leaf
+    };
+    for (cases) |c| {
+        const nib = c.path[0];
+        // Expected: the child updated on its own, then the branch re-encoded around it.
+        const child_rlp: []const u8 = switch (nib) {
+            3 => big_leaf,
+            1, 2 => enc[nib],
+            else => &EMPTY_NODE_RLP,
+        };
+        const new_child = try updNodeExRecorded(alloc, child_rlp, c.path[1..], c.value, &nodes);
+        var want = enc;
+        want[nib] = try updHashOrEmbed(alloc, new_child);
+        const got = try updNodeExRecorded(alloc, branch, c.path, c.value, &nodes);
+        try std.testing.expectEqualSlices(u8, try testBranch(alloc, &want), got);
+    }
+}
+
+test "hpPathIs agrees with hpEncode" {
+    var prng = std.Random.DefaultPrng.init(0xbeef);
+    const rand = prng.random();
+    var path: [64]u8 = undefined;
+    var buf: [65]u8 = undefined;
+    for (0..64 + 1) |len| {
+        for (0..20) |_| {
+            for (path[0..len]) |*n| n.* = rand.uintLessThan(u8, 16);
+            const p = path[0..len];
+            const hp = nibbles.hpEncode(p, true, &buf);
+            try std.testing.expect(hpPathIs(hp, p));
+
+            // The extension encoding of the same path is not a leaf path.
+            var ext: [65]u8 = undefined;
+            const ehp = nibbles.hpEncode(p, false, &ext);
+            try std.testing.expect(!hpPathIs(ehp, p));
+
+            // A different path of the same length, and a different length.
+            if (len > 0) {
+                var other: [64]u8 = path;
+                other[rand.uintLessThan(usize, len)] ^= 1 + rand.uintLessThan(u8, 15);
+                try std.testing.expect(!hpPathIs(hp, other[0..len]));
+            }
+            if (len < 64) try std.testing.expect(!hpPathIs(hp, path[0 .. len + 1]));
+        }
+    }
 }
