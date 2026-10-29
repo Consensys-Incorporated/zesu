@@ -300,8 +300,13 @@ const BaTracker = struct {
                     if (self.committed_storage.get(addr)) |sm| {
                         if (sm.get(slot)) |v| break :blk_slot v;
                     }
-                    // Lazy init: query DB for the pre-block value (handles stateless path).
-                    const db_val = ctx.journaled_state.database.storage(addr, slot) catch 0;
+                    // Lazy init: the pre-block value. A slot of storage loaded from the witness
+                    // already holds it from its first load, which re-proving it would only repeat;
+                    // storage created or wiped this block asks the DB (handles stateless path).
+                    const db_val = if (!acct.status.created and !acct.status.storage_wiped)
+                        se.value_ptr.*.pre_block_value
+                    else
+                        ctx.journaled_state.database.storage(addr, slot) catch 0;
                     if (db_val != 0) {
                         const sm2 = self.committed_storage.getOrPut(self.alloc, addr) catch @panic("out of memory");
                         if (!sm2.found_existing) sm2.value_ptr.* = .{};
