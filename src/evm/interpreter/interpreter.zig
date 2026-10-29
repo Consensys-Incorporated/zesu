@@ -559,8 +559,10 @@ pub const Interpreter = struct {
 /// fetch. The bytecode of a frame cannot change while its dispatch loop runs (CALL and
 /// CREATE build new frames; JUMP only moves pc), so runDispatch resolves the slice once
 /// and fetches through this instead.
+///
+/// `code` is the zero-padded `exec` copy: running off the end reads STOP, so the fetch
+/// needs no bounds check.
 inline fn opcodeAt(code: []const u8, pc: usize) u8 {
-    if (pc >= code.len) return 0x00;
     return code[pc];
 }
 
@@ -691,6 +693,15 @@ const ops = struct {
     fn shr(shift: primitives.U256, value: primitives.U256) primitives.U256 {
         return if (shift < 256) value >> @intCast(shift) else 0;
     }
+    fn slt(a: primitives.U256, b: primitives.U256) primitives.U256 {
+        return @intFromBool(@as(i256, @bitCast(a)) < @as(i256, @bitCast(b)));
+    }
+    fn sgt(a: primitives.U256, b: primitives.U256) primitives.U256 {
+        return @intFromBool(@as(i256, @bitCast(a)) > @as(i256, @bitCast(b)));
+    }
+    fn byte(i: primitives.U256, x: primitives.U256) primitives.U256 {
+        return if (i < 32) (x >> @intCast((31 - i) * 8)) & 0xFF else 0;
+    }
     fn iszero(a: primitives.U256) primitives.U256 {
         return @intFromBool(a == 0);
     }
@@ -698,6 +709,12 @@ const ops = struct {
         return ~a;
     }
 };
+
+/// A 32-byte word at `offset` lies inside the current memory (no expansion needed).
+inline fn inMemory(self: *Interpreter, offset: primitives.U256) bool {
+    const size = self.memory.size();
+    return size >= 32 and offset <= size - 32;
+}
 
 /// Validate a jump destination popped from the stack.
 inline fn jumpTarget(self: *Interpreter, dest: primitives.U256) ?usize {
@@ -714,12 +731,28 @@ fn runDispatch(
     comptime check_pending: bool,
 ) void {
     if (!self.bytecode.isNotEnd()) return;
-    // Hoisted once per frame — see opcodeAt.
-    const code = self.bytecode.bytes();
+    // Hoisted once per frame — see opcodeAt. Fetch from the zero-padded executable copy,
+    // so neither opcode fetch nor PUSH immediates check bounds.
+    // A delegation designator is executable too (a delegation that points at a
+    // delegated account runs the target's 0xef01.. bytes, and halts on 0xef); its
+    // 23 bytes are padded here, on the stack, for the length of this call.
+    var designator: [23 + bytecode.EXEC_PAD]u8 = undefined;
+    const code: []const u8 = switch (self.bytecode.inner) {
+        .legacy_analyzed => |*a| a.exec,
+        .eip7702 => |*d| blk: {
+            @memset(&designator, bytecode.STOP);
+            @memcpy(designator[0..23], &d.raw_bytes);
+            break :blk &designator;
+        },
+    };
+    // CODESIZE is the real length, not the padded one.
+    const code_len = self.bytecode.bytes().len;
     // EIP-145. Loop-invariant: spec_id is fixed for the frame.
     const has_shifts = primitives.isEnabledIn(self.runtime_flags.spec_id, .constantinople);
     // EIP-3855. Loop-invariant like has_shifts.
     const has_push0 = primitives.isEnabledIn(self.runtime_flags.spec_id, .shanghai);
+    // EIP-211. Loop-invariant like has_shifts.
+    const has_returndata = primitives.isEnabledIn(self.runtime_flags.spec_id, .byzantium);
 
     var r = Regs{
         .pc = self.bytecode.pc,
@@ -760,6 +793,39 @@ fn runDispatch(
         0x11 => { // GT
             r.pc += 1;
             if (!binop(self, &r, gas_costs.G_VERYLOW, ops.gt)) return;
+            continue :sw opcodeAt(code, r.pc);
+        },
+        0x12 => { // SLT
+            r.pc += 1;
+            if (!binop(self, &r, gas_costs.G_VERYLOW, ops.slt)) return;
+            continue :sw opcodeAt(code, r.pc);
+        },
+        0x13 => { // SGT
+            r.pc += 1;
+            if (!binop(self, &r, gas_costs.G_VERYLOW, ops.sgt)) return;
+            continue :sw opcodeAt(code, r.pc);
+        },
+        0x1A => { // BYTE
+            r.pc += 1;
+            if (!binop(self, &r, gas_costs.G_VERYLOW, ops.byte)) return;
+            continue :sw opcodeAt(code, r.pc);
+        },
+        0x35 => { // CALLDATALOAD: 32 bytes of calldata at offset, zero-filled past the end
+            r.pc += 1;
+            if (!charge(self, &r, gas_costs.G_VERYLOW)) return;
+            if (r.sp < 1) {
+                fail(self, &r, .stack_underflow);
+                return;
+            }
+            const offset = r.sb[r.sp - 1];
+            const data = self.input.data;
+            var word: [32]u8 = [_]u8{0} ** 32;
+            if (offset < data.len) {
+                const off: usize = @intCast(offset);
+                const n = @min(data.len - off, 32);
+                @memcpy(word[0..n], data[off..][0..n]);
+            }
+            r.sb[r.sp - 1] = std.mem.readInt(primitives.U256, &word, .big);
             continue :sw opcodeAt(code, r.pc);
         },
         0x14 => { // EQ
@@ -827,14 +893,26 @@ fn runDispatch(
         },
         // MLOAD/MSTORE/MSTORE8 — Frontier, behaviour-stable, G_VERYLOW static with
         // memory expansion billed inside the handler (through `self.gas`).
+        // MLOAD/MSTORE stay in registers when the word is already inside memory
+        // (no expansion, so no gas beyond the static G_VERYLOW). Anything else, including
+        // every error, goes through the handler unchanged.
         0x51 => { // MLOAD
             r.pc += 1;
-            if (!viaSelf(self, &r, gas_costs.G_VERYLOW, opcodes.opMload, .{ctx})) return;
+            if (r.sp >= 1 and r.gas >= gas_costs.G_VERYLOW and inMemory(self, r.sb[r.sp - 1])) {
+                r.gas -= gas_costs.G_VERYLOW;
+                const off: usize = @intCast(r.sb[r.sp - 1]);
+                r.sb[r.sp - 1] = std.mem.readInt(primitives.U256, self.memory.buffer.items[off..][0..32], .big);
+            } else if (!viaSelf(self, &r, gas_costs.G_VERYLOW, opcodes.opMload, .{ctx})) return;
             continue :sw opcodeAt(code, r.pc);
         },
         0x52 => { // MSTORE
             r.pc += 1;
-            if (!viaSelf(self, &r, gas_costs.G_VERYLOW, opcodes.opMstore, .{ctx})) return;
+            if (r.sp >= 2 and r.gas >= gas_costs.G_VERYLOW and inMemory(self, r.sb[r.sp - 1])) {
+                r.gas -= gas_costs.G_VERYLOW;
+                const off: usize = @intCast(r.sb[r.sp - 1]);
+                std.mem.writeInt(primitives.U256, self.memory.buffer.items[off..][0..32], r.sb[r.sp - 2], .big);
+                r.sp -= 2;
+            } else if (!viaSelf(self, &r, gas_costs.G_VERYLOW, opcodes.opMstore, .{ctx})) return;
             continue :sw opcodeAt(code, r.pc);
         },
         0x53 => { // MSTORE8
@@ -896,12 +974,8 @@ fn runDispatch(
                 return;
             }
             var buf: [32]u8 = .{0} ** 32;
-            if (r.pc + n <= code.len) {
-                @memcpy(buf[32 - n ..], code[r.pc .. r.pc + n]);
-            } else if (r.pc < code.len) {
-                const available = code.len - r.pc;
-                @memcpy(buf[32 - n .. 32 - n + available], code[r.pc..]);
-            }
+            // Immediates past the end read the zero padding.
+            @memcpy(buf[32 - n ..], code[r.pc..][0..n]);
             const U = primitives.U256;
             r.sb[r.sp] = (@as(U, std.mem.readInt(u64, buf[0..8], .big)) << 192) |
                 (@as(U, std.mem.readInt(u64, buf[8..16], .big)) << 128) |
@@ -953,6 +1027,13 @@ fn runDispatch(
             r.sp += 1;
             continue :sw opcodeAt(code, r.pc);
         },
+        0x3D => { // RETURNDATASIZE (EIP-211, Byzantium)
+            r.pc += 1;
+            if (has_returndata) {
+                if (!pushReg(self, &r, gas_costs.G_BASE, self.return_data.data.len)) return;
+            } else if (!coldReg(self, table, ctx, 0x3D, &r)) return;
+            continue :sw opcodeAt(code, r.pc);
+        },
         0x5F => { // PUSH0 (EIP-3855, Shanghai)
             r.pc += 1;
             if (has_push0) {
@@ -967,7 +1048,7 @@ fn runDispatch(
         0x30, 0x33, 0x34, 0x36, 0x38, 0x58, 0x59 => |op| {
             r.pc += 1;
             switch (op) {
-                0x38 => if (!pushReg(self, &r, gas_costs.G_BASE, code.len)) return,
+                0x38 => if (!pushReg(self, &r, gas_costs.G_BASE, code_len)) return,
                 0x58 => if (!pushReg(self, &r, gas_costs.G_BASE, r.pc - 1)) return,
                 0x30 => if (!pushReg(self, &r, gas_costs.G_BASE, host_mod.addressToU256(self.input.target))) return,
                 0x33 => if (!pushReg(self, &r, gas_costs.G_BASE, host_mod.addressToU256(self.input.caller))) return,
@@ -984,7 +1065,7 @@ fn runDispatch(
         // forks. SHL/SHR/SAR and PUSH0 reach it too whenever their fork gate is closed.
         // Naming every cold value explicitly (rather than using `else`) keeps the jump
         // table dense over the whole u8 domain — no upper-bound compare needed.
-        0x04...0x0f, 0x12, 0x13, 0x1a, 0x1e, 0x1f, 0x20...0x2f, 0x31, 0x32, 0x35, 0x37, 0x39...0x4f, 0x54, 0x55, 0x5c...0x5e, 0xa0...0xff => |op| {
+        0x04...0x0f, 0x1e, 0x1f, 0x20...0x2f, 0x31, 0x32, 0x37, 0x39...0x3c, 0x3e, 0x3f...0x4f, 0x54, 0x55, 0x5c...0x5e, 0xa0...0xff => |op| {
             r.pc += 1;
             if (!coldReg(self, table, ctx, op, &r)) return;
             // Only the cold path can suspend the frame, so this is the one arm
