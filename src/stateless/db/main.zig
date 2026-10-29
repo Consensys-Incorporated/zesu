@@ -351,14 +351,8 @@ pub const WitnessDatabase = struct {
 // ─── Private helpers ───────────────────────────────────────────────────────────
 
 fn u256ToHash(value: u256) primitives.Hash {
-    var out: primitives.Hash = @splat(0);
-    var n = value;
-    var i: usize = 32;
-    while (i > 0) {
-        i -= 1;
-        out[i] = @intCast(n & 0xff);
-        n >>= 8;
-    }
+    var out: primitives.Hash = undefined;
+    std.mem.writeInt(u256, &out, value, .big);
     return out;
 }
 

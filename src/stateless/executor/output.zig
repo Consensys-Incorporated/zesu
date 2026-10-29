@@ -152,13 +152,54 @@ pub fn computeStateRootDelta(
         n += 1;
     }
 
-    std.mem.sort(mpt.BatchChange, changes[0..n], {}, struct {
-        fn lt(_: void, a: mpt.BatchChange, b: mpt.BatchChange) bool {
-            return std.mem.lessThan(u8, &a.key, &b.key);
-        }
-    }.lt);
+    return mpt.batchUpdateIndexed(scratch, pre_state_root, try sortChanges(scratch, changes[0..n]), index);
+}
 
-    return mpt.batchUpdateIndexed(scratch, pre_state_root, changes[0..n], index);
+/// Orders changes by key, as std.mem.lessThan does. The keys are hashes, so the leading
+/// eight bytes, read as one big-endian word, almost always decide.
+fn changeKeyLessThan(_: void, a: mpt.BatchChange, b: mpt.BatchChange) bool {
+    const x = std.mem.readInt(u64, a.key[0..8], .big);
+    const y = std.mem.readInt(u64, b.key[0..8], .big);
+    if (x != y) return x < y;
+    return std.mem.lessThan(u8, &a.key, &b.key);
+}
+
+/// Largest bucket sortChanges finishes with an insertion sort.
+const max_insertion_bucket = 64;
+
+/// Sorts changes by key, stably. The keys are hashes, spread evenly over their first byte:
+/// a counting pass on that byte leaves buckets of a few changes for an insertion sort.
+/// One byte is cheap to grind (about 256 tries per key), so a block can force many changes into
+/// one bucket; a bucket over `max_insertion_bucket` goes to std.mem.sort instead, which keeps
+/// the worst case O(n log n) rather than O(n^2).
+/// Returns the sorted changes, which may live in a new buffer from `alloc`.
+///
+/// Allocator contract: that buffer is never freed here, so `alloc` must be an arena (or
+/// equivalent) that reclaims everything at once. Both callers pass the ScratchArena that
+/// computeStateRootDelta scopes to one batch; a general-purpose or free-list allocator
+/// would leak one buffer per call.
+pub fn sortChanges(alloc: std.mem.Allocator, changes: []mpt.BatchChange) ![]mpt.BatchChange {
+    if (changes.len <= 32) {
+        std.sort.insertion(mpt.BatchChange, changes, {}, changeKeyLessThan);
+        return changes;
+    }
+    var start = [_]u32{0} ** 257;
+    for (changes) |*c| start[@as(usize, c.key[0]) + 1] += 1;
+    for (1..257) |i| start[i] += start[i - 1];
+    const sorted = try alloc.alloc(mpt.BatchChange, changes.len);
+    var next: [256]u32 = start[0..256].*;
+    for (changes) |*c| {
+        sorted[next[c.key[0]]] = c.*;
+        next[c.key[0]] += 1;
+    }
+    for (0..256) |b| {
+        const bucket = sorted[start[b]..start[b + 1]];
+        if (bucket.len > max_insertion_bucket)
+            std.mem.sort(mpt.BatchChange, bucket, {}, changeKeyLessThan)
+        else if (bucket.len > 1)
+            std.sort.insertion(mpt.BatchChange, bucket, {}, changeKeyLessThan);
+    }
+    return sorted;
 }
 
 /// stateRoot: state trie, keys = keccak256(address), values = account RLP.
@@ -194,6 +235,7 @@ pub fn computeStateRoot(
 
 /// Batch storage root update: sorts all slot changes and applies them in one pass.
 /// Replaces the old two-pass (inserts-then-deletes) sequential approach.
+/// `alloc` must be an arena-like scratch allocator (see sortChanges): nothing allocated here is freed.
 fn computeStorageRootBatch(
     alloc: std.mem.Allocator,
     account: types.AllocAccount,
@@ -213,18 +255,16 @@ fn computeStorageRootBatch(
         std.mem.writeInt(u256, &slot_key, entry.key_ptr.*, .big);
         const slot_hash = mpt.keccak256(&slot_key);
         const val: u256 = entry.value_ptr.*;
-        const val_enc: ?[]const u8 = if (val == 0) null else try rlp.encodeU256(alloc, val);
+        const val_enc: ?[]const u8 = if (val == 0) null else blk: {
+            const out = try alloc.alloc(u8, uintRlpLen(val));
+            _ = writeUintRlp(out, val);
+            break :blk out;
+        };
         changes[n] = .{ .key = slot_hash, .value = val_enc };
         n += 1;
     }
 
-    std.mem.sort(mpt.BatchChange, changes[0..n], {}, struct {
-        fn lt(_: void, a: mpt.BatchChange, b: mpt.BatchChange) bool {
-            return std.mem.lessThan(u8, &a.key, &b.key);
-        }
-    }.lt);
-
-    return mpt.batchUpdateIndexed(alloc, old_root, changes[0..n], index);
+    return mpt.batchUpdateIndexed(alloc, old_root, try sortChanges(alloc, changes[0..n]), index);
 }
 
 /// Scratch-build storage root from all non-zero slots (no witness pool needed).
@@ -267,20 +307,66 @@ fn computeStorageRoot(
     return computeStorageRootScratch(alloc, account);
 }
 
-fn encodeAccountRlp(
+/// RLP prefix of a 32-byte string (0x80 + 32), and the encoded size of one.
+const hash_prefix: u8 = 0xa0;
+const hash_rlp_len = 33;
+/// RLP list prefix for a payload of 56..255 bytes: 0xf7 + 1 length byte, then that byte.
+const list_long_1: u8 = 0xf8;
+const account_header_len = 2;
+/// Account payload bounds: nonce and balance each 1 byte (zero) up to 9 (u64) and 33 (u256)
+/// bytes, plus two encoded hashes. Both bounds must sit in the one-length-byte list range.
+const account_payload_min = 1 + 1 + 2 * hash_rlp_len;
+const account_payload_max = 9 + 33 + 2 * hash_rlp_len;
+comptime {
+    std.debug.assert(account_payload_min > 55 and account_payload_max <= 255);
+}
+
+pub fn encodeAccountRlp(
     alloc: std.mem.Allocator,
     nonce: u64,
     balance: u256,
     storage_root: [32]u8,
     code_hash: [32]u8,
 ) ![]u8 {
-    const parts = [_][]const u8{
-        try rlp.encodeU64(alloc, nonce),
-        try rlp.encodeU256(alloc, balance),
-        try rlp.encodeBytes(alloc, &storage_root),
-        try rlp.encodeBytes(alloc, &code_hash),
-    };
-    return rlp.encodeList(alloc, &parts);
+    // [nonce, balance, storageRoot, codeHash]; see account_payload_min/max for why the
+    // list header is always the one-length-byte form.
+    const payload = uintRlpLen(nonce) + uintRlpLen(balance) + 2 * hash_rlp_len;
+    const out = try alloc.alloc(u8, account_header_len + payload);
+    out[0] = list_long_1;
+    out[1] = @intCast(payload);
+    var pos: usize = account_header_len;
+    pos += writeUintRlp(out[pos..], nonce);
+    pos += writeUintRlp(out[pos..], balance);
+    out[pos] = hash_prefix;
+    @memcpy(out[pos + 1 ..][0..32], &storage_root);
+    out[pos + hash_rlp_len] = hash_prefix;
+    @memcpy(out[pos + hash_rlp_len + 1 ..][0..32], &code_hash);
+    return out;
+}
+
+/// Length of the RLP encoding of an integer, as rlp.encodeU256 writes it.
+pub fn uintRlpLen(n: u256) usize {
+    if (n < 0x80) return 1;
+    return 1 + (256 - @as(usize, @clz(n)) + 7) / 8;
+}
+
+/// Writes the RLP encoding of an integer (minimal big-endian bytes as a byte string, 0x80
+/// for zero) to the start of `out` and returns its length, as rlp.encodeU256 would.
+fn writeUintRlp(out: []u8, n: u256) usize {
+    if (n == 0) {
+        out[0] = 0x80;
+        return 1;
+    }
+    if (n < 0x80) {
+        out[0] = @intCast(n);
+        return 1;
+    }
+    const len = (256 - @as(usize, @clz(n)) + 7) / 8;
+    var buf: [32]u8 = undefined;
+    std.mem.writeInt(u256, &buf, n, .big);
+    out[0] = @intCast(0x80 + len);
+    @memcpy(out[1..][0..len], buf[32 - len ..]);
+    return 1 + len;
 }
 
 fn encodeReceiptRlp(alloc: std.mem.Allocator, receipt: types.Receipt) ![]u8 {

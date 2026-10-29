@@ -57,6 +57,7 @@ test {
     _ = @import("./block_validation_tests.zig");
     _ = @import("./main_tests.zig");
     _ = @import("./tx_signing_tests.zig");
+    _ = @import("./output_tests.zig");
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
