@@ -84,7 +84,7 @@ pub fn opMod(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = modU256(a, b);
+    stack.setTopUnsafe().* = if (comptime primitives.guest_features.has_arith256_mod) zisk_mod.reduce(a, b) else modU256(a, b);
 }
 
 /// SMOD opcode (0x07): a % b (signed, mod by zero returns 0)
@@ -113,7 +113,7 @@ pub fn opAddmod(ctx: *InstructionContext) void {
     const b = stack.peekUnsafe(1);
     const n = stack.peekUnsafe(2);
     stack.shrinkUnsafe(2);
-    stack.setTopUnsafe().* = addmod(a, b, n);
+    stack.setTopUnsafe().* = if (comptime primitives.guest_features.has_arith256_mod) zisk_mod.add(a, b, n) else addmod(a, b, n);
 }
 
 /// MULMOD opcode (0x09): (a * b) % N with u512 intermediate
@@ -128,7 +128,7 @@ pub fn opMulmod(ctx: *InstructionContext) void {
     const b = stack.peekUnsafe(1);
     const n = stack.peekUnsafe(2);
     stack.shrinkUnsafe(2);
-    stack.setTopUnsafe().* = mulmod(a, b, n);
+    stack.setTopUnsafe().* = if (comptime primitives.guest_features.has_arith256_mod) zisk_mod.mul(a, b, n) else mulmod(a, b, n);
 }
 
 /// EXP opcode (0x0A): base ^ exponent (mod 2^256)
@@ -263,6 +263,44 @@ pub fn mulmod(a: primitives.U256, b: primitives.U256, n: primitives.U256) primit
     }
     return fromLimbs(limbMod(8, product, nl));
 }
+
+/// MOD/ADDMOD/MULMOD through libziskos's `arith256_mod` accelerators (ZisK guest only;
+/// referenced solely under `primitives.guest_features.has_arith256_mod`). The precompile
+/// proves `a*b + c = q*m + d` with a 512-bit quotient and `d < m`, so unreduced operands,
+/// the 257-bit ADDMOD sum and the 512-bit MULMOD product are all exact. `m == 0` is the
+/// EVM's 0.
+const zisk_mod = struct {
+    extern fn reduce_mod256_c(a: *const [4]u64, m: *const [4]u64, out: *[4]u64) void;
+    extern fn add_mod256_c(a: *const [4]u64, b: *const [4]u64, m: *const [4]u64, out: *[4]u64) void;
+    extern fn mul_mod256_c(a: *const [4]u64, b: *const [4]u64, m: *const [4]u64, out: *[4]u64) void;
+
+    fn reduce(a: primitives.U256, m: primitives.U256) primitives.U256 {
+        if (m == 0) return 0;
+        const al = toLimbs(a);
+        const ml = toLimbs(m);
+        var out: [4]u64 = undefined;
+        reduce_mod256_c(&al, &ml, &out);
+        return fromLimbs(out);
+    }
+    fn add(a: primitives.U256, b: primitives.U256, m: primitives.U256) primitives.U256 {
+        if (m == 0) return 0;
+        const al = toLimbs(a);
+        const bl = toLimbs(b);
+        const ml = toLimbs(m);
+        var out: [4]u64 = undefined;
+        add_mod256_c(&al, &bl, &ml, &out);
+        return fromLimbs(out);
+    }
+    fn mul(a: primitives.U256, b: primitives.U256, m: primitives.U256) primitives.U256 {
+        if (m == 0) return 0;
+        const al = toLimbs(a);
+        const bl = toLimbs(b);
+        const ml = toLimbs(m);
+        var out: [4]u64 = undefined;
+        mul_mod256_c(&al, &bl, &ml, &out);
+        return fromLimbs(out);
+    }
+};
 
 /// Decompose u256 into 4 little-endian u64 limbs.
 pub inline fn toLimbs(v: primitives.U256) [4]u64 {
