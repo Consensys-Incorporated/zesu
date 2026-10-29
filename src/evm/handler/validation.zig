@@ -599,7 +599,7 @@ pub const Validation = struct {
 /// Number of zero bytes in `data`, eight at a time: a byte's top bit in `nz` is set iff the
 /// byte is non-zero ((b & 0x7f) + 0x7f carries into bit 7 for any non-zero low bits; `| w`
 /// covers b = 0x80), so a popcount of the top bits counts the non-zero bytes.
-fn countZeroBytes(data: []const u8) u64 {
+pub fn countZeroBytes(data: []const u8) u64 {
     const lo7: u64 = 0x7f7f7f7f7f7f7f7f;
     const hi: u64 = 0x8080808080808080;
     var nonzero: u64 = 0;
@@ -613,24 +613,6 @@ fn countZeroBytes(data: []const u8) u64 {
         nonzero += @intFromBool(data[i] != 0);
     }
     return data.len - nonzero;
-}
-
-test "countZeroBytes matches a byte loop" {
-    var prng = std.Random.DefaultPrng.init(0x7a65_7375);
-    const r = prng.random();
-    var buf: [300]u8 = undefined;
-    for (0..2000) |_| {
-        const n = r.uintLessThan(usize, buf.len + 1);
-        for (buf[0..n]) |*b| b.* = switch (r.uintLessThan(u8, 4)) {
-            0 => 0,
-            1 => 0x80,
-            2 => 0x01,
-            else => r.int(u8),
-        };
-        var want: u64 = 0;
-        for (buf[0..n]) |b| want += @intFromBool(b == 0);
-        try std.testing.expectEqual(want, countZeroBytes(buf[0..n]));
-    }
 }
 
 /// Initial and floor gas result
