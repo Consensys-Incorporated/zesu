@@ -164,10 +164,21 @@ fn changeKeyLessThan(_: void, a: mpt.BatchChange, b: mpt.BatchChange) bool {
     return std.mem.lessThan(u8, &a.key, &b.key);
 }
 
+/// Largest bucket sortChanges finishes with an insertion sort.
+const max_insertion_bucket = 64;
+
 /// Sorts changes by key, stably. The keys are hashes, spread evenly over their first byte:
 /// a counting pass on that byte leaves buckets of a few changes for an insertion sort.
+/// One byte is cheap to grind (about 256 tries per key), so a block can force many changes into
+/// one bucket; a bucket over `max_insertion_bucket` goes to std.mem.sort instead, which keeps
+/// the worst case O(n log n) rather than O(n^2).
 /// Returns the sorted changes, which may live in a new buffer from `alloc`.
-fn sortChanges(alloc: std.mem.Allocator, changes: []mpt.BatchChange) ![]mpt.BatchChange {
+///
+/// Allocator contract: that buffer is never freed here, so `alloc` must be an arena (or
+/// equivalent) that reclaims everything at once. Both callers pass the ScratchArena that
+/// computeStateRootDelta scopes to one batch; a general-purpose or free-list allocator
+/// would leak one buffer per call.
+pub fn sortChanges(alloc: std.mem.Allocator, changes: []mpt.BatchChange) ![]mpt.BatchChange {
     if (changes.len <= 32) {
         std.sort.insertion(mpt.BatchChange, changes, {}, changeKeyLessThan);
         return changes;
@@ -182,8 +193,11 @@ fn sortChanges(alloc: std.mem.Allocator, changes: []mpt.BatchChange) ![]mpt.Batc
         next[c.key[0]] += 1;
     }
     for (0..256) |b| {
-        if (start[b + 1] - start[b] > 1)
-            std.sort.insertion(mpt.BatchChange, sorted[start[b]..start[b + 1]], {}, changeKeyLessThan);
+        const bucket = sorted[start[b]..start[b + 1]];
+        if (bucket.len > max_insertion_bucket)
+            std.mem.sort(mpt.BatchChange, bucket, {}, changeKeyLessThan)
+        else if (bucket.len > 1)
+            std.sort.insertion(mpt.BatchChange, bucket, {}, changeKeyLessThan);
     }
     return sorted;
 }
@@ -221,6 +235,7 @@ pub fn computeStateRoot(
 
 /// Batch storage root update: sorts all slot changes and applies them in one pass.
 /// Replaces the old two-pass (inserts-then-deletes) sequential approach.
+/// `alloc` must be an arena-like scratch allocator (see sortChanges): nothing allocated here is freed.
 fn computeStorageRootBatch(
     alloc: std.mem.Allocator,
     account: types.AllocAccount,
@@ -292,31 +307,45 @@ fn computeStorageRoot(
     return computeStorageRootScratch(alloc, account);
 }
 
-fn encodeAccountRlp(
+/// RLP prefix of a 32-byte string (0x80 + 32), and the encoded size of one.
+const hash_prefix: u8 = 0xa0;
+const hash_rlp_len = 33;
+/// RLP list prefix for a payload of 56..255 bytes: 0xf7 + 1 length byte, then that byte.
+const list_long_1: u8 = 0xf8;
+const account_header_len = 2;
+/// Account payload bounds: nonce and balance each 1 byte (zero) up to 9 (u64) and 33 (u256)
+/// bytes, plus two encoded hashes. Both bounds must sit in the one-length-byte list range.
+const account_payload_min = 1 + 1 + 2 * hash_rlp_len;
+const account_payload_max = 9 + 33 + 2 * hash_rlp_len;
+comptime {
+    std.debug.assert(account_payload_min > 55 and account_payload_max <= 255);
+}
+
+pub fn encodeAccountRlp(
     alloc: std.mem.Allocator,
     nonce: u64,
     balance: u256,
     storage_root: [32]u8,
     code_hash: [32]u8,
 ) ![]u8 {
-    // [nonce, balance, storageRoot, codeHash]: at most 9 + 33 + 33 + 33 payload bytes,
-    // so the list header is always 0xf8 and one length byte.
-    const payload = uintRlpLen(nonce) + uintRlpLen(balance) + 2 * 33;
-    const out = try alloc.alloc(u8, 2 + payload);
-    out[0] = 0xf8;
+    // [nonce, balance, storageRoot, codeHash]; see account_payload_min/max for why the
+    // list header is always the one-length-byte form.
+    const payload = uintRlpLen(nonce) + uintRlpLen(balance) + 2 * hash_rlp_len;
+    const out = try alloc.alloc(u8, account_header_len + payload);
+    out[0] = list_long_1;
     out[1] = @intCast(payload);
-    var pos: usize = 2;
+    var pos: usize = account_header_len;
     pos += writeUintRlp(out[pos..], nonce);
     pos += writeUintRlp(out[pos..], balance);
-    out[pos] = 0xa0;
+    out[pos] = hash_prefix;
     @memcpy(out[pos + 1 ..][0..32], &storage_root);
-    out[pos + 33] = 0xa0;
-    @memcpy(out[pos + 34 ..][0..32], &code_hash);
+    out[pos + hash_rlp_len] = hash_prefix;
+    @memcpy(out[pos + hash_rlp_len + 1 ..][0..32], &code_hash);
     return out;
 }
 
 /// Length of the RLP encoding of an integer, as rlp.encodeU256 writes it.
-fn uintRlpLen(n: u256) usize {
+pub fn uintRlpLen(n: u256) usize {
     if (n < 0x80) return 1;
     return 1 + (256 - @as(usize, @clz(n)) + 7) / 8;
 }
@@ -464,49 +493,3 @@ const KECCAK_EMPTY: [32]u8 = [_]u8{
     0xe5, 0x00, 0xb6, 0x53, 0xca, 0x82, 0x27, 0x3b,
     0x7b, 0xfa, 0xd8, 0x04, 0x5d, 0x85, 0xa4, 0x70,
 };
-
-test "account encoding and change sort match the generic paths" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    var prng = std.Random.DefaultPrng.init(0x6f75_7470);
-    const r = prng.random();
-
-    for (0..2000) |i| {
-        // Every width from 0 to 256 bits, plus the 0x7f/0x80 single-byte boundary.
-        const bits = i % 257;
-        var v: u256 = if (bits == 0) 0 else r.int(u256) >> @intCast(256 - bits);
-        if (i % 50 == 1) v = 0x7f + @as(u256, (i / 50) % 2);
-        const nonce: u64 = @truncate(v);
-        var root: [32]u8 = undefined;
-        var code_hash: [32]u8 = undefined;
-        r.bytes(&root);
-        r.bytes(&code_hash);
-        const want = try rlp.encodeList(alloc, &.{
-            try rlp.encodeU64(alloc, nonce),
-            try rlp.encodeU256(alloc, v),
-            try rlp.encodeBytes(alloc, &root),
-            try rlp.encodeBytes(alloc, &code_hash),
-        });
-        try std.testing.expectEqualSlices(u8, want, try encodeAccountRlp(alloc, nonce, v, root, code_hash));
-        try std.testing.expectEqual((try rlp.encodeU256(alloc, v)).len, uintRlpLen(v));
-    }
-
-    for ([_]usize{ 0, 1, 31, 32, 33, 300, 5000 }) |n| {
-        const changes = try alloc.alloc(mpt.BatchChange, n);
-        for (changes, 0..) |*c, j| {
-            r.bytes(&c.key);
-            // Shared leading bytes exercise the tie-breaks past the first word.
-            if (j % 3 == 0) @memset(c.key[0..9], 0x42);
-            c.value = null;
-        }
-        const want = try alloc.dupe(mpt.BatchChange, changes);
-        std.mem.sort(mpt.BatchChange, want, {}, struct {
-            fn lt(_: void, a: mpt.BatchChange, b: mpt.BatchChange) bool {
-                return std.mem.lessThan(u8, &a.key, &b.key);
-            }
-        }.lt);
-        const got = try sortChanges(alloc, changes);
-        for (want, got) |w, g| try std.testing.expectEqualSlices(u8, &w.key, &g.key);
-    }
-}
