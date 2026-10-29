@@ -53,9 +53,10 @@ pub const WitnessDatabase = struct {
     /// EIP-8025: verifier derives these from execution, so they need not be in the witness.
     deployed_codes: std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80),
     /// Cache of address → pre-state account (storage root, nonce, balance, code hash),
-    /// populated by basic() and storage() during execution. Eliminates redundant account
-    /// trie walks in storage() and in the post-execution batch update (storageRootFor), and
-    /// lets that update skip accounts the block left unchanged (originalAccount). Accounts
+    /// populated by basic() and storage() during execution, and the source basic() serves
+    /// repeat reads from. Eliminates redundant account trie walks in storage() and in the
+    /// post-execution batch update (storageRootFor), and lets that update skip accounts the
+    /// block left unchanged (originalAccount). Accounts
     /// absent from pre-state are cached with exists = false and EMPTY_TRIE_HASH.
     original_accounts: std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80),
     /// mpt.validateSecuredTriePaths's filter over `node_index` and stack.
@@ -174,8 +175,21 @@ pub const WitnessDatabase = struct {
     // ── basic ───────────────────────────────────────────────────────────────
 
     pub fn basic(self: *Self, address: primitives.Address) !?state.AccountInfo {
-        // Already proven: the BAL tracker re-reads every touched account's pre-state.
-        // OOM panics rather than propagates: see the comment on the fill below.
+        // original_accounts holds only proven pre-state, and the BAL tracker re-reads every
+        // touched account, so a hit skips the proof walk. One getOrPut serves hit and miss.
+        //
+        // The slot is reserved before the proof is verified, so every path out that does not
+        // fill it must remove it again (the errdefer below, and the SYSTEM_ADDRESS return):
+        // an unproven entry would be served as pre-state to later reads.
+        //
+        // The reservation must not be dropped: storageRootFor() is a bare cache `get()`, so a
+        // missing entry reads as "account never loaded", and the post-execution batch trie
+        // update (executor/output.zig) rebuilds the storage trie from only the touched slots
+        // for that case -- a wrong state root reported as success. Nor may an allocation
+        // failure propagate as a plain error: the generic `catch { ctx_error = .database_error }`
+        // wrappers in context.zig/host.zig can't tell OOM apart from DbError.InvalidWitness, so
+        // it would misreport a host allocator failure as "the witness is incomplete". Panic on
+        // OOM instead.
         const gop = self.original_accounts.getOrPut(address) catch @panic("out of memory");
         if (gop.found_existing) {
             const o = gop.value_ptr.*;
@@ -206,14 +220,7 @@ pub const WitnessDatabase = struct {
             else => return DbError.InvalidWitness,
         };
 
-        // These entries must not be dropped: storageRootFor() is a bare cache `get()`,
-        // so a dropped entry reads as "account never loaded", and the post-execution
-        // batch trie update (executor/output.zig) rebuilds the storage trie from only
-        // the touched slots for that case -- a wrong state root reported as success.
-        // Nor may a put failure propagate as a plain error: the generic
-        // `catch { ctx_error = .database_error }` wrappers in context.zig/host.zig
-        // can't tell OOM apart from DbError.InvalidWitness, so it would misreport a
-        // host allocator failure as "the witness is incomplete". Panic on OOM instead.
+        // Proven: publish it to the reserved slot.
         gop.value_ptr.* = OriginalAccount.of(account_state);
         const as = account_state orelse return null;
         return state.AccountInfo{
@@ -266,8 +273,7 @@ pub const WitnessDatabase = struct {
                 error.InvalidProof => return DbError.InvalidWitness,
                 else => return DbError.InvalidWitness,
             };
-            // OOM panics rather than propagates: see basic()'s comment above for why. put,
-            // not getOrPut: a getOrPut here made basic()'s put cost more in the guest.
+            // OOM panics rather than propagates: see basic()'s comment above for why.
             self.original_accounts.put(address, OriginalAccount.of(account_state)) catch @panic("out of memory");
             break :blk self.original_accounts.getPtr(address).?;
         };

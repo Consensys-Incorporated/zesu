@@ -419,7 +419,7 @@ test "blockHash returns InvalidWitness for missing hash" {
 // storage" and rebuilds the trie from only the touched slots, silently dropping
 // every untouched slot -- a wrong state root reported as success.
 //
-// db/main.zig's `original_accounts.put(...)` sites panic on OOM rather than
+// db/main.zig's `original_accounts` fills (getOrPut/put) panic on OOM rather than
 // drop the entry or propagate an error (which would be indistinguishable
 // upstream from DbError.InvalidWitness), so the invariant
 //
@@ -688,4 +688,82 @@ test "unchangedBy: absent account that was created is not skipped" {
     try std.testing.expect(!o.unchangedBy(0, 5, KECCAK_EMPTY, EMPTY_TRIE_HASH, false));
     try std.testing.expect(!o.unchangedBy(0, 0, CODE_A, EMPTY_TRIE_HASH, false));
     try std.testing.expect(!o.unchangedBy(0, 0, KECCAK_EMPTY, ROOT_A, false));
+}
+
+// ─── basic() serves repeat reads from the proven pre-state cache ──────────────
+
+/// A witness whose root resolves to nothing: every account proof is missing.
+fn emptyNodesWitness() input.StateWitness {
+    return .{
+        .state_root = @splat(0x77),
+        .nodes = &.{},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
+    };
+}
+
+test "basic serves a repeat read from the cache without re-verifying" {
+    var address: primitives.Address = @splat(0x00);
+    address[19] = 0x41;
+
+    var account_rlp: [200]u8 = undefined;
+    const account_len = buildAccountRlp(&account_rlp, 4, 900, EMPTY_TRIE_HASH, KECCAK_EMPTY);
+    var leaf_buf: [512]u8 = undefined;
+    const leaf_len = buildLeafNode(&leaf_buf, mpt.keccak256(&address), account_rlp[0..account_len]);
+    const leaf_bytes = leaf_buf[0..leaf_len];
+    const w = input.StateWitness{
+        .state_root = mpt.keccak256(leaf_bytes),
+        .nodes = &[_][]const u8{leaf_bytes},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
+    };
+
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
+
+    const first = (try wdb.basic(address)).?;
+    try std.testing.expectEqual(@as(u64, 4), first.nonce);
+    try std.testing.expectEqual(@as(u256, 900), first.balance);
+
+    // Drop the proof: a second basic() can only succeed from the cache.
+    try std.testing.expect(idx.remove(w.state_root));
+    const second = (try wdb.basic(address)).?;
+    try std.testing.expectEqual(first.nonce, second.nonce);
+    try std.testing.expectEqual(first.balance, second.balance);
+    try std.testing.expectEqualSlices(u8, &first.code_hash, &second.code_hash);
+}
+
+test "basic leaves no cache entry when the proof is missing" {
+    var address: primitives.Address = @splat(0x00);
+    address[19] = 0x42;
+
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(emptyNodesWitness(), &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
+
+    try std.testing.expectError(error.InvalidWitness, wdb.basic(address));
+    try std.testing.expect(wdb.originalAccount(address) == null);
+    try std.testing.expect(wdb.storageRootFor(address) == null);
+    // Still unproven on retry: the failure was not cached as a result.
+    try std.testing.expectError(error.InvalidWitness, wdb.basic(address));
+}
+
+test "basic of SYSTEM_ADDRESS in a system call is null and not cached" {
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(emptyNodesWitness(), &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
+
+    wdb.system_call_origin = true;
+    try std.testing.expect((try wdb.basic(primitives.SYSTEM_ADDRESS)) == null);
+    try std.testing.expect(wdb.originalAccount(primitives.SYSTEM_ADDRESS) == null);
+
+    // Outside a system call the same read must be proved, not served from a stale entry.
+    wdb.system_call_origin = false;
+    try std.testing.expectError(error.InvalidWitness, wdb.basic(primitives.SYSTEM_ADDRESS));
 }
