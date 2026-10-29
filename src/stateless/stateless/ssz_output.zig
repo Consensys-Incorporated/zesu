@@ -488,7 +488,15 @@ pub fn serialize(
     req: input.NewPayloadRequest,
     successful_validation: bool,
 ) ![OUTPUT_SIZE]u8 {
-    const root = try newPayloadRequestRoot(alloc, req);
+    return serializeWithRoot(try newPayloadRequestRoot(alloc, req), chain_config, successful_validation);
+}
+
+/// `serialize` for a caller that already holds `newPayloadRequestRoot(req)`.
+pub fn serializeWithRoot(
+    root: [32]u8,
+    chain_config: input.ChainConfig,
+    successful_validation: bool,
+) [OUTPUT_SIZE]u8 {
     var out: [OUTPUT_SIZE]u8 = undefined;
     @memcpy(out[0..32], &root);
     out[32] = if (successful_validation) 0x01 else 0x00;
