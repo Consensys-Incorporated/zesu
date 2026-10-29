@@ -63,19 +63,9 @@ pub fn decodeNode(bytes: []const u8) error{ InvalidRlp, InvalidNode }!DecodedNod
     var rest = payload;
     while (rest.len > 0) : (count += 1) {
         if (count >= 17) return error.InvalidNode;
-        var item: rlp.RlpItem = undefined;
-        var consumed: usize = undefined;
-        if (rest[0] == 0x80) {
-            item = .{ .bytes = &.{} };
-            consumed = 1;
-        } else if (rest[0] == 0xa0 and rest.len >= 33) {
-            item = .{ .bytes = rest[1..33] };
-            consumed = 33;
-        } else {
-            const r = try rlp.decodeItem(rest);
-            item = r.item;
-            consumed = r.consumed;
-        }
+        const r = try decodeSlot(rest);
+        const item = r.item;
+        const consumed = r.consumed;
         const raw = rest[0..consumed];
         if (count < 2) first[count] = item;
         if (count == 1) second_raw = raw;
@@ -116,6 +106,17 @@ pub fn decodeNode(bytes: []const u8) error{ InvalidRlp, InvalidNode }!DecodedNod
         17 => return .{ .branch = .{ .children = children, .value = value } },
         else => return error.InvalidNode,
     }
+}
+
+/// `rlp.decodeItem` for one slot of a trie node. A branch's slots are almost all 0x80 (empty)
+/// or 0xa0 plus a 32-byte hash, whose item the prefix byte alone fixes; anything else, including
+/// a truncated hash, goes to `decodeItem`, so the result (or error) is always the same.
+inline fn decodeSlot(input: []const u8) error{InvalidRlp}!rlp.DecodeResult {
+    if (input.len > 0) {
+        if (input[0] == 0x80) return .{ .item = .{ .bytes = &.{} }, .consumed = 1 };
+        if (input[0] == 0xa0 and input.len >= 33) return .{ .item = .{ .bytes = input[1..33] }, .consumed = 33 };
+    }
+    return rlp.decodeItem(input);
 }
 
 /// Convert an RLP item into a NodeRef.
@@ -161,28 +162,13 @@ pub fn decodeNibble(bytes: []const u8, nibble: u8) error{ InvalidRlp, InvalidNod
     // 32-byte hash, whose lengths the prefix byte alone fixes; anything else is decoded.
     for (0..nibble) |_| {
         if (rest.len == 0) return null; // fewer than nibble+1 items → leaf/extension
-        const n: usize = switch (rest[0]) {
-            0x80 => 1,
-            0xa0 => 33,
-            else => (try rlp.decodeItem(rest)).consumed,
-        };
-        if (n > rest.len) return error.InvalidRlp;
-        rest = rest[n..];
+        rest = rest[(try decodeSlot(rest)).consumed..];
     }
     // Capture the target child, reading an empty or hashed slot from its prefix byte.
     if (rest.len == 0) return null;
-    var result: NodeRef = undefined;
-    if (rest[0] == 0x80) {
-        result = .{ .empty = {} };
-        rest = rest[1..];
-    } else if (rest[0] == 0xa0 and rest.len >= 33) {
-        result = .{ .hash = rest[1..33] };
-        rest = rest[33..];
-    } else {
-        const r = try rlp.decodeItem(rest);
-        result = try decodeNodeRef(r.item, rest[0..r.consumed]);
-        rest = rest[r.consumed..];
-    }
+    const r = try decodeSlot(rest);
+    const result = try decodeNodeRef(r.item, rest[0..r.consumed]);
+    rest = rest[r.consumed..];
 
     // Disambiguate leaf/extension (2 items) from branch (17 items).
     // After consuming nibble+1 items:
