@@ -627,6 +627,11 @@ pub const EXEC_PAD: usize = 33;
 
 const empty_exec: [EXEC_PAD]u8 align(8) = [_]u8{STOP} ** EXEC_PAD;
 
+/// Only guests with the jump_dest precompile keep a padded, aligned copy of the code and
+/// 64-bit-word bitmaps; elsewhere `exec` aliases `bytecode` and the bitmap stays byte-sized.
+const padded_exec = primitives.guest_features.has_jump_dest;
+const bitmap_align: std.mem.Alignment = if (padded_exec) .@"8" else .@"1";
+
 /// Legacy analyzed bytecode with jump table
 pub const LegacyAnalyzedBytecode = struct {
     bytecode: []const u8,
@@ -636,7 +641,7 @@ pub const LegacyAnalyzedBytecode = struct {
     /// opcodes and PUSH immediates without a bounds check, since running off the end
     /// lands on STOP. Everything that observes code (CODESIZE, CODECOPY, EXTCODE*,
     /// hashing) reads `bytecode`.
-    exec: []align(8) const u8,
+    exec: []align(if (padded_exec) 8 else 1) const u8,
 
     const Self = @This();
 
@@ -664,9 +669,11 @@ pub const LegacyAnalyzedBytecode = struct {
         //   - default() / empty input: original_len == 0, data is a static &[_]u8{0}
         //   - alloc-failure fallback: jump_table.data.len == 0, data is static &[_]u8{}
         if (self.original_len > 0 and self.jump_table.data.len > 0) {
-            alloc_mod.get().free(@as([]align(8) const u8, @alignCast(self.jump_table.data)));
+            alloc_mod.get().free(@as([]align(bitmap_align.toByteUnits()) const u8, @alignCast(self.jump_table.data)));
         }
-        if (self.original_len > 0) alloc_mod.get().free(self.exec);
+        if (comptime padded_exec) {
+            if (self.original_len > 0) alloc_mod.get().free(self.exec);
+        }
     }
 };
 
@@ -774,12 +781,13 @@ fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
 
     // Allocate bit vector on heap (one bit per bytecode position) to avoid dangling pointer.
     // Whole, 8-byte aligned 64-bit words: the ZisK jump_dest precompile writes them in full.
-    const bit_vec = alloc_mod.get().alignedAlloc(u8, .@"8", (bytecode.len + 63) / 64 * 8) catch @panic("out of memory");
-    const exec = alloc_mod.get().alignedAlloc(u8, .@"8", bytecode.len + EXEC_PAD) catch @panic("out of memory");
-    @memcpy(exec[0..bytecode.len], bytecode);
-    @memset(exec[bytecode.len..], STOP);
+    const bit_len = if (padded_exec) (bytecode.len + 63) / 64 * 8 else (bytecode.len + 7) / 8;
+    const bit_vec = alloc_mod.get().alignedAlloc(u8, bitmap_align, bit_len) catch @panic("out of memory");
 
-    if (comptime primitives.guest_features.has_jump_dest) {
+    if (comptime padded_exec) {
+        const exec = alloc_mod.get().alignedAlloc(u8, .@"8", bytecode.len + EXEC_PAD) catch @panic("out of memory");
+        @memcpy(exec[0..bytecode.len], bytecode);
+        @memset(exec[bytecode.len..], STOP);
         // ZisK: one precompile call over the aligned copy (bytecode.len > 0 here).
         zkvmJumpDest(bit_vec.ptr, exec.ptr, bytecode.len);
         return LegacyAnalyzedBytecode{
@@ -789,6 +797,7 @@ fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
             .exec = exec,
         };
     }
+    const exec = bytecode;
     @memset(bit_vec, 0);
 
     // Analyze bytecode to find JUMPDEST positions.
