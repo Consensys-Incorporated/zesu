@@ -47,10 +47,13 @@ pub fn encodeBalRlp(alloc: std.mem.Allocator, entries: []const EncodeEntry) ![]u
         payload += listLen(l.payload);
     }
     const out = try alloc.alloc(u8, listLen(payload));
+    errdefer alloc.free(out);
     var w = Writer{ .buf = out };
     w.listHeader(payload);
     for (entries, lens) |e, l| w.entry(e, l);
-    std.debug.assert(w.pos == out.len);
+    // Not an assert: release builds are ReleaseFast, where asserts compile out and a sizing
+    // pass that disagrees with the write pass would hash a short or partly uninitialised buffer.
+    if (w.pos != out.len) return error.BalSizeMismatch;
     return out;
 }
 
