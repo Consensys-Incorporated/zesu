@@ -172,3 +172,25 @@ test "validateAgainstStateAndDeductCaller: EIP-3607 rejects account with code" {
     const result = Validation.validateAgainstStateAndDeductCaller(&mevm.evm, 21000);
     try std.testing.expectError(ValidationError.SenderHasCode, result);
 }
+
+// -------------------------------------------------------------------------
+// countZeroBytes
+// -------------------------------------------------------------------------
+
+test "countZeroBytes matches a byte loop" {
+    var prng = std.Random.DefaultPrng.init(0x7a65_7375);
+    const r = prng.random();
+    var buf: [300]u8 = undefined;
+    for (0..2000) |_| {
+        const n = r.uintLessThan(usize, buf.len + 1);
+        for (buf[0..n]) |*b| b.* = switch (r.uintLessThan(u8, 4)) {
+            0 => 0,
+            1 => 0x80,
+            2 => 0x01,
+            else => r.int(u8),
+        };
+        var want: u64 = 0;
+        for (buf[0..n]) |b| want += @intFromBool(b == 0);
+        try std.testing.expectEqual(want, validation.countZeroBytes(buf[0..n]));
+    }
+}

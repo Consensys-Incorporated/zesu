@@ -363,13 +363,8 @@ pub const Validation = struct {
         else
             68; // pre-EIP-2028 (Frontier through Petersburg)
         if (tx.data) |data| {
-            for (data.items) |byte| {
-                if (byte == 0) {
-                    gas += CALLDATA_ZERO_BYTE_COST;
-                } else {
-                    gas += calldata_nonzero_cost;
-                }
-            }
+            const zeros = countZeroBytes(data.items);
+            gas += zeros * CALLDATA_ZERO_BYTE_COST + (data.items.len - zeros) * calldata_nonzero_cost;
         }
 
         // EIP-3860 (Shanghai+): initcode word gas for CREATE transactions
@@ -442,9 +437,8 @@ pub const Validation = struct {
         var tokens_in_calldata: u64 = 0;
         const calldata_len: u64 = if (tx.data) |d| @intCast(d.items.len) else 0;
         if (tx.data) |data| {
-            for (data.items) |byte| {
-                tokens_in_calldata += if (byte == 0) 1 else AM_TX_DATA_TOKEN_STANDARD;
-            }
+            const zeros = countZeroBytes(data.items);
+            tokens_in_calldata = zeros + (data.items.len - zeros) * AM_TX_DATA_TOKEN_STANDARD;
         }
         regular += tokens_in_calldata * AM_TX_DATA_TOKEN_STANDARD;
 
@@ -583,13 +577,8 @@ pub const Validation = struct {
             if (is_amsterdam) {
                 tokens += @as(u64, data.items.len) * FLOOR_NONZERO_TOKEN_COST;
             } else {
-                for (data.items) |byte| {
-                    if (byte == 0) {
-                        tokens += FLOOR_ZERO_TOKEN_COST;
-                    } else {
-                        tokens += FLOOR_NONZERO_TOKEN_COST;
-                    }
-                }
+                const zeros = countZeroBytes(data.items);
+                tokens += zeros * FLOOR_ZERO_TOKEN_COST + (data.items.len - zeros) * FLOOR_NONZERO_TOKEN_COST;
             }
         }
 
@@ -606,6 +595,25 @@ pub const Validation = struct {
         return tokens * token_gas;
     }
 };
+
+/// Number of zero bytes in `data`, eight at a time: a byte's top bit in `nz` is set iff the
+/// byte is non-zero ((b & 0x7f) + 0x7f carries into bit 7 for any non-zero low bits; `| w`
+/// covers b = 0x80), so a popcount of the top bits counts the non-zero bytes.
+pub fn countZeroBytes(data: []const u8) u64 {
+    const lo7: u64 = 0x7f7f7f7f7f7f7f7f;
+    const hi: u64 = 0x8080808080808080;
+    var nonzero: u64 = 0;
+    var i: usize = 0;
+    while (i + 8 <= data.len) : (i += 8) {
+        const w = std.mem.readInt(u64, data[i..][0..8], .little);
+        const nz = (((w & lo7) +% lo7) | w) & hi;
+        nonzero += @popCount(nz);
+    }
+    while (i < data.len) : (i += 1) {
+        nonzero += @intFromBool(data[i] != 0);
+    }
+    return data.len - nonzero;
+}
 
 /// Initial and floor gas result
 pub const InitialAndFloorGas = struct {
