@@ -559,8 +559,10 @@ pub const Interpreter = struct {
 /// fetch. The bytecode of a frame cannot change while its dispatch loop runs (CALL and
 /// CREATE build new frames; JUMP only moves pc), so runDispatch resolves the slice once
 /// and fetches through this instead.
+///
+/// `code` is the zero-padded `exec` copy: running off the end reads STOP, so the fetch
+/// needs no bounds check.
 inline fn opcodeAt(code: []const u8, pc: usize) u8 {
-    if (pc >= code.len) return 0x00;
     return code[pc];
 }
 
@@ -729,8 +731,22 @@ fn runDispatch(
     comptime check_pending: bool,
 ) void {
     if (!self.bytecode.isNotEnd()) return;
-    // Hoisted once per frame — see opcodeAt.
-    const code = self.bytecode.bytes();
+    // Hoisted once per frame — see opcodeAt. Fetch from the zero-padded executable copy,
+    // so neither opcode fetch nor PUSH immediates check bounds.
+    // A delegation designator is executable too (a delegation that points at a
+    // delegated account runs the target's 0xef01.. bytes, and halts on 0xef); its
+    // 23 bytes are padded here, on the stack, for the length of this call.
+    var designator: [23 + bytecode.EXEC_PAD]u8 = undefined;
+    const code: []const u8 = switch (self.bytecode.inner) {
+        .legacy_analyzed => |*a| a.exec,
+        .eip7702 => |*d| blk: {
+            @memset(&designator, bytecode.STOP);
+            @memcpy(designator[0..23], &d.raw_bytes);
+            break :blk &designator;
+        },
+    };
+    // CODESIZE is the real length, not the padded one.
+    const code_len = self.bytecode.bytes().len;
     // EIP-145. Loop-invariant: spec_id is fixed for the frame.
     const has_shifts = primitives.isEnabledIn(self.runtime_flags.spec_id, .constantinople);
     // EIP-3855. Loop-invariant like has_shifts.
@@ -958,12 +974,8 @@ fn runDispatch(
                 return;
             }
             var buf: [32]u8 = .{0} ** 32;
-            if (r.pc + n <= code.len) {
-                @memcpy(buf[32 - n ..], code[r.pc .. r.pc + n]);
-            } else if (r.pc < code.len) {
-                const available = code.len - r.pc;
-                @memcpy(buf[32 - n .. 32 - n + available], code[r.pc..]);
-            }
+            // Immediates past the end read the zero padding.
+            @memcpy(buf[32 - n ..], code[r.pc..][0..n]);
             const U = primitives.U256;
             r.sb[r.sp] = (@as(U, std.mem.readInt(u64, buf[0..8], .big)) << 192) |
                 (@as(U, std.mem.readInt(u64, buf[8..16], .big)) << 128) |
@@ -1036,7 +1048,7 @@ fn runDispatch(
         0x30, 0x33, 0x34, 0x36, 0x38, 0x58, 0x59 => |op| {
             r.pc += 1;
             switch (op) {
-                0x38 => if (!pushReg(self, &r, gas_costs.G_BASE, code.len)) return,
+                0x38 => if (!pushReg(self, &r, gas_costs.G_BASE, code_len)) return,
                 0x58 => if (!pushReg(self, &r, gas_costs.G_BASE, r.pc - 1)) return,
                 0x30 => if (!pushReg(self, &r, gas_costs.G_BASE, host_mod.addressToU256(self.input.target))) return,
                 0x33 => if (!pushReg(self, &r, gas_costs.G_BASE, host_mod.addressToU256(self.input.caller))) return,
