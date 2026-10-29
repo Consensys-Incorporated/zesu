@@ -421,6 +421,17 @@ pub inline fn limbMod(comptime M: comptime_int, a: [M]u64, b: [4]u64) [4]u64 {
         return .{ rem, 0, 0, 0 };
     }
 
+    // Multi-limb divisor: Knuth's Algorithm D with the divisor length fixed at compile time,
+    // so its loops unroll and every v[n - 1]-style index is a constant.
+    return switch (n) {
+        inline 2, 3, 4 => |N| knuthMod(M, N, a, b),
+        else => unreachable,
+    };
+}
+
+/// The Knuth Algorithm D core of `limbMod` for an N-limb divisor (2 <= N <= 4).
+inline fn knuthMod(comptime M: comptime_int, comptime N: comptime_int, a: [M]u64, b: [4]u64) [4]u64 {
+    const n = N;
     // Normalize: shift divisor so MSB of top limb is set
     const shift: u6 = @intCast(@clz(b[n - 1]));
 
@@ -452,9 +463,8 @@ pub inline fn limbMod(comptime M: comptime_int, a: [M]u64, b: [4]u64) [4]u64 {
     const m = M - n; // Number of quotient limbs
 
     // Knuth's Algorithm D division loop
-    var j: usize = m + 1;
-    while (j > 0) {
-        j -= 1;
+    inline for (0..m + 1) |jj| {
+        const j = m - jj;
 
         // Estimate quotient digit using div128by64
         var q_hat: u64 = undefined;
@@ -534,6 +544,9 @@ pub inline fn limbMod(comptime M: comptime_int, a: [M]u64, b: [4]u64) [4]u64 {
     return r_limbs;
 }
 
+/// Quotient and remainder limbs of `limbDivMod`.
+pub const QuotRem = struct { q: [4]u64, r: [4]u64 };
+
 /// Compute (a / b, a % b) for 4-limb operands using Knuth's Algorithm D.
 /// Returns .{ .q = quotient, .r = remainder } as [4]u64 limb arrays.
 /// When b == 0 or a < b the fast paths return immediately.
@@ -546,7 +559,7 @@ pub inline fn limbMod(comptime M: comptime_int, a: [M]u64, b: [4]u64) [4]u64 {
 /// arithmetic tier: -10.3% on DIV/SDIV, -4.0% across MOD/SMOD/ADDMOD/MULMOD,
 /// -3.5% on the tier overall, and -0.11% on the 500-block mainnet corpus with all
 /// 500 blocks improved. Do not drop the keyword without re-benchmarking.
-pub inline fn limbDivMod(a: [4]u64, b: [4]u64) struct { q: [4]u64, r: [4]u64 } {
+pub inline fn limbDivMod(a: [4]u64, b: [4]u64) QuotRem {
     const zero = [_]u64{0} ** 4;
 
     var n: usize = 0;
@@ -613,6 +626,17 @@ pub inline fn limbDivMod(a: [4]u64, b: [4]u64) struct { q: [4]u64, r: [4]u64 } {
         return .{ .q = q_result, .r = .{ rem, 0, 0, 0 } };
     }
 
+    // Multi-limb divisor: Knuth Algorithm D, divisor length fixed at compile time (see limbMod).
+    return switch (n) {
+        inline 2, 3, 4 => |N| knuthDivMod(N, a, b),
+        else => unreachable,
+    };
+}
+
+/// The Knuth Algorithm D core of `limbDivMod` for an N-limb divisor (2 <= N <= 4).
+inline fn knuthDivMod(comptime N: comptime_int, a: [4]u64, b: [4]u64) QuotRem {
+    const zero = [_]u64{0} ** 4;
+    const n = N;
     // Multi-limb divisor: Knuth Algorithm D.
     const shift: u6 = @intCast(@clz(b[n - 1]));
 
@@ -642,9 +666,8 @@ pub inline fn limbDivMod(a: [4]u64, b: [4]u64) struct { q: [4]u64, r: [4]u64 } {
     const m = 4 - n;
     var q_result = zero;
 
-    var j: usize = m + 1;
-    while (j > 0) {
-        j -= 1;
+    inline for (0..m + 1) |jj| {
+        const j = m - jj;
 
         var q_hat: u64 = undefined;
         var r_hat: u64 = undefined;
