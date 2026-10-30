@@ -125,6 +125,7 @@ pub const JournalVTable = struct {
     isStorageCold: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) bool,
     sloadProbe: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) context_mod.SloadProbe,
     isAddressLoaded: *const fn (*anyopaque, primitives.Address) bool,
+    warmAccount: *const fn (*anyopaque, primitives.Address) ?*const state_mod.Account,
     accountInfo: *const fn (*anyopaque, primitives.Address) anyerror!context_mod.AccountInfoLoad,
     loadAccountWithCode: *const fn (*anyopaque, primitives.Address) anyerror!context_mod.StateLoad(*const state_mod.Account),
     sload: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) anyerror!context_mod.StateLoad(primitives.StorageValue),
@@ -150,6 +151,7 @@ pub const JournalVTable = struct {
                 .isStorageCold = isStorageColdFn,
                 .sloadProbe = sloadProbeFn,
                 .isAddressLoaded = isAddressLoadedFn,
+                .warmAccount = warmAccountFn,
                 .accountInfo = accountInfoFn,
                 .loadAccountWithCode = loadAccountWithCodeFn,
                 .sload = sloadFn,
@@ -181,6 +183,9 @@ pub const JournalVTable = struct {
             }
             fn isAddressLoadedFn(ptr: *anyopaque, addr: primitives.Address) bool {
                 return j(ptr).isAddressLoaded(addr);
+            }
+            fn warmAccountFn(ptr: *anyopaque, addr: primitives.Address) ?*const state_mod.Account {
+                return j(ptr).warmAccount(addr);
             }
             fn accountInfoFn(ptr: *anyopaque, addr: primitives.Address) anyerror!context_mod.AccountInfoLoad {
                 return j(ptr).loadAccountInfoSkipColdLoad(addr, false, false);
@@ -380,6 +385,13 @@ pub const Host = struct {
     /// Check whether an address is already in the EVM state cache.
     pub fn isAddressLoaded(self: *const Host, addr: primitives.Address) bool {
         return self.js_vtable.isAddressLoaded(@constCast(self.js), addr);
+    }
+
+    /// The account, when it is already loaded and warm in this transaction: one lookup that
+    /// answers both the warm/cold charge and the read that follows. Null says nothing about
+    /// coldness (an access-list or precompile address can be warm and not yet loaded).
+    pub fn warmAccount(self: *Host, addr: primitives.Address) ?*const state_mod.Account {
+        return self.js_vtable.warmAccount(self.js, addr);
     }
 
     /// Load account info. Returns null on database error.
