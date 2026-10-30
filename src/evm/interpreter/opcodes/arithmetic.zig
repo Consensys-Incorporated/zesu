@@ -789,19 +789,59 @@ pub fn mod512by256(a: [8]u64, b: [4]u64) primitives.U256 {
 /// Square-and-multiply modular exponentiation (mod 2^256).
 pub fn expMod256(base: primitives.U256, exp: primitives.U256) primitives.U256 {
     if (exp == 0) return 1;
-    var result: primitives.U256 = 1;
-    var b = base;
-    var e = exp;
-    while (e != 0) {
-        if (e & 1 == 1) {
-            result = result *% b;
-        }
-        e >>= 1;
-        if (e != 0) {
-            b = b *% b;
+    const el = toLimbs(exp);
+    var result = [4]u64{ 1, 0, 0, 0 };
+    var b = toLimbs(base);
+    // Highest non-zero exponent limb: the loop below never squares past the top bit.
+    var top: usize = 3;
+    while (el[top] == 0) top -= 1;
+    for (0..top + 1) |i| {
+        var e = el[i];
+        // Bits of this limb that still matter: all 64 below the top limb.
+        var bits: u32 = if (i < top) 64 else 64 - @as(u32, @clz(e));
+        while (bits > 0) : (bits -= 1) {
+            if (e & 1 == 1) result = mulLow(result, b);
+            e >>= 1;
+            if (bits > 1 or i < top) b = sqrLow(b);
         }
     }
-    return result;
+    return fromLimbs(result);
+}
+
+/// Low 256 bits of a * b over little-endian u64 limbs: the 10 limb products that reach them.
+inline fn mulLow(a: [4]u64, b: [4]u64) [4]u64 {
+    var r = [4]u64{ 0, 0, 0, 0 };
+    inline for (0..4) |i| {
+        var carry: u64 = 0;
+        inline for (0..4 - i) |j| {
+            const p: u128 = @as(u128, a[i]) * b[j] + r[i + j] + carry;
+            r[i + j] = @truncate(p);
+            carry = @truncate(p >> 64);
+        }
+    }
+    return r;
+}
+
+/// Low 256 bits of a * a. The cross products below limb 4 (a0a1, a0a2, a0a3, a1a2) are
+/// computed once and doubled, and limb 3 needs only their low halves: 6 products, not 10.
+inline fn sqrLow(a: [4]u64) [4]u64 {
+    const p01: u128 = @as(u128, a[0]) * a[1];
+    const p02: u128 = @as(u128, a[0]) * a[2] + (p01 >> 64);
+    const t1: u64 = @truncate(p01);
+    const t2: u64 = @truncate(p02);
+    const t3: u64 = @as(u64, @truncate(p02 >> 64)) +% (a[0] *% a[3]) +% (a[1] *% a[2]);
+    const s0: u128 = @as(u128, a[0]) * a[0];
+    const s1: u128 = @as(u128, a[1]) * a[1];
+    const diag = [4]u64{ @truncate(s0), @truncate(s0 >> 64), @truncate(s1), @truncate(s1 >> 64) };
+    const dbl = [4]u64{ 0, t1 << 1, (t2 << 1) | (t1 >> 63), (t3 << 1) | (t2 >> 63) };
+    var r: [4]u64 = undefined;
+    var c: u64 = 0;
+    inline for (0..4) |i| {
+        const x: u128 = @as(u128, diag[i]) + dbl[i] + c;
+        r[i] = @truncate(x);
+        c = @truncate(x >> 64);
+    }
+    return r;
 }
 
 /// Number of bytes needed to represent x (0 returns 0).
