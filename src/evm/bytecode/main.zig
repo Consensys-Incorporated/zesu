@@ -808,6 +808,12 @@ fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
     // PUSH range test with one load, and the pointer walk drops the index add.
     const base = bytecode.ptr;
     const end = @intFromPtr(base) + bytecode.len;
+    // The step table's address goes through an empty asm so it stays in a register: left
+    // alone, LLVM rebuilds it (auipc + addi) inside the loop, 2 of its 8 instructions.
+    var step: [*]const u8 = &legacy_step;
+    asm volatile (""
+        : [step] "+r" (step),
+    );
     var p = base;
     while (@intFromPtr(p) < end) {
         const opcode = p[0];
@@ -815,7 +821,7 @@ fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
             const i = @intFromPtr(p) - @intFromPtr(base);
             bit_vec[i >> 3] |= @as(u8, 1) << @intCast(i & 7);
         }
-        p += legacy_step[opcode];
+        p += step[opcode];
     }
 
     return LegacyAnalyzedBytecode{
