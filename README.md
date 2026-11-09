@@ -2,7 +2,7 @@
 
 Zesu is a stateless Ethereum block executor written in Zig, designed to run as a **zkVM guest program**.
 
-It takes an SSZ-encoded stateless block bundle (execution payload + witness), re-executes the block against the witness, and emits a 41-byte SSZ commitment (post-state root + receipts root + success flag) as its public output.
+It takes an SSZ-encoded stateless block bundle (execution payload + witness), re-executes the block against the witness, and emits a 43-byte SSZ `SszStatelessValidationResult` (new-payload-request hash-tree-root + success flag + chain id + schema id) as its public output.
 
 ## Architecture
 
@@ -20,10 +20,11 @@ Zesu produces a **relocatable rv64im ELF object** (`zesu.rv64im.o`) with all EVM
 | Symbol | Signature | Description |
 |---|---|---|
 | `zkvm_log` | `(u8, [*]const u8, usize) void` | Log a message at the given level |
+| `zkvm_abort` | `() noreturn` | VM-specific abort, called by the panic handler |
 | `ZKVM_HEAP_POS` | `usize` (var) | Bump heap cursor; allocator advances this |
 | `ZKVM_HEAP_TOP` | `usize` (var) | Heap upper bound; allocator checks against this |
 
-`main()` itself returns its status (0 success / 1 failure from `guestMain()`) in `a0` per the RISC-V C ABI rather than calling an explicit halt function — there is no `zkvm_exit` extern. Each zkVM host's own entry point (`_start`) is responsible for turning that return into its actual halt sequence; see the per-target READMEs in [zesu-zkvm](https://github.com/consensys/zesu-zkvm) for how ZisK, OpenVM, and Linea each do this. A genuine Zig-level panic calls the compiler-emitted `@trap()` builtin instead, matching how Zig's own std library handles panics on freestanding targets.
+`main()` itself returns its status (0 success / 1 failure from `guestMain()`) in `a0` per the RISC-V C ABI rather than calling an explicit halt function — there is no `zkvm_exit` extern. Each zkVM host's own entry point (`_start`) is responsible for turning that return into its actual halt sequence; see the per-target READMEs in [zesu-zkvm](https://github.com/consensys/zesu-zkvm) for how ZisK, OpenVM, and Linea each do this. A genuine Zig-level panic instead logs the message through `zkvm_log` and then calls the host-provided `zkvm_abort()`.
 
 **Accelerators** — all return `i32` (0 = success, −1 = failure)
 
@@ -47,13 +48,13 @@ Zesu produces a **relocatable rv64im ELF object** (`zesu.rv64im.o`) with all EVM
 | `zkvm_bls12_pairing` | `0x0f` | BLS12-381 pairing check (EIP-2537) |
 | `zkvm_bls12_map_fp_to_g1` | `0x10` | BLS12-381 Fp → G1 map (EIP-2537) |
 | `zkvm_bls12_map_fp2_to_g2` | `0x11` | BLS12-381 Fp2 → G2 map (EIP-2537) |
-| `zkvm_secp256r1_verify` | `0x100` | P-256 signature verification (EIP-7212) |
+| `zkvm_secp256r1_verify` | `0x100` | P-256 signature verification (EIP-7951) |
 
 Each zkVM target in [zesu-zkvm](https://github.com/consensys/zesu-zkvm) provides a host object that satisfies these references using platform-native circuits or software fallbacks, then links it against `zesu.rv64im.o` to produce the final guest binary. This decouples EVM logic from zkVM specifics at the ELF/ABI level.
 
 There are two ways to consume zesu:
 
-**1. Turnkey relocatable object.** `zig build rv64im-object` produces `zig-out/lib/zesu.o`, and pre-built `zesu.rv64im.o` artifacts are published as GitHub Releases so consumers can avoid a source dependency. This object wires the bump allocator (over `ZKVM_HEAP_POS`/`ZKVM_HEAP_TOP`), extern IO, and the extern accelerator bridge — no runtime setup beyond satisfying the extern symbols above.
+**1. Turnkey relocatable object.** `zig build rv64im-object` produces `zig-out/lib/zesu.o`, and pre-built `zesu.rv64im.o` artifacts are published as GitHub Releases so consumers can avoid a source dependency. `zig build zisk-object` builds the same graph with the Zbb/Zbs extensions and ZisK DMA enabled (`zig-out/lib/zesu-zisk.o`). These objects wire a segregated free-list allocator (`alt_fl_alloc.zig`, over `ZKVM_HEAP_POS`/`ZKVM_HEAP_TOP`), extern IO, and the extern accelerator bridge — no runtime setup beyond satisfying the extern symbols above.
 
 **2. Module graph.** The `zesu` package exposes its modules via `addModule`, so a build script can depend on it and import modules by name — `zesu.module("executor")`, `"input"`, `"mpt"`, `"rlp_decode"`, `"precompile"`, etc. The crypto accelerator implementation is selected by the `-Dcrypto-backend` option (`default` or `extern`), independent of target: `default` wires `default.zig` (linking secp256k1/mcl/blst/openssl) and requires libc/system headers, so it is only valid on a native target; `extern` wires the extern accelerator bridge (the `zkvm_*` symbols the host resolves at link) and is required on a **freestanding** target — `zig build` fails fast if a freestanding target is combined with the default backend. The exposed `zesu_allocator` is a runtime-settable singleton, so a guest that drives execution itself **must** install an allocator once at startup with `zesu_allocator.set(...)` before any execution (a freestanding default panics if left unset) and provide the `zkvm_*` accelerator symbols at link time.
 
@@ -64,11 +65,11 @@ All inputs are read from **stdin** by default, or from the file at `$ZESU_INPUT`
 | Format | Description |
 |---|---|
 | **SSZ** | Raw SSZ-encoded `SszStatelessInput`. This is the canonical zkVM input format. |
-| **SSZ/Ere** | Same SSZ payload prefixed with a 4-byte u32 LE length field, as produced by the [Ere](https://github.com/eqlabs/ere) test framework's `Input::with_prefixed_stdin`. The prefix is stripped automatically. |
+| **SSZ/Ere** | Same SSZ payload prefixed with a 4-byte u32 LE length field, as produced by the [Ere](https://github.com/eth-act/ere) test framework's `Input::with_prefixed_stdin`. The prefix is stripped automatically. |
 
 ### SSZ schema
 
-tests-zkevm@v21.0.5 layout. A 2-byte big-endian schema id precedes the container: the
+tests-zkevm@v21.0.6 layout (the zkevm fixture release `zig build fetch-zkevm-fixtures` downloads). A 2-byte big-endian schema id precedes the container: the
 `ProtocolFork` index, then the schema revision (`0x1501` = Amsterdam, revision 1).
 
 ```
@@ -95,7 +96,7 @@ SszStatelessInput                           (16-byte fixed region)
 
 ## Building for host OS
 
-The native build requires Zig ≥ 0.14 plus **libsecp256k1**, **libblst**, and **libmcl**.
+The native build requires Zig ≥ 0.16.0 plus **libsecp256k1**, **libblst**, **libmcl**, and **OpenSSL**. Libraries are looked up under `/opt/homebrew` on macOS and `/usr/local` on Linux; override with `-Dcrypto-prefix=<dir>`.
 
 ```sh
 # Install dependencies (macOS or Debian/Ubuntu)
@@ -150,11 +151,28 @@ make state-tests
 # Blockchain tests only
 make blockchain-tests
 
-# Filter to a specific test directory
-make state-tests ARGS="--filter Prague"
+# Filter to a specific fork
+make state-tests ARGS="--fork Prague"
+
+# Unit tests
+zig build test
+
+# zkevm (stateless) blockchain fixtures
+zig build fetch-zkevm-fixtures && zig build zkevm-tests
+
+# Transaction tests (reads spec-tests/fixtures/transaction_tests)
+zig build transaction-tests
 ```
 
 Fixtures are cached under `spec-tests/fixtures/` after the first download.
+
+All fixtures come from [ethereum/execution-specs releases](https://github.com/ethereum/execution-specs/releases), which publishes three independently versioned tag series — their patch numbers do not track each other:
+
+| Release series | Pinned in `build.zig` | Used by |
+|---|---|---|
+| `tests@` | `tests@v21.0.1` | `fetch-fixtures`, `state-tests`, `blockchain-tests`, `transaction-tests`, Hive (`tools/hive/README.md`) |
+| `tests-zkevm@` | `tests-zkevm@v21.0.6` | `fetch-zkevm-fixtures`, `zkevm-tests` |
+| `tests-zkevm-benchmark@` | `tests-zkevm-benchmark@v21.0.5` | benchmark tiers (also pinned in `.github/workflows/benchmark.yml`) |
 
 ## Repository layout
 
@@ -166,10 +184,10 @@ src/
   crypto/       Accelerator dispatch layer (extern_bridge.zig for zkVM builds)
   zkvm/
     root.zig        — rv64im object root: std_options, panic, export fn main
-    bump_alloc.zig  — bump allocator over ZKVM_HEAP_POS/TOP extern vars
+    alt_fl_alloc.zig — segregated free-list allocator over ZKVM_HEAP_POS/TOP extern vars (see FREELIST_ALLOC.md)
     extern_io.zig   — read_input/write_output as C-ABI extern refs
 build.zig       Builds the apps/tools/tests + rv64im object; exposes the module graph via addModule
-tools/          Spec-test runners, Hive adapter, t8n tool
+tools/          Spec/blockchain/zkevm/transaction test runners, Hive adapter, t8n tool, r2-stateless
 spec-tests/     Downloaded execution-spec-tests fixtures (gitignored)
 ```
 

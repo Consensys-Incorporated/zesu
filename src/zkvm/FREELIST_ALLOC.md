@@ -7,8 +7,13 @@ rv64im object:
 - `alt_fl_alloc.zig` — **shipped** variant, RV64IM-tuned (branch-ladder
   classification instead of `@clz`).
 
-The build wires one of these in as `zesu_allocator` (see `build.zig`),
-replacing the earlier bump allocator whose `free` was a no-op.
+`addGuestObject` in `build.zig` hardcodes `alt_fl_alloc.zig` as the
+`zesu_allocator` root for the guest object (both the `rv64im-object` and
+`zisk-object` steps); there is no build option to switch. `fl_alloc.zig` is
+not wired into any build. This replaced the earlier bump allocator
+(`bump_alloc.zig`, still in the tree but unused) whose `free` was a no-op.
+Native/exposed builds don't use any of these: their `zesu_allocator` is the
+settable singleton in `src/evm/allocator.zig`.
 
 > The diagrams below are schematic on purpose — they don't bake in the exact
 > class count or size cap, so they stay valid across tuning. For the concrete
@@ -41,7 +46,7 @@ free_lists[]  (one intrusive linked-list head per size class)
 └─────────┴────────────────────────┼──────────┬───────────┘
                      │              │          │
                      ▼              ▼          ▼
-   THE HEAP  [ ZKVM_HEAP_POS ................. ZKVM_HEAP_TOP ]
+   THE HEAP  [ heap base ..................... ZKVM_HEAP_TOP ]
    ┌──────────────────────────────────────────────────────────┐
    │ used  │ free  │ used │ free  │ used │ free  │ ...   ░░░░░░ │
    │       └─next──┘             │       └─next→ │       ↑      │
@@ -50,10 +55,15 @@ free_lists[]  (one intrusive linked-list head per size class)
    └──────────────────────────────────────────────────────────┘
 ```
 
+The bump pointer *is* `ZKVM_HEAP_POS`: the host initialises it to the heap
+base, and `sysAllocAligned` advances it in place up to `ZKVM_HEAP_TOP`.
+
 ## 2. alloc(len, align)
 
-Round the request up to a size class, then reuse a recycled block if one is
-available; otherwise carve a fresh block off the bump pointer.
+Round the request up to a size class (of `max(len, alignment)`), then reuse a recycled block if one is
+available; otherwise carve a fresh block off the bump pointer. Fresh blocks
+are aligned to their own size (`max(alignment, classBytes(class))`), so any
+recycled block of a class satisfies any alignment that maps to that class.
 
 ```
                     ┌──────────────────────────┐
@@ -79,7 +89,7 @@ available; otherwise carve a fresh block off the bump pointer.
 
 ## 3. free(buf)
 
-Classify by `buf.len`, then push the block onto the front of that class's list.
+Classify by `buf.len` (and `buf_align`), then push the block onto the front of that class's list.
 O(1), no coalescing.
 
 ```
@@ -97,6 +107,7 @@ O(1), no coalescing.
 
 `sizeClass()` runs on **every** alloc and free. In a zkVM every executed
 instruction is a proving cost, so its instruction count matters directly.
+(The `zisk-object` build does enable Zbb, but it ships `alt_fl_alloc.zig` too.)
 
 ```
                  sizeClass(size)  — called on EVERY alloc & free
@@ -121,7 +132,13 @@ instruction is a proving cost, so its instruction count matters directly.
 
 `alt_fl_alloc.zig` keeps the `@clz` formula as `referenceSizeClass` purely as a
 test oracle, so the hand-rolled ladder is verified against the obviously-correct
-version.
+version. Alt also takes `std.mem.Alignment`'s raw log2 value directly instead of
+shifting it to a byte count, and folds alignment in as a separate class
+(`max(size_class, align_class)`).
+
+The two are not otherwise identical: the ladder only covers 2^3..2^24, so
+`alt_fl_alloc.zig` has fewer classes and a much lower size cap (16 MiB) than
+`fl_alloc.zig` (2 GiB) — see the file headers.
 
 ## 5. The critical `resize` invariant
 
@@ -144,10 +161,14 @@ alloc + copy).
 
 ## Known trade-offs / footguns
 
-- **Oversized path leaks.** Requests larger than the biggest class are
+- **Oversized path leaks.** Requests larger than the biggest class (16 MiB in
+  the shipped variant) are
   bump-allocated and never recycled. Correct only while such sizes don't occur
   in practice (EVM allocations are gas-bounded).
 - **Global mutable `free_lists`.** Safe only because the guest is
   single-threaded. Not safe to share across threads as-is.
 - **No coalescing / no splitting.** Blocks are recycled only within their exact
   class. Fine for the fixed, repetitive allocation sizes this target sees.
+- **Alignment padding is lost.** Because fresh blocks are aligned to their own
+  size, the bump pointer may skip a gap before a large block; that gap is never
+  reused.

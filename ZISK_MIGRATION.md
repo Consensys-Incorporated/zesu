@@ -48,10 +48,12 @@ depended on both sibling repos.
 +const interpreter  = zesu_dep.module("interpreter");
 +const precompile   = zesu_dep.module("precompile");
 +const handler      = zesu_dep.module("handler");
-+const inspector    = zesu_dep.module("inspector");
 ```
 
-`precompile_types` is also exposed as a named module (needed for `precompile_overrides.zig`):
+There is no `inspector` module in zesu; the `Inspector` type lives in `handler`
+(`src/evm/handler/main.zig`).
+
+`precompile_types` is also exposed as a named module:
 
 ```diff
 -const precompile_types = zevm_dep.module("precompile_types");
@@ -76,34 +78,33 @@ below covers both cases.
 | `src/mpt/nibbles.zig` | `src/stateless/mpt/nibbles.zig` | *(anonymous, path only)* |
 | `src/db/main.zig` | `src/stateless/db/main.zig` | `zesu_dep.module("db")` |
 | `src/executor/main.zig` | `src/stateless/executor/main.zig` | `zesu_dep.module("executor")` |
-| `src/executor/types.zig` | `src/stateless/executor/types.zig` | *(anonymous, path only)* |
+| `src/executor/types.zig` | `src/stateless/executor/types.zig` | *(private `executor_types`; via `executor.executor_types` re-export)* |
 | `src/executor/rlp_encode.zig` | `src/stateless/executor/rlp_encode.zig` | *(via executor re-export)* |
 | `src/executor/transition.zig` | `src/stateless/executor/transition.zig` | *(via executor re-export)* |
 | `src/executor/output.zig` | `src/stateless/executor/output.zig` | *(via executor re-export)* |
-| `src/executor/bal.zig` | `src/stateless/executor/bal.zig` | *(via executor re-export)* |
-| `src/executor/block_validation.zig` | `src/stateless/executor/block_validation.zig` | *(internal)* |
+| `src/executor/bal.zig` | `src/stateless/executor/bal.zig` | *(internal)* |
+| `src/executor/block_validation.zig` | `src/stateless/executor/block_validation.zig` | *(via executor re-export)* |
 | `src/executor/tx_decode.zig` | `src/stateless/executor/tx_decode.zig` | *(via executor re-export)* |
 
-**Important**: `transition.zig`, `output.zig`, `bal.zig`, `rlp_encode.zig`, `block_validation.zig`,
-`executor_allocator.zig` now use relative `@import("./X.zig")` for intra-executor dependencies.
-They no longer need those helper modules wired as named imports — only the external dependencies
-below remain.
+**Important**: every file under `src/stateless/executor/` except `types.zig` and
+`block_rlp_size.zig` is pulled in by `executor/main.zig` through relative
+`@import("./X.zig")` imports, so the whole executor (transition, output, bal, rlp_encode,
+block_validation, tx_decode, tx_signing, executor_allocator, …) is a single compilation
+unit. It can no longer be re-created file-by-file as separate `executor_X` modules, and
+there is no `mpt_builder` module (`mpt/builder.zig` is a relative import of `mpt`).
 
-When re-creating the executor sub-modules from path (needed to inject the Zisk bump allocator),
-the minimal named imports for each file are:
+The allocator is also no longer injected at build time (see 2f), so there is no reason
+to re-create the executor from path. If you do create it from `zesu_dep.path(...)`, the
+`executor` module needs these named imports (as wired in zesu's `build.zig`):
 
-| File | Required named imports |
-|---|---|
-| `executor/types.zig` | *(none — std only)* |
-| `executor/transition.zig` | `executor_types`, `primitives`, `state`, `bytecode`, `database`, `context`, `handler`, `precompile`, `accelerators` |
-| `executor/output.zig` | `executor_types`, `mpt_builder`, `mpt` |
-| `executor/bal.zig` | `primitives`, `mpt` |
-| `executor/tx_decode.zig` | `executor_types`, `input`, `rlp_decode` |
-| `executor/main.zig` | `executor_types`, `primitives`, `input`, `output`, `mpt`, `mpt_builder`, `rlp_decode`, `hardfork`, `db`, `context` |
+```
+executor_types, block_rlp_size, zesu_allocator, primitives, input, output, mpt,
+rlp_decode, hardfork, db, context, state, bytecode, database, handler, interpreter,
+precompile, accelerators
+```
 
-Note: `executor_rlp_encode`, `executor_allocator`, `executor_bal`, `executor_block_validation`
-are no longer passed as named imports — they are pulled in automatically as relative imports
-from within the executor compilation unit.
+`executor_types` (`executor/types.zig`) and `block_rlp_size` (`executor/block_rlp_size.zig`)
+are separate modules; `types.zig` needs no imports (std only).
 
 ### 2d. Crypto injection — unified `accel_impl`
 
@@ -113,7 +114,17 @@ Previously there were two separate injection points:
 - `mpt` had `@import("zkvm_accelerators")` for keccak256
 - `executor/transition.zig` had `@import("secp256k1_wrapper")` for ecrecover
 
-In zesu both are replaced by a single `accel_impl` injection into the `accelerators` module:
+In zesu both are replaced by a single `accel_impl` leaf behind the `accelerators` module.
+`accel_impl` is **private** — it is not exposed and is not meant to be overridden with
+`.addImport()`. Instead it is selected with the `-Dcrypto-backend` build option:
+
+| `crypto-backend` | `accel_impl` root | Crypto provided by |
+|---|---|---|
+| `default` | `src/crypto/default.zig` | native C libs (secp256k1, OpenSSL, blst, mcl) |
+| `extern` | `src/crypto/extern_bridge.zig` | `zkvm_*` C symbols resolved at link time |
+
+For ZisK use the `extern` backend (freestanding targets require it). The guest object
+from `zig build zisk-object` (or `addGuestObject`, see 2g) is always built this way.
 
 ```diff
 -// Old: separate zkvm_accelerators for mpt
@@ -125,20 +136,15 @@ In zesu both are replaced by a single `accel_impl` injection into the `accelerat
 -// Old: secp256k1_wrapper for transition
 -executor_transition_mod.addImport("secp256k1_wrapper", secp256k1_mod);
 
-+// New: single accel_impl for everything (keccak, ecrecover, BN254, ...)
-+const zisk_accel_impl_mod = b.addModule("zisk_accel_impl", .{
-+    .root_source_file = b.path("src/zisk/accel_impl.zig"),
++// New: extern crypto backend; ZisK supplies the zkvm_* symbols at link time
++const zesu_dep = b.dependency("zesu", .{
 +    .target = target,
 +    .optimize = optimize,
++    .@"crypto-backend" = .@"extern",
 +});
-+zisk_accel_impl_mod.addImport("zisk", zisk_mod);
-+
-+const accelerators_mod = zesu_dep.module("accelerators");
-+accelerators_mod.addImport("accel_impl", zisk_accel_impl_mod);
 ```
 
-The `accel_impl` module must implement every `pub fn` in
-`src/crypto/accelerators.zig`:
+`extern_bridge.zig` maps every `pub fn` in `src/crypto/accelerators.zig`:
 
 ```
 keccak256, secp256k1_verify, ecrecover, sha256, ripemd160, modexp,
@@ -149,24 +155,24 @@ bls12_pairing, bls12_map_fp_to_g1, bls12_map_fp2_to_g2,
 secp256r1_verify
 ```
 
-For operations without a Zisk circuit (most BLS12-381, KZG), stub with `OutOfGas` or
-return false. For `keccak256` use the Zisk keccak CSR; for `ecrecover` use the secp256k1
-CSR (previously in `secp256k1_wrapper`).
+onto the zkvm-standards C symbols the ZisK side must provide (`zkvm_keccak256`,
+`zkvm_sha256`, `zkvm_secp256k1_verify`, `zkvm_secp256k1_ecrecover`, `zkvm_ripemd160`,
+`zkvm_modexp`, `zkvm_bn254_g1_add`, `zkvm_bn254_g1_mul`, `zkvm_bn254_pairing`,
+`zkvm_blake2f`, `zkvm_kzg_point_eval`, `zkvm_bls12_*`, `zkvm_secp256r1_verify`; each
+returns `i32`, 0 on success — see the declarations at the top of `extern_bridge.zig`).
+For operations without a Zisk circuit, the symbol still has to exist; return a non-zero
+status.
 
-The `precompile_implementations` override is unchanged:
-
-```zig
-// Still works — precompile module still has this injection point
-precompile.addImport("precompile_implementations", zisk_overrides_module);
-```
-
-`precompile_overrides.zig` can now use the accelerators module directly for BN254
-(it already calls the Zisk CSR circuits) — or keep calling eip196.zig as before.
+The `precompile_implementations` injection point no longer exists. The precompile module
+imports `src/evm/precompile/default_impls.zig` directly, and those wrappers call through
+the `accelerators` module — so a ZisK circuit reaches every precompile (including BN254)
+through its `zkvm_*` symbol, with no separate precompile override.
 
 ### 2e. zkvm_accelerators.zig removal
 
 The file `src/zkvm/zkvm_accelerators.zig` from zevm-stateless is no longer needed.
-Its keccak256 declaration moves into the `accel_impl` module. Remove the module
+Its keccak256 declaration is replaced by the `zkvm_keccak256` extern in
+`src/crypto/extern_bridge.zig`. Remove the module
 definition and its import into mpt:
 
 ```diff
@@ -184,11 +190,32 @@ const executor_mod = zesu_dep.module("executor");
 // (No individual executor_X modules needed)
 ```
 
-This works because zesu's executor module already has all internal deps wired. You
-only need to override:
-- `zevm_allocator` in all EVM modules (Zisk bump allocator)
-- `accel_impl` in the accelerators module (Zisk CSR implementations)
-- `precompile_implementations` in precompile (Zisk overrides, if still needed)
+This works because zesu's executor module already has all internal deps wired. Nothing
+is overridden by `.addImport()` any more:
+- Allocator: call `zesu_allocator.set(your_allocator)` once at startup, before any zesu
+  code runs (`src/evm/allocator.zig`; a freestanding build panics if it is never set).
+  This replaces injecting a `zevm_allocator` module into every EVM module.
+- Crypto: `-Dcrypto-backend=extern` plus the `zkvm_*` symbols (see 2d), instead of an
+  `accel_impl` module.
+- Precompiles: no override (see 2d).
+
+### 2g. Prebuilt guest object (alternative to module wiring)
+
+zesu can build the whole guest itself as a relocatable rv64im ELF with IO, crypto, heap
+and logging left as unresolved externs:
+
+- `zig build zisk-object` → `zig-out/lib/zesu-zisk.o` (rv64im + Zbb + Zbs, ZisK DMA on)
+- `zig build rv64im-object` → `zig-out/lib/zesu.o` (portable baseline)
+- From a dependent's `build.zig`: `@import("zesu").addGuestObject(zesu_dep.builder,
+  target, optimize, .{ .dma = true, ... })`, where `GuestFeatures` has `dma`,
+  `jump_dest` and `arith256_mod` (all default false).
+
+The object exports `main()` and expects the linking ZisK project to provide `read_input`,
+`write_output` (`src/zkvm/extern_io.zig`), `zkvm_log`, `zkvm_abort` (`src/zkvm/root.zig`),
+`ZKVM_HEAP_POS` / `ZKVM_HEAP_TOP` (heap for `src/zkvm/alt_fl_alloc.zig`), the `zkvm_*`
+crypto symbols, and — with `arith256_mod` — `reduce_mod256_c`, `add_mod256_c` and
+`mul_mod256_c` (used for MOD/ADDMOD/MULMOD, `src/evm/interpreter/opcodes/arithmetic.zig`;
+provided by libziskos). The `zisk-object` step enables only `dma`.
 
 ---
 
@@ -199,38 +226,39 @@ only need to override:
 If it imports from zevm-stateless source via relative paths, update to the `src/stateless/`
 layout. No logic changes needed.
 
-### 3b. `src/zisk/accel_impl.zig` — new file (replaces two separate injection points)
+### 3b. `src/zisk/accel_impl.zig` — replaced by `zkvm_*` C symbols
 
 Consolidate the old `zkvm_accelerators_zisk.zig` (keccak) and `secp256k1.zig` (ecrecover)
-into a single `accel_impl.zig` that implements the full `accelerators.zig` interface.
+into implementations of the `zkvm_*` C-ABI symbols declared in
+`src/crypto/extern_bridge.zig` (not a Zig `accel_impl` module, which zesu no longer
+accepts). Each returns `i32`, 0 on success.
 
-Scaffold (all ops not yet wired should return `OutOfGas` / false):
+Scaffold (all ops not yet wired should return a non-zero status):
 
 ```zig
 // src/zisk/accel_impl.zig
 const zisk = @import("zisk");
 
-pub fn keccak256(data: []const u8, output: *[32]u8) void {
-    zisk.keccak256(data, output);
+export fn zkvm_keccak256(data: [*]const u8, len: usize, output: *[32]u8) i32 {
+    zisk.keccak256(data[0..len], output);
+    return 0;
 }
 
-pub fn ecrecover(msg: *const [32]u8, sig: *const [64]u8, recid: u8, output: *[64]u8) bool {
-    return zisk.secp256k1Recover(msg, sig, recid, output);
+export fn zkvm_secp256k1_ecrecover(msg: *const [32]u8, sig: *const [64]u8, recid: u8, output: *[64]u8) i32 {
+    return if (zisk.secp256k1Recover(msg, sig, recid, output)) 0 else 1;
 }
 
-pub fn bn254_g1_add(p1: *const [64]u8, p2: *const [64]u8, result: *[64]u8) bool {
-    return zisk.bn254Add(p1, p2, result);
+export fn zkvm_bn254_g1_add(p1: *const [64]u8, p2: *const [64]u8, result: *[64]u8) i32 {
+    return if (zisk.bn254Add(p1, p2, result)) 0 else 1;
 }
 // ... etc.
 ```
 
-### 3c. `src/zisk/precompile_overrides.zig` — import path for precompile_types
+### 3c. `src/zisk/precompile_overrides.zig` — remove
 
-```diff
--const precompile_types = @import("precompile_types"); // unchanged — still works
-```
-
-No change required; `precompile_types` is still wired as a named import from build.zig.
+zesu no longer has a `precompile_implementations` injection point (see 2d). Drop
+`precompile_overrides.zig` and its wiring; anything it did through ZisK circuits now
+goes through the corresponding `zkvm_*` symbol.
 
 ---
 
@@ -249,21 +277,24 @@ These are available via `zesu_dep.module("name")`:
 | `precompile_types` | `src/evm/precompile/types.zig` |
 | `interpreter` | `src/evm/interpreter/main.zig` |
 | `handler` | `src/evm/handler/main.zig` |
-| `inspector` | `src/evm/inspector/main.zig` |
-| `zevm_allocator` | `src/evm/allocator.zig` |
+| `zesu_allocator` | `src/evm/allocator.zig` |
 | `accelerators` | `src/crypto/accelerators.zig` |
 | `input` | `src/stateless/input.zig` |
 | `output` | `src/stateless/output.zig` |
 | `hardfork` | `src/stateless/hardfork.zig` |
 | `rlp_decode` | `src/stateless/rlp_decode.zig` |
 | `mpt` | `src/stateless/mpt/main.zig` |
+| `ssz_decode` | `src/stateless/stateless/ssz.zig` |
+| `ssz_output` | `src/stateless/stateless/ssz_output.zig` |
 | `db` | `src/stateless/db/main.zig` |
+| `block_rlp_size` | `src/stateless/executor/block_rlp_size.zig` |
 | `executor` | `src/stateless/executor/main.zig` |
+| `runner` | `src/stateless/stateless/run.zig` |
 
-Injection points (override by calling `.addImport()` on the returned module):
+Customization points (there are no `.addImport()` overrides any more):
 
-| Module | Injection point | Purpose |
+| What | How | Purpose |
 |---|---|---|
-| `accelerators` | `accel_impl` | All crypto ops (keccak, secp256k1, BN254, BLS, …) |
-| `precompile` | `precompile_implementations` | Per-precompile function overrides |
-| all EVM modules | `zevm_allocator` | Heap allocator (override for bump/arena) |
+| Crypto (keccak, secp256k1, BN254, BLS, …) | `-Dcrypto-backend=extern` + `zkvm_*` link symbols | All crypto ops and crypto precompiles |
+| Heap allocator | `zesu_allocator.set(...)` at runtime | All internal allocations |
+| ZisK opcode/memory features | `GuestFeatures` (`dma`, `jump_dest`, `arith256_mod`) via `addGuestObject` | DMA copies, JUMPDEST analysis, MOD/ADDMOD/MULMOD |
