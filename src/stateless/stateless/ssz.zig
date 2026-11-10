@@ -4,15 +4,14 @@
 //! All container offsets are relative to the start of each container's byte slice.
 //!
 //! Container layouts (fixed region sizes):
-//!   SszStatelessInput:    20 bytes  [4+4+8+4]  (v0.8.0: chain_config → inline chain_id)
+//!   SszStatelessInput:    16 bytes  [4+4+8]  (after a 2-byte big-endian schema id)
 //!   SszNewPayloadRequest: 44 bytes  [4+4+32+4]
 //!   SszExecutionPayload: 540 bytes  (see EP_FIXED_SIZE)
 //!   SszExecutionWitness:  12 bytes  [4+4+4]
 //!   SszWithdrawal:        44 bytes  fixed (8+8+20+8)
 //!
-//! EIP-7495 `ProgressiveContainer` and EIP-7916 `ProgressiveList` (introduced by
-//! zkevm@v0.8.0) serialize exactly like their stable counterparts, so only
-//! `hash_tree_root` differs — see ssz_output.zig.
+//! EIP-7495 `ProgressiveContainer` and EIP-7916 `ProgressiveList` serialize exactly like
+//! their stable counterparts, so only `hash_tree_root` differs — see ssz_output.zig.
 
 const std = @import("std");
 const input_mod = @import("input");
@@ -120,23 +119,20 @@ fn decodeWithdrawal(bytes: *const [WITHDRAWAL_SIZE]u8) input_mod.Withdrawal {
 ///   [428..436] timestamp
 ///   [436..440] → extra_data (variable offset)
 ///   [440..472] base_fee_per_gas (uint256 LE)
-///   [472..504] block_hash (ignored)
+///   [472..504] block_hash
 ///   [504..508] → transactions (variable offset)
 ///   [508..512] → withdrawals (variable offset)
 ///   [512..520] blob_gas_used
 ///   [520..528] excess_blob_gas
-///   [528..532] → block_access_list (variable offset, ignored)
+///   [528..532] → block_access_list (variable offset)
 ///   [532..540] slot_number
 const EP_FIXED_SIZE: usize = 540;
 
 /// Decode an SSZ-serialized SszStatelessInput into a StatelessInput.
 ///
-/// Supports two input layouts, detected in order:
-///
-/// 1. Ere-prefixed (4-byte u32 LE length prefix prepended by `Input::with_prefixed_stdin`):
-///    stripped when declared length matches remaining bytes, then format re-detected.
-///
-/// 2. 2-byte big-endian schema_id + 16-byte SszStatelessInput fixed region:
+/// An optional Ere 4-byte u32 LE length prefix (`Input::with_prefixed_stdin`) is stripped
+/// when it equals the remaining length. The payload is then a 2-byte big-endian schema_id
+/// followed by the 16-byte SszStatelessInput fixed region:
 ///    [0..2]   schema_id (0x1501 BE)
 ///    [2..6]   offset → new_payload_request
 ///    [6..10]  offset → witness
@@ -193,7 +189,7 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
 
     const ep_data = npr_data[off_ep..off_vh];
 
-    // versioned_hashes: List[Bytes32, 4096] — packed 32-byte elements (no offset table)
+    // versioned_hashes: ProgressiveList[Bytes32] — packed 32-byte elements (no offset table)
     const vh_bytes = npr_data[off_vh..off_er];
     if (vh_bytes.len % 32 != 0) return error.InvalidSsz;
     const vh_count = vh_bytes.len / 32;
@@ -201,9 +197,9 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     for (0..vh_count) |i| @memcpy(&versioned_hashes[i], vh_bytes[i * 32 ..][0..32]);
 
     // execution_requests: SszExecutionRequests — N variable-length request-type lists.
-    // The first offset gives the fixed-region size (N*4), indicating how many types exist.
-    // zkevm@v0.5.0 had 3 types (deposits, withdrawals, consolidations; fixed=12).
-    // zkevm@v0.6.2 (EIP-8282) added builder_deposits + builder_exits → 5 types (fixed=20).
+    // The first offset is the fixed-region size (N*4), giving the number of types: 3
+    // (deposits, withdrawals, consolidations) or 5 (+ builder_deposits, builder_exits).
+    // Absent trailing types decode as empty.
     const er_data = npr_data[off_er..];
     if (er_data.len < 12) return error.InvalidSsz;
     const off_deposits: usize = readU32(er_data, 0);
@@ -260,9 +256,9 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     const off_extra_data: usize = readU32(ep_data, 436);
     // base_fee_per_gas: uint256 LE — low 8 bytes give the u64 value
     const base_fee_per_gas: u64 = readU64(ep_data, 440);
+    // block_hash: checked against the header rebuilt from the payload, and part of the output root.
     var block_hash: [32]u8 = undefined;
     @memcpy(&block_hash, ep_data[472..504]);
-    // block_hash at [472..504] — not used for execution but needed for SSZ hash_tree_root
     const off_transactions: usize = readU32(ep_data, 504);
     const off_withdrawals: usize = readU32(ep_data, 508);
     const blob_gas_used: u64 = readU64(ep_data, 512);

@@ -8,10 +8,9 @@
 ///   write_output — appends to public output; multiple calls concatenate.
 ///                  Cannot fail.
 ///
-/// Default implementation reads from ZESU_INPUT env var or stdin, writes to stdout.
-/// Override at build time for zkVM targets:
-///   exe.root_module.addImport("zkvm_io", your_io_module)
-/// The replacement module must export the same two functions.
+/// Native implementation: reads the file named by the ZESU_INPUT env var (else stdin),
+/// writes to stdout. build.zig selects src/zkvm/extern_io.zig instead for the guest
+/// object; any replacement `zkvm_io` module must export the same two functions.
 const std = @import("std");
 
 var input_buf_done: std.atomic.Value(bool) = .init(false);

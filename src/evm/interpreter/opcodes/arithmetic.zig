@@ -142,7 +142,6 @@ pub fn opExp(ctx: *InstructionContext) void {
         return;
     }
     const exponent = stack.peekUnsafe(1);
-    // Dynamic gas: G_EXPBYTE per byte of exponent (10 pre-Spurious Dragon, 50 post)
     const spec = ctx.interpreter.runtime_flags.spec_id;
     const expbyte_cost: u64 = if (primitives.isEnabledIn(spec, .spurious_dragon))
         gas_costs.G_EXPBYTE
@@ -176,11 +175,9 @@ pub fn opSignextend(ctx: *InstructionContext) void {
 
 /// Unsigned 256-bit division, quotient only. Returns 0 when b == 0 (per EVM spec).
 ///
-/// No u256-domain guards here on purpose. `limbDivMod` already classifies the
-/// divisor — zero, a < b, single limb — so a guard here re-derives what the callee
-/// derives anyway, and it pays for it in the more expensive representation: a u256
-/// `b & (b - 1)` is a 4-limb borrow chain where the limb-domain test is one
-/// instruction. Guarding here measured +5 to +7% on the EEST arithmetic tier.
+/// No u256-domain guards here on purpose: `limbDivMod` already classifies the
+/// divisor (zero, a < b, power of two, single limb) in the limb domain, where each
+/// test is far cheaper than its u256 equivalent.
 pub fn divU256(a: primitives.U256, b: primitives.U256) primitives.U256 {
     return fromLimbs(limbDivMod(toLimbs(a), toLimbs(b)).q);
 }
@@ -400,9 +397,8 @@ pub inline fn limbMod(comptime M: comptime_int, a: [M]u64, b: [4]u64) [4]u64 {
     }
     if (n == 0) return [_]u64{0} ** 4; // divisor is zero
 
-    // Power-of-two divisor: the remainder is just the low k bits of the dividend,
-    // whatever M is. Same reasoning (and same near-zero miss cost) as in
-    // `limbDivMod` — see the comment there.
+    // Power-of-two divisor: the remainder is the low k bits of the dividend,
+    // whatever M is (see `limbDivMod`).
     const top = b[n - 1];
     if (top & (top -% 1) == 0) {
         var lower: u64 = 0;
@@ -589,14 +585,10 @@ pub const QuotRem = struct { q: [4]u64, r: [4]u64 };
 /// Returns .{ .q = quotient, .r = remainder } as [4]u64 limb arrays.
 /// When b == 0 or a < b the fast paths return immediately.
 ///
-/// `inline` is load-bearing. LLVM leaves this out of line by default, so every
-/// DIV/MOD/SDIV/SMOD hands its operands over as a `[4]u64` in memory and takes the
-/// returned quotient/remainder pair back the same way. Forcing it in place lets the
-/// caller keep the limbs in registers and lets the divisor classification fold
-/// against the caller's operands. Measured on the EEST `for_amsterdam_at_0010M`
-/// arithmetic tier: -10.3% on DIV/SDIV, -4.0% across MOD/SMOD/ADDMOD/MULMOD,
-/// -3.5% on the tier overall, and -0.11% on the 500-block mainnet corpus with all
-/// 500 blocks improved. Do not drop the keyword without re-benchmarking.
+/// `inline` is load-bearing: out of line, every DIV/MOD/SDIV/SMOD passes the
+/// `[4]u64` operands and the quotient/remainder pair through memory. Inlined, the
+/// limbs stay in registers and the divisor classification folds against the
+/// caller's operands.
 pub inline fn limbDivMod(a: [4]u64, b: [4]u64) QuotRem {
     const zero = [_]u64{0} ** 4;
 
@@ -675,7 +667,6 @@ pub inline fn limbDivMod(a: [4]u64, b: [4]u64) QuotRem {
 inline fn knuthDivMod(comptime N: comptime_int, a: [4]u64, b: [4]u64) QuotRem {
     const zero = [_]u64{0} ** 4;
     const n = N;
-    // Multi-limb divisor: Knuth Algorithm D.
     const shift: u6 = @intCast(@clz(b[n - 1]));
 
     var v = [_]u64{0} ** 4;

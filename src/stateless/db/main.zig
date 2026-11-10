@@ -1,14 +1,9 @@
 //! WitnessDatabase: stateless EVM database backed by a pre-built MPT NodeIndex.
 //!
-//! Serves account/storage reads via live MPT proof verification (O(log n) per read
-//! via NodeIndex O(1) node lookups). Contract bytecodes are served from two sources:
-//! the witness codes pool (linear scan over a bounded set) and the deployed_codes map
-//! (O(1) lookup for bytecodes produced by CREATE during the current block).
+//! Serves account/storage reads by walking witness proofs through the NodeIndex, and
+//! bytecodes from the witness codes or from code the block itself wrote (deployed_codes).
 //!
-//! Used directly as the DB type in Context(WitnessDatabase):
-//!   var ctx = context.Context(WitnessDatabase).new(witness_db, spec);
-//!
-//! Implements the zevm DB interface (basic, codeByHash, storage, blockHash).
+//! Used directly as the DB type: `context.Context(WitnessDatabase).new(witness_db, spec)`.
 //! EIP-7928 BAL tracking is handled by the Journal layer — no tracking state here.
 
 const std = @import("std");
@@ -38,7 +33,7 @@ const EMPTY_TRIE_HASH: primitives.Hash = .{
 
 /// Stateless database built from a pre-built NodeIndex + pre-state root.
 ///
-/// Implements duck-typed Database interface (same methods as InMemoryDB):
+/// Implements the duck-typed Database interface (as InMemoryDB does):
 ///   basic(address)              → ?AccountInfo
 ///   codeByHash(code_hash)       → Bytecode
 ///   storage(address, key)       → StorageValue
@@ -46,18 +41,16 @@ const EMPTY_TRIE_HASH: primitives.Hash = .{
 pub const WitnessDatabase = struct {
     node_index: *const mpt.NodeIndex,
     pre_state_root: primitives.Hash,
-    /// Witness bytecodes indexed by keccak256(code) for O(1) lookup.
+    /// Witness bytecodes keyed by keccak256(code).
     witness_codes: std.HashMap(primitives.Hash, []const u8, primitives.HashContext, 80),
     block_hashes: []const types.BlockHashEntry,
-    /// Bytecodes deployed by CREATE in the current block, keyed by code hash.
-    /// EIP-8025: verifier derives these from execution, so they need not be in the witness.
+    /// Code the block itself wrote (CREATE, EIP-7702 designators), keyed by code hash.
+    /// EIP-8025: the verifier derives these from execution, so they need not be in the witness.
     deployed_codes: std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80),
-    /// Cache of address → pre-state account (storage root, nonce, balance, code hash),
-    /// populated by basic() and storage() during execution, and the source basic() serves
-    /// repeat reads from. Eliminates redundant account trie walks in storage() and in the
-    /// post-execution batch update (storageRootFor), and lets that update skip accounts the
-    /// block left unchanged (originalAccount). Accounts
-    /// absent from pre-state are cached with exists = false and EMPTY_TRIE_HASH.
+    /// Proven pre-state accounts, filled by basic() and storage(). Serves repeat reads,
+    /// gives the post-execution batch update storage roots (storageRootFor) without another
+    /// trie walk, and lets it skip unchanged accounts (originalAccount). Accounts absent
+    /// from pre-state are cached with exists = false and EMPTY_TRIE_HASH.
     original_accounts: std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80),
     /// mpt.validateSecuredTriePaths's filter over `node_index` and stack.
     path_check: mpt.PathCheck,
@@ -157,12 +150,8 @@ pub const WitnessDatabase = struct {
     /// (EIP-8025: the verifier derives them from execution), including to another account
     /// whose code has the same hash.
     pub fn notifyCodeDeployed(self: *Self, code_hash: primitives.Hash, code: bytecode.Bytecode) void {
-        // getOrPut avoids two pitfalls from a naive newLegacy + put sequence:
-        //   1. duplicate hash (same bytecode deployed at two addresses): put would
-        //      overwrite the existing entry without deinitting its jump table → leak.
-        //   2. put OOM after newLegacy already allocated: the new jump table is
-        //      abandoned with no way to free it → leak.
-        // Same hash ⟹ same bytecode content, so the existing entry is always correct.
+        // getOrPut before newLegacy: a duplicate hash (same code, so the existing entry is
+        // correct) or a failed put would otherwise leak the new jump table.
         // OOM panics rather than propagates: see basic()'s comment below for why.
         const gop = self.deployed_codes.getOrPut(code_hash) catch @panic("out of memory");
         if (!gop.found_existing) {

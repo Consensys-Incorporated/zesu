@@ -1,8 +1,5 @@
-//! Raw RLP → input type decoders.
-//!
-//! Single source of truth for decoding Ethereum wire-format bytes into the
-//! typed structs defined in input.zig.  Both io.zig (JSON path) and
-//! executor/tx_decode.zig (raw-bytes path) call into these functions.
+//! Decoders from Ethereum wire-format RLP into the input.zig types (transactions,
+//! headers, withdrawals). Transactions must be canonical RLP.
 
 const std = @import("std");
 const input = @import("input");

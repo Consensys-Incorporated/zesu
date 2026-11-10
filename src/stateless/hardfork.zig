@@ -1,8 +1,7 @@
-/// Hardfork schedule — single source of truth for fork names, SpecId mapping,
-/// mainnet activation schedule, and block rewards.
-///
-/// Intentionally outside the executor so that string handling and schedule
-/// tables do not pollute the core execution path.
+//! Hardfork schedule — single source of truth for fork names, SpecId mapping,
+//! mainnet activation schedule, and block rewards. Kept outside the executor so
+//! string handling and schedule tables stay off the core execution path.
+
 const std = @import("std");
 const primitives = @import("primitives");
 
@@ -78,7 +77,7 @@ pub fn specFromFork(name: []const u8) ?primitives.SpecId {
 /// Map a `ProtocolFork` index to its SpecId.
 ///
 /// `ProtocolFork` is the stable fork enum the stateless schemas are keyed by
-/// (execution-specs `stateless.py`, tests-zkevm@v0.8.4). A stateless input's
+/// (execution-specs `stateless.py`). A stateless input's
 /// schema id is `fork_index << 8 | revision`, so this table is what lets the
 /// guest execute the fork the input names instead of assuming one.
 ///
@@ -145,9 +144,8 @@ pub fn specForBlock(name: []const u8, timestamp: u64) ?primitives.SpecId {
     return specFromFork(name);
 }
 
-/// Returns the canonical fork name string active for a given network and block timestamp.
-/// For transition forks, resolves to the before or after fork name based on the timestamp.
-/// For regular fork names, returns the name unchanged.
+/// Resolve a transition fork name to the fork active at `timestamp`; other names are
+/// returned unchanged.
 pub fn activeForkName(name: []const u8, timestamp: u64) []const u8 {
     for (transition_table) |t| {
         if (std.mem.eql(u8, name, t.k)) {

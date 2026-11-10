@@ -1,7 +1,7 @@
-/// Block Access List (BAL) RLP encoder — EIP-7928.
-///
-/// The executor builds the BAL itself and validates it by comparing
-/// keccak256(rlp(BAL)) with the header's block_access_list_hash.
+//! Block Access List (BAL) RLP encoder — EIP-7928.
+//!
+//! The executor builds the BAL itself and validates it by comparing
+//! keccak256(rlp(BAL)) with the header's block_access_list_hash.
 const std = @import("std");
 const primitives = @import("primitives");
 const mpt = @import("mpt");
@@ -36,8 +36,7 @@ pub fn encodeAndHash(alloc: std.mem.Allocator, entries: []const EncodeEntry) ![3
 }
 
 /// RLP of the block access list, written into one buffer: a first pass sizes every list, a
-/// second writes it. Building each field as its own allocation and concatenating them cost
-/// more per entry than the bytes themselves (a read-only account encodes to 27).
+/// second writes it, so encoding makes one allocation rather than one per field.
 pub fn encodeBalRlp(alloc: std.mem.Allocator, entries: []const EncodeEntry) ![]u8 {
     const lens = try alloc.alloc(EntryLens, entries.len);
     defer alloc.free(lens);

@@ -1,13 +1,7 @@
 //! StatelessInput: everything needed to execute a block without full state.
 //!
-//! The witness format mirrors debug_executionWitness (EL JSON-RPC):
-//!   - nodes:   flat pool of RLP-encoded trie node preimages
-//!   - codes:   flat array of contract bytecodes
-//!   - keys:    20-byte account addresses or 52-byte address+storage_slot pairs
-//!   - headers: RLP-encoded block headers (for BLOCKHASH opcode)
-//!
-//! Proof verification works by hash lookup in the pool: given the state_root,
-//! the verifier walks the trie by finding each node via keccak256(node) == expected_hash.
+//! The witness mirrors debug_executionWitness: an unordered pool of trie nodes, bytecodes and
+//! ancestor headers. Trie walks resolve each child by keccak256(node) == expected_hash.
 
 const primitives = @import("primitives");
 
@@ -58,7 +52,7 @@ pub const Transaction = struct {
 ///
 /// Fields are listed in their canonical RLP order (indices 0–22).
 /// Optional fields (15+) are absent in pre-London blocks.
-/// Amsterdam adds block_access_list_hash [21] (EIP-7917) and slot_number [22].
+/// Amsterdam adds block_access_list_hash [21] (EIP-7928) and slot_number [22].
 pub const BlockHeader = struct {
     parent_hash: primitives.Hash, // [0]
     ommers_hash: primitives.Hash, // [1]  always KECCAK_EMPTY_LIST in PoS
@@ -102,7 +96,6 @@ pub const Withdrawal = struct {
 // ─── Amsterdam spec types ─────────────────────────────────────────────────────
 
 /// Spec-matching execution payload (Amsterdam+).
-/// Transactions are stored decoded (ready for execution).
 /// parent_beacon_block_root lives in NewPayloadRequest (one level up).
 pub const ExecutionPayload = struct {
     parent_hash: primitives.Hash,
@@ -121,23 +114,20 @@ pub const ExecutionPayload = struct {
     /// Decoded transactions. The SSZ decoder leaves this empty; executeStatelessInput
     /// decodes `raw_transactions` after checking the block hash.
     transactions: []const Transaction,
-    /// Raw RLP bytes for each transaction, parallel to `transactions`.
-    /// Populated by the SSZ decoder.
-    /// Used to compute the SSZ hash_tree_root of the execution payload.
+    /// Raw transaction bytes as carried in the SSZ payload; also feed its hash_tree_root.
     raw_transactions: []const []const u8 = &.{},
     withdrawals: []const Withdrawal,
     blob_gas_used: u64,
     excess_blob_gas: u64,
     slot_number: ?u64 = null,
-    /// Raw bytes of the block_access_list field (RLP-encoded).
-    /// Populated by the SSZ decoder; empty on JSON/RLP paths.
+    /// RLP-encoded block access list. Only its keccak256 is used (block-hash header
+    /// rebuild and the post-execution BAL hash check).
     /// TODO: decode and use for actual BAL processing.
     block_access_list: []const u8 = &.{},
 };
 
 /// EIP-7685 typed execution requests (SszExecutionRequests container).
 /// Each field holds the packed fixed-size items of that request type.
-/// Populated by the SSZ decoder; all fields are empty on JSON/RLP paths.
 pub const ExecutionRequests = struct {
     deposits: []const u8 = &.{}, // packed SszDepositRequest items (192 bytes each)
     withdrawals: []const u8 = &.{}, // packed SszWithdrawalRequest items (76 bytes each)
@@ -151,10 +141,8 @@ pub const NewPayloadRequest = struct {
     execution_payload: ExecutionPayload,
     parent_beacon_block_root: primitives.Hash,
     /// EIP-4844 blob versioned hashes from all transactions in the block.
-    /// Populated by the SSZ decoder; empty slice on JSON/RLP paths.
     versioned_hashes: []const primitives.Hash = &.{},
     /// EIP-7685 execution requests (SszExecutionRequests container).
-    /// Populated by the SSZ decoder; zero-value on JSON/RLP paths.
     execution_requests: ExecutionRequests = .{},
 };
 
@@ -249,13 +237,11 @@ pub const SystemContracts = struct {
 
 pub const ChainConfig = struct {
     chain_id: u64 = 1,
-    /// Fork hint carried by the input (e.g. populated by the SSZ extended layout).
-    /// Precedence at the executor entry points: an explicit `fork_name` argument
-    /// (e.g. the `--fork` CLI override) wins; otherwise this field is used; if both
-    /// are null, the executor falls back to mainnet timestamp-based spec lookup.
+    /// Fork from the input's schema id (hardfork.specName). Callers pass it as the
+    /// executor's `fork_name`; when null the executor uses the mainnet schedule.
     fork_name: ?[]const u8 = null,
     /// The stateless input schema the guest decoded: fork_index << 8 | revision.
-    /// Echoed verbatim in the SSZ validation result (zkevm@v0.8.4).
+    /// Echoed verbatim in the SSZ validation result.
     schema_id: u16 = 0,
 };
 

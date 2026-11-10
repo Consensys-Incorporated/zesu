@@ -5,7 +5,7 @@
 ///
 /// Options:
 ///   --fixtures DIR    Root directory of state_tests fixtures
-///                     (default: test/fixtures/fixtures/state_tests)
+///                     (default: spec-tests/fixtures/state_tests)
 ///   --fork FORK       Only run tests for a specific fork (e.g. Cancun, Prague)
 ///   --file FILE       Run a single fixture file instead of the whole suite
 ///   --chainid N       Chain ID (default: 1)
@@ -13,6 +13,8 @@
 ///   -q                Quiet — only print FAIL lines and the summary
 ///
 /// Compares stateRoot and logsHash to the expected post[fork][i].hash and .logs.
+/// Each fixture file runs in a child process (this binary with --file) to isolate
+/// crashes; children report counts on a `STATS:` stderr line.
 const std = @import("std");
 
 const runner = @import("runner.zig");
@@ -79,7 +81,6 @@ pub fn main(init: std.process.Init) !void {
         var walker = try dir.walk(allocator);
         defer walker.deinit();
 
-        // Collect and sort all .json paths for deterministic ordering
         var paths = std.ArrayList([]u8).empty;
         defer {
             for (paths.items) |p| allocator.free(p);
@@ -92,7 +93,6 @@ pub fn main(init: std.process.Init) !void {
             try paths.append(allocator, try allocator.dupe(u8, entry.path));
         }
 
-        // Sort for deterministic order
         std.mem.sort([]u8, paths.items, {}, struct {
             fn lessThan(_: void, a: []u8, b: []u8) bool {
                 return std.mem.lessThan(u8, a, b);
@@ -101,7 +101,6 @@ pub fn main(init: std.process.Init) !void {
 
         const skip_list = [_][]const u8{};
 
-        // Get the path to this binary so we can spawn per-file subprocesses.
         var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const exe_len = std.process.executablePath(init.io, &exe_buf) catch 0;
         const exe_path: []const u8 = if (exe_len > 0) exe_buf[0..exe_len] else args[0];
@@ -124,7 +123,6 @@ pub fn main(init: std.process.Init) !void {
             const full_path = try std.Io.Dir.path.join(allocator, &.{ fixtures_dir, rel_path });
             defer allocator.free(full_path);
 
-            // Build subprocess argv: binary --file <path> [--fork F] [--chainid N] [-q] [-x]
             var argv = std.ArrayList([]const u8).empty;
             defer argv.deinit(allocator);
             try argv.appendSlice(allocator, &.{ exe_path, "--file", full_path });
@@ -207,7 +205,6 @@ fn processFile(
     quiet: bool,
     stats: *runner.RunStats,
 ) !bool {
-    // Use a fresh arena per fixture file
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -238,6 +235,6 @@ fn printSummary(stats: runner.RunStats) void {
     if (stats.failed > 0) std.debug.print("  Failed:   {}\n", .{stats.failed});
     if (stats.skipped > 0) std.debug.print("  Skipped:  {}\n", .{stats.skipped});
     std.debug.print("============================================================\n", .{});
-    // Machine-readable line for parent process aggregation (subprocess mode)
+    // Parsed by the parent process when running per-file children.
     std.debug.print("STATS: passed={} failed={} skipped={}\n", .{ stats.passed, stats.failed, stats.skipped });
 }

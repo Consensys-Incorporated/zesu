@@ -8,9 +8,9 @@ const CryptoBackend = enum {
     @"extern",
 };
 
-/// The set of modules produced by `buildModules`. The exposable ones are registered
-/// via `addModule` (retrievable by dependents through `dep.module(name)`) when
-/// `expose` is true; `accel_impl`, `executor_types`, `zkvm_io` and `zkvm_root` stay private.
+/// The set of modules produced by `buildModules`. When `expose` is true the public ones are
+/// registered via `addModule` (dependents get them through `dep.module(name)`); `zkvm_io` and
+/// `zkvm_root` (and the internal `accel_impl` / `executor_types`) always stay private.
 const ModuleSet = struct {
     zesu_allocator: *std.Build.Module,
     primitives: *std.Build.Module,
@@ -60,10 +60,10 @@ pub const GuestFeatures = struct {
 /// Two independent axes select implementations, one per caller-supplied parameter:
 ///   accel_impl = crypto_backend == extern ? extern_bridge.zig : default.zig
 ///   zkvm_io    = guest                    ? extern_io.zig     : io/interface.zig
-/// `guest` is true only for the rv64im-object build
+/// `guest` is true only for the guest-object build (`addGuestObject`).
 ///
 /// The allocator root is supplied by the caller (`allocator.zig` settable singleton for the
-/// exposed graph; `alt_fl_alloc.zig` for the standalone rv64im object).
+/// exposed graph; the `alt_fl_alloc.zig` free-list for the guest object).
 fn buildModules(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -111,11 +111,9 @@ fn buildModules(
     });
     if (!use_extern) {
         accel_impl.addImport("zesu_allocator", zesu_allocator);
-        // default.zig @cImports system crypto headers (e.g. secp256k1.h). C include paths are
-        // per-module and don't cross the dependency boundary, so set it on the accel_impl module
-        // itself — that way dependents (and our own apps/tests) resolve the @cImport without each
-        // consumer re-adding an include path to a module they can't see. `crypto_prefix` is the
-        // caller-provided prefix (overridable via -Dcrypto-prefix; see build()).
+        // default.zig @cImports system crypto headers. C include paths are per-module and don't
+        // cross the dependency boundary, so set it here so dependents resolve the @cImport
+        // without re-adding an include path to a module they can't see.
         accel_impl.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{crypto_prefix}) });
     }
 
@@ -325,7 +323,7 @@ fn buildModules(
     executor.addImport("accelerators", accelerators);
 
     // zkvm_io is private: native stdin/env (io/interface.zig) or the extern C-ABI refs
-    // (zkvm/extern_io.zig) the zkVM host resolves at link. Selected by the `guest` parameter
+    // (zkvm/extern_io.zig) the zkVM host resolves at link.
     const zkvm_io = b.createModule(.{
         .root_source_file = b.path(if (guest) "src/zkvm/extern_io.zig" else "src/io/interface.zig"),
         .target = target,
@@ -344,13 +342,11 @@ fn buildModules(
 
     var zkvm_root: ?*std.Build.Module = null;
     if (guest) {
-        // zkvm_root stays PRIVATE (never addModule'd). It wires the full turnkey object
-        // (runner + extern IO + allocator) and exports main(). It must NOT be exposed: the
-        // exposed graph roots `zesu_allocator` on the settable singleton, and a consumer
-        // building this as an object gets no chance to call set() before main() runs (get()
-        // would panic on a freestanding default). The turnkey object is instead produced by the
-        // `rv64im-object` step (which wires the bump allocator over ZKVM_HEAP_POS/TOP) and
-        // published as zesu.rv64im.o. Module consumers import the leaf modules and call set().
+        // zkvm_root must stay private: it exports main(), and on the exposed graph
+        // `zesu_allocator` is the settable singleton, which nothing would set() before main()
+        // runs. The guest object (addGuestObject) instead roots `zesu_allocator` on the
+        // alt_fl_alloc.zig free-list over ZKVM_HEAP_POS/TOP. Module consumers import the leaf
+        // modules and call set() themselves.
         const root = b.createModule(.{
             .root_source_file = b.path("src/zkvm/root.zig"),
             .target = target,
@@ -481,12 +477,11 @@ fn addZkevmBenchmarkSteps(b: *std.Build, runner: *std.Build.Step.Compile) void {
 ///
 /// This is zesu's public build API for zkVM projects: a dependent (e.g. zesu-zkvm) imports this
 /// build.zig, passes the same resolved target it uses for its own host object, and links the
-/// returned object. The target's ISA extensions are the caller's; `GuestFeatures` only names the
-/// zkVM capabilities zesu may compile in, and each is off unless the caller enables it.
+/// returned object. The target's ISA extensions are the caller's; `features` names the zkVM
+/// capabilities zesu may compile in (all off by default).
 ///
 /// `b` must be zesu's own builder (`dep.builder` from `b.dependency("zesu", .{})`), because the
-/// module graph resolves its sources relative to it. `features` names the zkVM-specific
-/// capabilities to compile in (all off by default).
+/// module graph resolves its sources relative to it.
 pub fn addGuestObject(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -559,11 +554,9 @@ pub fn build(b: *std.Build) void {
         "Native crypto dependency prefix (default: /opt/homebrew on macOS, /usr/local on Linux)",
     ) orelse (if (is_linux) "/usr/local" else "/opt/homebrew");
     const crypto_include = b.fmt("{s}/include", .{crypto_prefix});
-    // HACK: unlike secp256k1/OpenSSL (resolved via linkSystemLibrary → pkg-config/system search),
-    // mcl and blst ship no pkg-config metadata, so the linker can't locate them on its own —
-    // addCryptoLibraries hands it the static archives by explicit path. We presume both live under
-    // `<crypto_prefix>/lib` (libblst.a, libmcl.a). Assuming they share one directory is itself a bit
-    // of a hack
+    // HACK: blst and mcl ship no pkg-config metadata, so addCryptoLibraries passes the static
+    // archives by explicit path, presumed to live under `<crypto_prefix>/lib`. (On Linux mcl is
+    // instead linked dynamically from /usr/local/lib and libmcl_path is unused.)
     const libblst_path = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
     const libmcl_path = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
 
@@ -777,14 +770,11 @@ pub fn build(b: *std.Build) void {
     // Produces a relocatable rv64im ELF with all EVM and stateless execution logic
     // compiled in, but IO, crypto accelerators, heap and logging left as unresolved
     // extern references per zkvm-standards. Built from a private graph wired with the
-    // bump allocator (over ZKVM_HEAP_POS/TOP) so the standalone object needs no set() call.
+    // alt_fl_alloc.zig free-list allocator (over ZKVM_HEAP_POS/TOP), so it needs no set() call.
     //
     // `rv64im-object` targets the zkvm-standards baseline (M + Zicclsm + unaligned scalar
-    // mem) shared across zkVM backends. `zisk-object` is the same graph on the same base
-    // ISA, plus the Zbb and Zbs bit-manipulation extensions that ZisK's transpiler and cost
-    // model support natively (see PRs #117, #119) — bitmanip instructions ZisK implements
-    // as single ops but other zkVM backends may not, so they stay off the shared default
-    // and are opt-in via this separate target instead of widening every consumer's ISA.
+    // mem) shared across zkVM backends. `zisk-object` adds Zbb/Zbs (single ops on ZisK, but
+    // not on every zkVM, so kept off the shared baseline) and the ZisK DMA feature.
     //
     // Build with: zig build rv64im-object | zig build zisk-object
     // Verify undefined refs: llvm-nm zig-out/lib/<name> | grep ' U '

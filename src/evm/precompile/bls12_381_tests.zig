@@ -1,9 +1,5 @@
 // BLS12-381 precompile tests ported from Besu's gnark EIP-2537 test suite.
-// CSV sources: eip2537_g1_add.csv (104 cases), eip2537_g2_add.csv (104 cases),
-//              eip2537_g1_msm.csv (107 cases), eip2537_g2_msm.csv (107 cases),
-//              eip2537_pairing.csv (113 cases),
-//              eip2537_pairing_invalid_subgroup.csv (121 cases),
-//              eip2537_fp_to_g1.csv (103 cases), eip2537_fp2_to_g2.csv (102 cases).
+// CSV sources: testdata/eip2537_*.csv.
 // Format: input,result,gas,notes  — empty notes = success, non-empty = expect error.
 //
 // Note: Gas values in the Besu CSVs use an older EIP-2537 schedule. We verify gas
@@ -240,7 +236,6 @@ test "BLS12-381 G2 MSM - Besu EIP-2537 vectors" {
 
 test "BLS12-381 Pairing - Besu EIP-2537 vectors" {
     const alloc = testing.allocator;
-    // Run both regular pairing cases and invalid-subgroup cases
     inline for (.{ pairing_csv, pairing_invalid_csv }, .{ "Pairing", "PairingInvalid" }) |csv, label| {
         var line_iter = std.mem.splitScalar(u8, csv, '\n');
         var row: usize = 0;
@@ -254,9 +249,7 @@ test "BLS12-381 Pairing - Besu EIP-2537 vectors" {
             const expected_hex = fields[1];
             const notes = fields[3];
 
-            // EIP-2537 spec: empty input (0 pairs) → return 1 (multiplicative identity in GT).
-            // Besu's CSV marks this as an error ("invalid number of pairs") — skip it here since
-            // the correct behaviour is tested separately in the unit tests.
+            // Empty input (an error per EIP-2537) is covered by the unit tests in tests.zig.
             if (input_hex.len == 0) continue;
 
             const input_bytes = try hexDecode(alloc, input_hex);

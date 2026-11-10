@@ -1,10 +1,6 @@
-//! blst wrapper for BLS12-381 and KZG operations
-//! Requires blst library to be installed and linked
-//!
-//! To use this wrapper:
-//! 1. Install blst: https://github.com/supranational/blst
-//! 2. Uncomment the blst linking in build.zig
-//! 3. Ensure blst.h is in your include path
+//! blst wrapper for BLS12-381 (EIP-2537) and KZG point evaluation (EIP-4844).
+//! blst (https://github.com/supranational/blst) is linked by build.zig's
+//! addCryptoLibraries for the default crypto backend.
 const std = @import("std");
 const alloc_mod = @import("zesu_allocator");
 
@@ -79,14 +75,12 @@ pub fn g1Add(a: [96]u8, b: [96]u8) ![96]u8 {
         return output;
     }
 
-    // Convert to projective form and add
     var p1: c.blst_p1 = undefined;
     c.blst_p1_from_affine(&p1, &p1_affine);
 
     var result: c.blst_p1 = undefined;
     c.blst_p1_add_or_double_affine(&result, &p1, &p2_affine);
 
-    // Convert back to affine and serialize
     var result_affine: c.blst_p1_affine = undefined;
     c.blst_p1_to_affine(&result_affine, &result);
 
@@ -159,7 +153,6 @@ pub fn g1Msm(pairs: []const G1MsmPair) ![96]u8 {
     // If all points were infinity, result is infinity
     if (active_count == 0) return [_]u8{0} ** 96;
 
-    // Allocate scratch space for MSM
     const scratch_size = c.blst_p1s_mult_pippenger_scratch_sizeof(active_count);
     const alloc_size = if (scratch_size == 0) @as(usize, 8) else scratch_size;
     const scratch_bytes = try alloc_mod.get().alloc(u8, alloc_size);
@@ -235,7 +228,6 @@ pub fn g2Add(a: [192]u8, b: [192]u8) ![192]u8 {
         return output;
     }
 
-    // Convert to projective and add
     var p1: c.blst_p2 = undefined;
     c.blst_p2_from_affine(&p1, &p1_affine);
 
@@ -432,11 +424,9 @@ pub fn mapFpToG1(fp: [48]u8) ![96]u8 {
         return error.NonCanonicalFieldElement;
     }
 
-    // Parse field element
     var fp_elem: c.blst_fp = undefined;
     c.blst_fp_from_bendian(&fp_elem, &fp);
 
-    // Map to G1
     var result: c.blst_p1 = undefined;
     c.blst_map_to_g1(&result, &fp_elem, null);
 
@@ -465,7 +455,6 @@ pub fn mapFp2ToG2(fp2: [96]u8) ![192]u8 {
     c.blst_fp_from_bendian(&fp2_elem.fp[0], &fp2[0..48].*);
     c.blst_fp_from_bendian(&fp2_elem.fp[1], &fp2[48..96].*);
 
-    // Map to G2
     var result: c.blst_p2 = undefined;
     c.blst_map_to_g2(&result, &fp2_elem, null);
 
@@ -538,11 +527,9 @@ pub fn verifyKzgProof(commitment: [48]u8, z: [32]u8, y: [32]u8, proof: [48]u8) !
         return false; // Invalid trusted setup point
     }
 
-    // Get generators
     const g1_generator = c.BLS12_381_G1;
     const g2_generator = c.BLS12_381_G2;
 
-    // Compute [y]G1
     var g1_projective: c.blst_p1 = undefined;
     c.blst_p1_from_affine(&g1_projective, &g1_generator);
     var y_g1: c.blst_p1 = undefined;
@@ -563,7 +550,6 @@ pub fn verifyKzgProof(commitment: [48]u8, z: [32]u8, y: [32]u8, proof: [48]u8) !
     var p_minus_y_affine: c.blst_p1_affine = undefined;
     c.blst_p1_to_affine(&p_minus_y_affine, &p_minus_y);
 
-    // Compute [z]G2
     var g2_projective: c.blst_p2 = undefined;
     c.blst_p2_from_affine(&g2_projective, &g2_generator);
     var z_g2: c.blst_p2 = undefined;
@@ -582,7 +568,6 @@ pub fn verifyKzgProof(commitment: [48]u8, z: [32]u8, y: [32]u8, proof: [48]u8) !
     var x_minus_z_affine: c.blst_p2_affine = undefined;
     c.blst_p2_to_affine(&x_minus_z_affine, &x_minus_z);
 
-    // Compute -G2
     var neg_g2: c.blst_p2 = g2_projective;
     c.blst_p2_cneg(&neg_g2, true); // Negate G2
     var neg_g2_affine: c.blst_p2_affine = undefined;

@@ -1,4 +1,4 @@
-/// zevm-stateless Hive consume-rlp client.
+/// zesu Hive consume-rlp client.
 ///
 /// Hive injects:
 ///   /genesis.json        — geth-format genesis block
@@ -30,8 +30,8 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
-    // Determine genesis spec from fork schedule at block 0, timestamp from JSON
-    // We do a quick parse to get the timestamp first, then re-parse fully.
+    // The genesis header layout depends on the spec active at genesis, which needs the
+    // timestamp before the full parse.
     const genesis_ts = quickParseTimestamp(genesis_json);
     const genesis_spec = fork.specAt(0, genesis_ts);
 
@@ -80,7 +80,6 @@ fn importBlocks(io: std.Io, alloc: std.mem.Allocator, chain: *chain_mod.Chain) !
     var blocks_dir = std.Io.Dir.openDirAbsolute(io, "/blocks", .{ .iterate = true }) catch return;
     defer blocks_dir.close(io);
 
-    // Collect file names
     var names = std.ArrayListUnmanaged([]u8).empty;
     defer {
         for (names.items) |n| alloc.free(n);
@@ -109,14 +108,12 @@ fn importBlocks(io: std.Io, alloc: std.mem.Allocator, chain: *chain_mod.Chain) !
 
 /// Quick-scan genesis JSON for timestamp without a full parse.
 fn quickParseTimestamp(json: []const u8) u64 {
-    // Look for "timestamp": "0x..." or "timestamp": N
+    // Takes the first "timestamp" key in the document; accepts "0x..." or a bare integer.
     const key = "\"timestamp\"";
     const pos = std.mem.indexOf(u8, json, key) orelse return 0;
     var i = pos + key.len;
-    // Skip whitespace and ':'
     while (i < json.len and (json[i] == ' ' or json[i] == ':' or json[i] == '\t')) i += 1;
     if (i >= json.len) return 0;
-    // Parse quoted hex or bare integer
     if (json[i] == '"') {
         i += 1;
         const start = i;

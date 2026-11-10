@@ -1,8 +1,7 @@
-/// Ethereum 2048-bit (256-byte) Bloom filter.
-///
-/// Algorithm: for each input byte sequence, compute keccak256, then take
-/// 3 pairs of bytes (bytes 0-1, 2-3, 4-5) and interpret each pair as a
-/// big-endian 11-bit index into the 2048-bit field.
+//! Ethereum 2048-bit (256-byte) logs Bloom filter.
+//!
+//! For each input, keccak256 it and take bytes 0-1, 2-3 and 4-5 as big-endian
+//! 11-bit indices into the 2048-bit field.
 const std = @import("std");
 const accel = @import("accelerators");
 
@@ -15,7 +14,6 @@ pub fn add(bloom: *Bloom, data: []const u8) void {
     accel.keccak256(data, &hash);
 
     inline for (0..3) |i| {
-        // Ethereum uses big-endian 11-bit indexing: high byte first (matches geth)
         const hi: u16 = hash[2 * i];
         const lo: u16 = hash[2 * i + 1];
         const bit_idx: u11 = @intCast(((hi << 8) | lo) & 0x7FF);
@@ -30,7 +28,7 @@ pub fn addLog(bloom: *Bloom, address: [20]u8, topics: []const [32]u8) void {
     for (topics) |topic| add(bloom, &topic);
 }
 
-/// OR two bloom filters together in place. src passed by pointer to avoid 256-byte copy.
+/// OR `src` into `dst`.
 pub fn merge(dst: *Bloom, src: *const Bloom) void {
     const d64: *align(1) [32]u64 = @ptrCast(dst);
     const s64: *align(1) const [32]u64 = @ptrCast(src);

@@ -1,11 +1,6 @@
 const std = @import("std");
 
-/// Core primitive types and constants for the Ethereum Virtual Machine (EVM) implementation.
-/// This module provides:
-/// - EVM constants and limits (gas, stack, code size)
-/// - Ethereum hard fork management and version control
-/// - EIP-specific constants and configuration values
-/// - Type aliases for common EVM concepts (storage keys/values)
+// Core EVM primitive types, hash-map contexts, protocol constants and SpecId.
 pub const Address = [20]u8;
 pub const Hash = [32]u8;
 pub const U256 = std.math.IntFittingRange(0, 115792089237316195423570985008687907853269984665640564039457584007913129639935);
@@ -15,15 +10,10 @@ pub const U32 = u32;
 pub const U16 = u16;
 pub const U8 = u8;
 
-/// Type alias for EVM storage keys (256-bit unsigned integers).
-/// Used to identify storage slots within smart contract storage.
 pub const StorageKey = U256;
-
-/// Type alias for EVM storage values (256-bit unsigned integers).
-/// Used to store data values in smart contract storage slots.
 pub const StorageValue = U256;
 
-/// Fixed-size block moves through the ZisK DMA chip (no-op fallback on other targets).
+/// Fixed-size block moves through the ZisK DMA chip (plain @memcpy on other targets).
 pub const dma = @import("dma.zig");
 
 /// zkVM capabilities the guest object was built with (build.zig `GuestFeatures`).
@@ -32,7 +22,7 @@ pub const guest_features = @import("guest_features.zig");
 /// murmur3's fmix64 avalanche — distributes entropy across the full space of
 /// the u64. Keep both multiply/shift rounds: a single-multiply variant cannot
 /// carry entropy downwards, so inputs whose low bits are all zero stay
-/// concentrated. Callers relying on that are the place to document why.
+/// concentrated.
 pub inline fn mix64(x: u64) u64 {
     var h = x;
     h ^= h >> 33;
@@ -44,16 +34,11 @@ pub inline fn mix64(x: u64) u64 {
 
 /// Hash context for HashMap keyed on Address ([20]u8).
 ///
-/// Addresses are NOT uniformly distributed: only keccak-derived ones are. CREATE2
-/// salts, synthetic test addresses and precompiles all share leading bytes, and an
-/// address prefix is attacker-influenceable. Truncating `key[0..8]` mapped every
-/// address agreeing on its first eight bytes to one identical u64, which collides in
-/// both the bucket index (`hash & mask`) and the 7-bit fingerprint (`hash >> 57`), so
-/// every probe fell through to the 20-byte `eql` — quadratic in the size of the
-/// colliding group, across all ~38 maps built on this context at once.
-///
-/// So mix all 20 bytes: three loads and a multiply-xor chain, ending in a fold that
-/// carries the high half's entropy down into the bucket bits.
+/// Addresses are NOT uniformly distributed: CREATE2-ground addresses, synthetic test
+/// addresses and precompiles share leading bytes, and a prefix is attacker-influenceable.
+/// Truncating to a prefix would collide in both the bucket index (`hash & mask`) and the
+/// 7-bit fingerprint (`hash >> 57`), degrading every probe to a 20-byte `eql`. So mix
+/// all 20 bytes and avalanche.
 pub const AddressContext = struct {
     pub fn hash(_: @This(), key: Address) u64 {
         const lo = std.mem.readInt(u64, key[0..8], .little);
@@ -73,15 +58,11 @@ pub const AddressContext = struct {
 
 /// Hash context for HashMap keyed on a storage slot (u256).
 ///
-/// Slot keys come in two shapes: small sequential integers for plain fields, and
-/// keccak-derived values for mapping and array entries. The auto-derived context
-/// Wyhashes all 32 bytes, which is far more work than either shape needs.
-///
-/// So fold the four limbs and avalanche. Keccak-derived keys are already uniform;
-/// small keys get their entropy spread into both the bucket index and the 7-bit
-/// fingerprint (`hash >> 57`), which a plain truncation would leave constant across
-/// every low-numbered slot. Rotations are odd and unequal so limbs holding equal
-/// bytes don't cancel.
+/// Slot keys are either small sequential integers (plain fields) or keccak-derived
+/// (mapping/array entries); Wyhashing all 32 bytes is more work than either needs.
+/// Folding the four limbs and avalanching spreads small keys into both the bucket
+/// index and the 7-bit fingerprint (`hash >> 57`). Rotations are odd and unequal so
+/// limbs holding equal bytes don't cancel.
 pub const SlotContext = struct {
     pub fn hash(_: @This(), key: StorageKey) u64 {
         const l0: u64 = @truncate(key);
@@ -110,7 +91,7 @@ pub fn SlotMapUnmanaged(comptime V: type) type {
 }
 
 /// Hash context for HashMap keyed on Hash ([32]u8).
-/// Keccak-256 output is uniformly distributed — truncate first 8 bytes.
+/// Keccak-256 output is uniformly distributed, so the first 8 bytes suffice.
 pub const HashContext = struct {
     pub fn hash(_: @This(), key: Hash) u64 {
         return std.mem.readInt(u64, key[0..8], .little);
@@ -120,12 +101,11 @@ pub const HashContext = struct {
     }
 };
 
-/// Type alias for byte arrays
 pub const Bytes = []u8;
 
 /// Log entry for EVM events.
 ///
-/// `data` and `topics` are heap-allocated (via the zevm_allocator) when non-empty,
+/// `data` and `topics` are heap-allocated (via zesu_allocator) when non-empty,
 /// and must be freed with `deinit`. Zero-length slices use static empty literals and
 /// must NOT be freed.
 pub const Log = struct {
@@ -141,12 +121,11 @@ pub const Log = struct {
     }
 };
 
-/// Optimize short address access.
+/// Exclusive upper bound on the numeric value of a "short" address (see `shortAddress`).
 pub const SHORT_ADDRESS_CAP: usize = 300;
 
-/// Returns the short address from Address.
-/// Short address is considered address that has 18 leading zeros
-/// and last two bytes are less than SHORT_ADDRESS_CAP.
+/// Returns the address as an integer if its first 18 bytes are zero and the
+/// big-endian value of the last two is < SHORT_ADDRESS_CAP, else null.
 pub fn shortAddress(address: Address) ?usize {
     for (address[0..18]) |b| {
         if (b != 0) return null;
@@ -158,30 +137,23 @@ pub fn shortAddress(address: Address) ?usize {
     return null;
 }
 
-/// 1 ether = 10^18 wei
 pub const ONE_ETHER: u128 = 1_000_000_000_000_000_000;
 
-/// 1 gwei = 10^9 wei
 pub const ONE_GWEI: u128 = 1_000_000_000;
 
-/// Global constants for the EVM
-/// Here you can find constants that don't belong to any EIP and are there for the genesis.
-/// Number of block hashes that EVM can access in the past (pre-Prague)
+/// Number of past block hashes reachable via BLOCKHASH.
 pub const BLOCK_HASH_HISTORY: u64 = 256;
 
-/// The address of precompile 3, which is handled specially in a few places
+/// The RIPEMD-160 precompile (0x03), special-cased in a few places.
 pub const PRECOMPILE3: Address = [20]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3 };
 
-/// EVM interpreter stack limit
 pub const STACK_LIMIT: usize = 1024;
 
-/// EVM call stack limit
 pub const CALL_STACK_LIMIT: u64 = 1024;
 
 /// EIP-170: maximum deployed contract code size (24576 bytes)
 pub const MAX_CODE_SIZE: usize = 24576;
-/// EIP-7954 (Amsterdam+): maximum deployed contract code size = 0x10000 (65536 bytes).
-/// Matches the reference amsterdam MAX_CODE_SIZE = 0x10000.
+/// EIP-7954 (Amsterdam+): maximum deployed contract code size (65536 bytes).
 pub const AMSTERDAM_MAX_CODE_SIZE: usize = 0x10000;
 /// EIP-3860: maximum initcode size = 2 * MAX_CODE_SIZE (49152 bytes)
 pub const MAX_INITCODE_SIZE: usize = 2 * MAX_CODE_SIZE;
@@ -202,7 +174,7 @@ pub const BLOB_BASE_COST: u64 = 8192;
 /// EIP-4844: gas consumed per blob
 pub const GAS_PER_BLOB: u64 = 131_072;
 
-/// EIP-4844: maximum blobs per block (Cancun: 6, Prague+: 9 via EIP-7691)
+/// EIP-4844: maximum blobs per block for Cancun (6)
 pub const MAX_BLOB_NUMBER_PER_BLOCK: usize = 6;
 /// EIP-7691: maximum blobs per block for Prague/Osaka (9)
 pub const MAX_BLOB_NUMBER_PER_BLOCK_PRAGUE: usize = 9;
@@ -260,8 +232,7 @@ pub const KECCAK_EMPTY: Hash = [32]u8{
     0x7b, 0xfa, 0xd8, 0x04, 0x5d, 0x85, 0xa4, 0x70,
 };
 
-/// Specification IDs and their activation block
-/// Information was obtained from the Ethereum Execution Specifications.
+/// Hardfork identifiers in activation order (mainnet activation noted per variant).
 pub const SpecId = enum(u8) {
     /// Frontier hard fork - Activated at block 0
     frontier = 0,
@@ -301,13 +272,13 @@ pub const SpecId = enum(u8) {
     cancun,
     /// Prague hard fork - Activated at block 22431084 (Timestamp: 1746612311)
     prague,
-    /// Osaka hard fork - Activated at block TBD
+    /// Osaka hard fork
     osaka,
     /// BPO1 hard fork - Blob Parameter Only fork 1 (EIP-7892)
     bpo1,
-    /// BPO2 hard fork - Blob Parameter Only fork 2
+    /// BPO2 hard fork - Blob Parameter Only fork 2 (EIP-7892)
     bpo2,
-    /// Amsterdam hard fork - Activated at block TBD
+    /// Amsterdam hard fork
     amsterdam,
 };
 
@@ -316,7 +287,7 @@ pub fn specIdFromU8(spec_id: u8) ?SpecId {
     return @enumFromInt(spec_id);
 }
 
-/// Returns true if the given specification ID is enabled in this spec.
+/// True if fork `other` is active under `self` (i.e. `self` >= `other`).
 pub fn isEnabledIn(self: SpecId, other: SpecId) bool {
     return @intFromEnum(self) >= @intFromEnum(other);
 }
@@ -414,7 +385,6 @@ pub fn formatSpecId(spec_id: SpecId, writer: *std.Io.Writer) std.Io.Writer.Error
     try writer.writeAll(specIdToString(spec_id));
 }
 
-/// Test module for primitives
 pub const testing = struct {
     pub fn testShortAddress() !void {
         const address1: Address = [20]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100 };
@@ -431,10 +401,7 @@ pub const testing = struct {
     }
 
     /// Guards the property `AddressContext` exists for: addresses that share a
-    /// long prefix must still spread across buckets. The previous `key[0..8]`
-    /// truncation mapped every address below to the *same* u64, collapsing both
-    /// the bucket index and the fingerprint and making each probe a 20-byte
-    /// `eql` — quadratic in the group size.
+    /// long prefix must still spread across buckets.
     pub fn testAddressHashSpread() !void {
         const ctx = AddressContext{};
         const n = 4096;
@@ -485,21 +452,17 @@ pub const testing = struct {
             }
 
             // A random hash fills ~63% of n buckets by the coupon-collector bound.
-            // The old truncation filled exactly 1.
             try std.testing.expect(distinct_buckets > n / 2);
         }
     }
 
     pub fn testSpecId() !void {
-        // Test string conversion
         try std.testing.expectEqual(SpecId.frontier, specIdFromString("Frontier"));
         try std.testing.expectEqual(SpecId.prague, specIdFromString("Prague"));
 
-        // Test enabled check
         try std.testing.expect(isEnabledIn(.petersburg, .byzantium));
         try std.testing.expect(!isEnabledIn(.byzantium, .petersburg));
 
-        // Test string representation
         try std.testing.expectEqualStrings("Frontier", specIdToString(.frontier));
         try std.testing.expectEqualStrings("Prague", specIdToString(.prague));
     }
