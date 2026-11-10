@@ -24,15 +24,12 @@ pub fn blake2fRun(input: []const u8, gas_limit: u64) main.PrecompileResult {
     if (gas_used > gas_limit)
         return .{ .err = main.PrecompileError.OutOfGas };
 
-    // Validate f flag before calling compress
     const f_flag = input[212];
     if (f_flag > 1)
         return .{ .err = main.PrecompileError.Blake2WrongFinalIndicatorFlag };
 
-    // Some zkvm implementations require h, m, and t to be 8-byte aligned.
-    // m/t sit at input offsets 68/196 (both 4 mod 8), so we copy all three
-    // into aligned stack buffers. This is cheap and harmless for implementations
-    // that don't require alignment. h is also updated in place by accel.blake2f.
+    // Some zkVM backends need h, m and t 8-byte aligned (m/t sit at input offsets
+    // 68/196, both 4 mod 8), so copy them out. accel.blake2f updates h in place.
     var h_bytes: [64]u8 align(8) = undefined;
     @memcpy(&h_bytes, input[4..68]);
     var m_bytes: [128]u8 align(8) = undefined;

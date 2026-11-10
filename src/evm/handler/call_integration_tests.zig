@@ -1,5 +1,5 @@
-/// Gas accounting correctness tests: CALL gas forwarding, refund propagation,
-/// SSTORE EIP-2200 stipend protection, and call gas schedule constants.
+//! Gas accounting tests: CALL gas forwarding, refund propagation,
+//! SSTORE EIP-2200 stipend protection, and call gas schedule constants.
 const std = @import("std");
 const primitives = @import("primitives");
 const context = @import("context");

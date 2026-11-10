@@ -1,6 +1,5 @@
 // BN254 precompile tests ported from Besu's Gnark AltBN128 test suite.
-// CSV sources: eip196_g1_add.csv (108 cases), eip196_g1_mul.csv (108 cases),
-//              eip196_pairing.csv (14 cases).
+// CSV sources: testdata/eip196_*.csv.
 // Format: input,result,gas,notes  — empty notes = success, non-empty = expect error.
 
 const std = @import("std");

@@ -24,7 +24,6 @@ pub fn main(init: std.process.Init) !void {
         const arg = args[arg_i];
 
         if (std.mem.eql(u8, arg, "--ssz")) {
-            // --ssz may optionally be followed by a file path
             if (arg_i + 1 < args.len and !std.mem.startsWith(u8, args[arg_i + 1], "--")) {
                 arg_i += 1;
                 source = .{ .ssz_file = args[arg_i] };
@@ -71,7 +70,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("  transactions  = {d}\n", .{ep.raw_transactions.len});
 
-    // The same entry point the zkVM guest uses (run.zig).
+    // The same executor entry point the zkVM guest reaches via run.zig.
     const proof_out = executor.executeStatelessInput(allocator, si, si.chain_config.fork_name) catch |err| {
         std.debug.print("  FAIL → {}\n", .{err});
         std.process.exit(1);
@@ -81,9 +80,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("  receipts        = {d}\n", .{proof_out.receipts.len});
     std.debug.print("  pre_state_root  = 0x{x}\n", .{proof_out.pre_state_root});
 
-    // executeStatelessInput validates the computed roots against the payload
-    // (returning StateRootMismatch / ReceiptsRootMismatch / InvalidLogsBloom, handled above), so
-    // reaching here means both matched.
+    // executeStatelessInput errors on any root or logs-bloom mismatch, so both roots matched.
     std.debug.print("  post_state_root = 0x{x}  ✓\n", .{proof_out.post_state_root});
     std.debug.print("  receipts_root   = 0x{x}  ✓\n", .{proof_out.receipts_root});
 

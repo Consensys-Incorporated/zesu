@@ -1,7 +1,7 @@
 //! Merkle Patricia Trie builder.
 //!
 //! Builds a trie from a set of key-value pairs and returns the root hash.
-//! Keys are raw bytes; they are hashed/nibble-expanded internally.
+//! Keys are used as given (callers pre-hash for secured tries) and nibble-expanded internally.
 //!
 //! Reference: Ethereum Yellow Paper Appendix C.
 const std = @import("std");

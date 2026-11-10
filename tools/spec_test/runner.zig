@@ -6,8 +6,9 @@
 ///
 /// For each post[fork][i]:
 ///   - indexes.{data, gas, value} select from transaction.{data[], gasLimit[], value[]}
-///   - transaction.sender is used directly as the caller (no ECDSA needed)
-///   - We call transition() and compare computed stateRoot + logsHash to expected hash / logs
+///   - transaction.sender is used directly as the caller (no signature recovery)
+///   - run transition() and compare stateRoot + logsHash to post.hash / post.logs;
+///     an entry with expectException passes iff transition() errors
 const std = @import("std");
 
 const input_mod = @import("t8n_input");
@@ -28,7 +29,7 @@ pub const RunStats = struct {
     }
 };
 
-// ─── Hex helpers (self-contained — mirrors private helpers in input.zig) ──────
+// ─── Hex helpers (mirror the private ones in tools/t8n/input.zig) ────────────
 
 fn stripHex(s: []const u8) []const u8 {
     if (s.len >= 2 and s[0] == '0' and (s[1] == 'x' or s[1] == 'X')) return s[2..];
@@ -138,10 +139,9 @@ fn buildTx(
 ) !input_mod.TxInput {
     var tx = input_mod.TxInput{};
 
-    // Transaction type (default 0; infer from fields if absent)
+    // Type defaults to 0 and is inferred from the fields below if absent.
     if (txn.get("type")) |v| tx.type = @intCast(jsonU64(v) catch 0);
 
-    // Nonce
     if (txn.get("nonce")) |v| tx.nonce = jsonU64(v) catch 0;
 
     // Indexed: gasLimit[gi]
@@ -184,7 +184,6 @@ fn buildTx(
         if (jStr(v)) |s| tx.from = hexToAddr(s) catch null;
     }
 
-    // Gas pricing
     if (txn.get("gasPrice")) |v| tx.gas_price = jsonU128(v) catch null;
     if (txn.get("maxFeePerGas")) |v| tx.max_fee_per_gas = jsonU128(v) catch null;
     if (txn.get("maxPriorityFeePerGas")) |v| tx.max_priority_fee_per_gas = jsonU128(v) catch null;
@@ -193,10 +192,8 @@ fn buildTx(
     if (txn.get("chainId")) |v| tx.chain_id = jsonU64(v) catch null;
     if (txn.get("protected")) |v| tx.protected = if (v == .bool) v.bool else true;
 
-    // Access list — fixtures use "accessLists" (plural, indexed array like data/gasLimit/value).
-    // accessLists[di] selects the access list for this (data, gas, value) combination.
-    // Fall back to singular "accessList" for non-indexed formats.
-    // Track whether the field was present at all: presence indicates type-1 even with empty list.
+    // Fixtures use "accessLists", indexed by `di` like data[]; fall back to the singular
+    // "accessList". The field's mere presence marks type 1, even when empty.
     var has_access_list_field = false;
     const al_json_val: ?std.json.Value = blk: {
         if (txn.get("accessLists")) |v| {
@@ -268,7 +265,6 @@ fn buildTx(
                 if (obj.get("nonce")) |v| ai.nonce = hexToU64(jStr(v) orelse "0") catch 0;
                 if (obj.get("signer")) |v| ai.signer = hexToAddr(jStr(v) orelse "") catch null;
                 // EIP-7702 requires low-S: if s > N/2, the authorization is invalid (signer=None).
-                // SECP256K1N/2 = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0
                 if (obj.get("s")) |sv| {
                     const s_val = hexToU256(jStr(sv) orelse "0") catch 0;
                     const secp256k1_n_over_2: u256 = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
@@ -280,7 +276,6 @@ fn buildTx(
         }
     }
 
-    // Infer type from fields if not explicitly set
     if (tx.type == 0) {
         if (has_authorization_list_field) {
             tx.type = 4;
@@ -346,7 +341,6 @@ pub fn runFixture(
             else => continue,
         };
 
-        // Pre-state and env
         const pre_json_val = test_obj.get("pre") orelse continue;
         const env_json_val = test_obj.get("env") orelse continue;
         const txn_val = switch (test_obj.get("transaction") orelse continue) {
@@ -379,17 +373,14 @@ pub fn runFixture(
             };
         };
 
-        // Iterate forks
         var fork_it = post_val.iterator();
         while (fork_it.next()) |fork_kv| {
             const fork = fork_kv.key_ptr.*;
 
-            // Fork filter
             if (fork_filter) |ff| {
                 if (!std.mem.eql(u8, fork, ff)) continue;
             }
 
-            // Resolve spec (skip unknown forks)
             const spec = hardfork.specFromFork(fork) orelse {
                 const post_entries = switch (fork_kv.value_ptr.*) {
                     .array => |a| a.items,
@@ -436,7 +427,6 @@ pub fn runFixture(
                 // Whether this post entry expects the transaction to be invalid.
                 const expect_exception = post_entry.get("expectException") != null;
 
-                // Expected hashes
                 const exp_hash_str = jStr(post_entry.get("hash") orelse continue) orelse continue;
                 const exp_logs_str = jStr(post_entry.get("logs") orelse continue) orelse continue;
                 const exp_hash = hexToHash(exp_hash_str) catch {
@@ -448,7 +438,6 @@ pub fn runFixture(
                     continue;
                 };
 
-                // Decode indexes
                 const indexes_obj: ?std.json.ObjectMap = if (post_entry.get("indexes")) |iv|
                     (if (iv == .object) iv.object else null)
                 else
@@ -467,7 +456,6 @@ pub fn runFixture(
                 else
                     0;
 
-                // Build the transaction for this post entry
                 const tx = buildTx(alloc, txn_val, di, gi, vi) catch |err| {
                     stats.skipped += 1;
                     if (!quiet) {
@@ -489,15 +477,12 @@ pub fn runFixture(
                     continue;
                 }
 
-                // Run state transition in a child arena so memory is reclaimed.
-                // Use page_allocator (not c_allocator) to keep our arena pages
-                // separate from the c_allocator heap used by the DB and JumpTable
-                // internals, avoiding heap corruption on arena deinit.
+                // Child arena per post entry, on page_allocator so its pages stay separate
+                // from the c_allocator heap zesu_allocator uses natively.
                 var child_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
                 defer child_arena.deinit();
                 const ca = child_arena.allocator();
 
-                // Clone pre_alloc into child arena (the map header + all KV pairs)
                 const pre_clone = try cloneAllocMap(ca, pre_alloc_base);
 
                 var txs = [1]input_mod.TxInput{tx};

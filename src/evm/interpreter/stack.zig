@@ -20,22 +20,19 @@ pub const Stack = struct {
         return Stack{ .data = backing, .length = 0 };
     }
 
-    /// Free the backing allocation.
     pub fn deinit(self: *Stack) void {
         alloc_mod.get().free(self.data);
     }
 
-    /// Get the length of the stack
     pub fn len(self: *const Stack) usize {
         return self.length;
     }
 
-    /// Get the data slice
+    /// Live items, bottom first.
     pub fn getData(self: *const Stack) []const primitives.U256 {
         return self.data[0..self.length];
     }
 
-    /// Clear the stack
     pub fn clear(self: *Stack) void {
         self.length = 0;
     }
@@ -189,7 +186,7 @@ pub const Stack = struct {
         return &self.data[self.length - 1];
     }
 
-    /// Duplicate a value without bounds checking
+    /// DUPn without bounds checking. Word copies go through the DMA chip on ZisK.
     pub fn dupUnsafe(self: *Stack, n: usize) void {
         // Read `length` once — see pushUnsafe.
         const sp = self.length;
@@ -201,7 +198,7 @@ pub const Stack = struct {
         self.length = sp + 1;
     }
 
-    /// Swap top with nth element without bounds checking
+    /// SWAPn without bounds checking. Word copies go through the DMA chip on ZisK.
     pub fn swapUnsafe(self: *Stack, n: usize) void {
         const top_idx = self.length - 1;
         const swap_idx = top_idx - n;

@@ -1,8 +1,5 @@
-/// Transaction hashing, RLP encoding, and sender recovery.
-///
-/// Handles all per-transaction cryptographic operations:
-/// signing hash construction, tx hash computation, sender recovery via
-/// secp256k1, and CREATE address derivation.
+//! Per-transaction crypto: signing and tx hashes, secp256k1 sender recovery, EIP-7702
+//! authorization hashes, and CREATE address derivation.
 const std = @import("std");
 const primitives = @import("primitives");
 const input = @import("executor_types");
@@ -80,11 +77,9 @@ fn rlpTo(alloc: std.mem.Allocator, to: ?input.Address) ![]u8 {
 /// (comptime-void when encoding a signing pre-image instead — see encodeTxPayload.)
 const Signature = struct { v: u256, r: u256, s: u256 };
 
-/// Encode a transaction to RLP, either as the pre-image hashed to produce the
-/// signing hash (comptime include_signature = false — legacy type-0 pre-EIP-155
-/// txs omit the trailing 3 fields entirely, matching `signingHash`'s original
-/// per-type-0 branch), or as the fully-signed wire form used for the tx hash
-/// (include_signature = true, appends sig.v/r/s to every type).
+/// Encode a transaction to RLP, either as the signing pre-image (include_signature =
+/// false; an EIP-155 legacy tx appends [chain_id, 0, 0], a pre-EIP-155 one nothing) or
+/// as the signed wire form used for the tx hash (include_signature = true, appends v/r/s).
 fn encodeTxPayload(
     alloc: std.mem.Allocator,
     tx: *const input.TxInput,
@@ -221,10 +216,8 @@ fn encodeTxPayload(
 }
 
 fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64) ![32]u8 {
-    // The RLP pre-image is pure scratch — only the returned hash outlives this
-    // call — so build it in a scoped arena instead of leaking every field's
-    // encoding into the caller's allocator (see rlp_encode.zig's own "use an
-    // arena for easy cleanup" contract, which nothing downstream was honoring).
+    // The pre-image is scratch (only the hash outlives this call), so build it in a
+    // scoped arena: rlp_encode never frees its intermediates.
     var arena = ScratchArena.init(alloc);
     defer arena.deinit();
     const payload = try encodeTxPayload(arena.allocator(), tx, chain_id, false, {});

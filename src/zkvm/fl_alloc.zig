@@ -1,8 +1,8 @@
-/// zesu_allocator module for the relocatable rv64im object.
+/// Segregated free-list allocator backed by ZKVM_HEAP_POS / ZKVM_HEAP_TOP,
+/// classifying sizes with @clz. Not wired into any build: the rv64im object
+/// uses alt_fl_alloc.zig (no @clz, 16 MiB class cap); kept for reference.
 ///
 /// Design & diagrams: see src/zkvm/FREELIST_ALLOC.md
-///
-/// Segregated free-list allocator backed by ZKVM_HEAP_POS / ZKVM_HEAP_TOP.
 const std = @import("std");
 
 extern var ZKVM_HEAP_POS: usize;
@@ -100,8 +100,7 @@ fn free(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usiz
         @as(*usize, @ptrFromInt(ptr)).* = free_lists[class];
         free_lists[class] = ptr;
     }
-    // Oversized: leaked back into the bump region (unrecoverable, but
-    // allocations >= 2 GiB should not occur in practice).
+    // Oversized (> 2 GiB): leaked; never reused.
 }
 
 const vtable = std.mem.Allocator.VTable{

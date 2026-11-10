@@ -1,17 +1,6 @@
-//! Native zkVM I/O implementation.
-//!
-//! read_input  — reads all private input bytes from stdin.
-//! write_output — writes public output bytes to stdout.
-//!
-//! Override at build time by injecting a different "zkvm_io" module:
-//!
-//!   exe.root_module.addImport("zkvm_io", your_module)
-//!
-//! The replacement module must export:
-//!   pub fn read_input(allocator: std.mem.Allocator) ![]const u8 { ... }
-//!   pub fn write_output(data: []const u8) void { ... }
-//!
-//! See zevm-stateless-zisk for an example that uses memory-mapped I/O.
+//! Allocating stdin/stdout I/O shim. Not wired into any build.zig module and its signatures do
+//! not match the `zkvm_io` interface: build.zig binds `zkvm_io` to src/io/interface.zig (native)
+//! or src/zkvm/extern_io.zig (guest).
 
 const std = @import("std");
 

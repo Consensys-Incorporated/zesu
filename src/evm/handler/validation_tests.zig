@@ -1,5 +1,4 @@
-/// Tests for handler/validation.zig
-/// Imported from validation.zig via `test { _ = @import("validation_tests.zig"); }`.
+//! Tests for validation.zig.
 const std = @import("std");
 const primitives = @import("primitives");
 const context = @import("context");

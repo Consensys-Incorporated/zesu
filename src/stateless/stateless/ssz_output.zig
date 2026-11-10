@@ -1,15 +1,13 @@
-//! SSZ serialization for SszStatelessValidationResult (glamsterdam-devnet-8 / zkevm@v0.8.4).
+//! SSZ serialization for SszStatelessValidationResult (tests-zkevm@v21.0.6 layout).
 //!
 //! Output layout (43 bytes, all fields fixed-size):
 //!   [0..32]  new_payload_request_root  Bytes32  SSZ hash_tree_root of SszNewPayloadRequest
 //!   [32]     successful_validation     boolean  0x01 = valid
 //!   [33..41] chain_id                  uint64
-//!   [41..43] schema_id                 uint16   0x1501 (fork_index || revision)
+//!   [41..43] schema_id                 uint16   echoed from the input (e.g. 0x1501)
 //!
-//! zkevm@v0.8.0 replaced the SszChainConfig trailer with a flat chain_id + schema_id,
-//! and switched the payload containers to EIP-7495 `ProgressiveContainer` /
-//! EIP-7916 `ProgressiveList`. Serialization of those is byte-identical to the
-//! stable forms, but `hash_tree_root` is not — see `progressiveRoot`.
+//! The payload containers are EIP-7495 `ProgressiveContainer` / EIP-7916 `ProgressiveList`:
+//! serialized like the stable forms, but `hash_tree_root` differs — see `progressiveRoot`.
 
 const std = @import("std");
 const input = @import("input");
@@ -35,9 +33,7 @@ fn sha2Bytes(data: []const u8) [32]u8 {
 // ── Zero hash tree ────────────────────────────────────────────────────────────
 
 /// Precomputed SSZ zero hashes: z[k] = SHA256(z[k-1] || z[k-1]), z[0] = 0x00*32.
-/// Covers depths 0..25 (sufficient for all Amsterdam SSZ list limits).
-/// Computing these on-demand is O(k) SHA256 calls; a table lookup is O(1) and
-/// eliminates the O(D²) blowup in sparseRoot (which calls zeroHash at every depth).
+/// Covers depths 0..25. A table avoids recomputing them at every sparseRoot level.
 const ZERO_HASHES: [26][32]u8 = .{
     // z[0] = 0x00 * 32
     [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
@@ -112,8 +108,6 @@ fn mixInLength(root: [32]u8, length: u64) [32]u8 {
 /// Compute the Merkle root of `2^depth` virtual leaves where:
 ///   leaves[0..len] are the actual values
 ///   leaves[len..2^depth] are all zero chunks.
-///
-/// Uses precomputed zero subtree hashes for efficiency — O(len * depth) time.
 fn sparseRoot(leaves: []const [32]u8, depth: u8) [32]u8 {
     if (depth == 0) {
         return if (leaves.len >= 1) leaves[0] else [_]u8{0} ** 32;
@@ -130,13 +124,11 @@ fn sparseRoot(leaves: []const [32]u8, depth: u8) [32]u8 {
 fn merkleizeExact(chunks: []const [32]u8) [32]u8 {
     std.debug.assert(chunks.len > 0);
     var n = chunks.len;
-    // Must be power of 2 — caller is responsible
     while (n > 1) : (n /= 2) {}
     std.debug.assert(n == 1); // assert power of 2
 
     if (chunks.len == 1) return chunks[0];
-    // Use simple in-place reduction on a stack buffer for small sizes (≤ 32).
-    // Caller uses small fixed sizes (4, 8, 32) for container fields.
+    // In-place reduction on a stack buffer; callers pass at most 8 chunks.
     var buf: [32][32]u8 = undefined;
     @memcpy(buf[0..chunks.len], chunks);
     var len = chunks.len;
@@ -178,10 +170,7 @@ fn htProgressiveByteList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
     const nchunks = (data.len + 31) / 32;
     const chunks = try alloc.alloc([32]u8, nchunks);
     defer alloc.free(chunks);
-    // Chunks are contiguous, so this is one bulk copy plus padding for the tail
-    // — rather than zeroing all 32 bytes of every chunk and then overwriting
-    // them, which wrote the whole buffer twice and kept the copy too small to
-    // lower to a block move.
+    // Chunks are contiguous: one bulk copy plus tail padding, not a per-chunk zero-then-copy.
     const bytes = std.mem.sliceAsBytes(chunks);
     @memcpy(bytes[0..data.len], data);
     @memset(bytes[data.len..], 0);
@@ -470,18 +459,11 @@ pub fn newPayloadRequestRoot(
 /// Serialized size of SszStatelessValidationResult: 32 + 1 + 8 + 2.
 pub const OUTPUT_SIZE: usize = 43;
 
-/// EIP-8025: canonical "default failed" stateless output, emitted when the SSZ
-/// input cannot be decoded (reference stateless_guest `_default_failed_stateless_output`):
-/// root=0, successful_validation=false, chain_id=0, schema_id=0 — i.e. all zeroes.
-/// The guest must commit exactly these bytes for a rejected input to match the
-/// reference output.
+/// EIP-8025 "default failed" output, committed when the SSZ input cannot be decoded
+/// (reference stateless_guest `_default_failed_stateless_output`): all zeroes.
 pub const DEFAULT_FAILED_OUTPUT: [OUTPUT_SIZE]u8 = .{0} ** OUTPUT_SIZE;
 
-/// Serialize SszStatelessValidationResult (glamsterdam-devnet-8 / zkevm@v0.8.4):
-///   [0..32]  new_payload_request_root  Bytes32
-///   [32]     successful_validation     boolean (0x01 = valid, 0x00 = invalid)
-///   [33..41] chain_id                  uint64
-///   [41..43] schema_id                 uint16
+/// Serialize SszStatelessValidationResult (layout in the file header).
 pub fn serialize(
     alloc: std.mem.Allocator,
     chain_config: input.ChainConfig,

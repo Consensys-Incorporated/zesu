@@ -1,11 +1,6 @@
-/// Default precompile implementations — calls through the accelerators interface.
-///
-/// This file is the "precompile_implementations" module root for zesu native builds.
-/// It wraps src/crypto/accelerators.zig (which in turn calls src/crypto/default.zig
-/// using C libraries) in PrecompileFn-compatible wrappers that handle EVM ABI encoding.
-///
-/// For zkVM builds that need to override specific precompiles, override the
-/// `accelerators` module instead (src/crypto/accelerators.zig, import "accel_impl").
+//! PrecompileFn wrappers (EVM ABI decoding, gas, output encoding) for the curve,
+//! pairing and KZG precompiles. The crypto itself goes through the `accelerators`
+//! interface; its backend is chosen with -Dcrypto-backend=default|extern.
 const std = @import("std");
 const T = @import("precompile_types");
 const accel = @import("accelerators");
@@ -305,8 +300,7 @@ fn kzgPointEvalRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
         return .{ .err = T.PrecompileError.BlobVerifyKzgProofFailed };
     if (!verified) return .{ .err = T.PrecompileError.BlobVerifyKzgProofFailed };
 
-    // Heap-allocated like every other non-empty output, so the caller can free
-    // unconditionally. 64 bytes once per call.
+    // Dupe the static: non-empty outputs are always caller-freed (see PrecompileOutput).
     const heap_out = alloc_mod.get().dupe(u8, &KZG_RETURN_VALUE) catch
         return .{ .err = T.PrecompileError.OutOfGas };
     return .{ .success = T.PrecompileOutput.new(GAS, heap_out) };

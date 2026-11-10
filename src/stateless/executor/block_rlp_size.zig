@@ -112,10 +112,9 @@ fn withdrawalsSize(withdrawals: []const input.Withdrawal) usize {
 
 /// Size in bytes of the RLP encoding of the block described by `ep`.
 ///
-/// Returns null when the payload carries no raw transaction bytes while holding
-/// transactions — the JSON and RLP decode paths leave `raw_transactions` empty, and a
-/// size computed without them would be wrong. Those callers set `Env.block_rlp_size`
-/// from the real encoding instead.
+/// Returns null when `raw_transactions` does not cover `transactions` (a payload not
+/// built by the SSZ decoder): the size would be wrong. Callers holding the block RLP
+/// (e.g. tools/hive) set `Env.block_rlp_size` from it directly.
 pub fn compute(ep: *const input.ExecutionPayload, spec: primitives.SpecId) ?u64 {
     if (ep.raw_transactions.len != ep.transactions.len) return null;
 

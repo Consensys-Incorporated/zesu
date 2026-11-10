@@ -4,28 +4,27 @@ const alloc_mod = @import("zesu_allocator");
 const gas_costs = @import("gas_costs.zig");
 const Gas = @import("gas.zig").Gas;
 
-/// EVM memory implementation using a shared buffer
+/// EVM memory for one interpreter. The opcode path grows it only through
+/// `expandWithGas` (word-aligned, zero-filled); the buffer's capacity is kept across
+/// frames by `Interpreter.clearReusingMemory`.
 pub const Memory = struct {
-    /// The underlying buffer
     buffer: std.ArrayList(u8),
-    /// Memory checkpoints for each depth
+    /// Vestigial: always 0 (no shared-buffer checkpoints).
     checkpoint: usize,
-    /// Child checkpoint that we need to free context to
+    /// Vestigial: always null.
     child_checkpoint: ?usize,
-    /// Memory limit
+    /// Enforced only by the non-gas helpers (`set`, `copy`, ...), not by `expandWithGas`.
     memory_limit: u64,
 
-    /// Create a new memory instance
     pub fn new() Memory {
         return Memory{
             .buffer = std.ArrayList(u8){ .items = &[_]u8{}, .capacity = 0 },
             .checkpoint = 0,
             .child_checkpoint = null,
-            .memory_limit = (1 << 32) - 1, // Default memory limit
+            .memory_limit = (1 << 32) - 1,
         };
     }
 
-    /// Create a new memory instance with a shared buffer
     pub fn newWithBuffer(buffer: std.ArrayList(u8)) Memory {
         return Memory{
             .buffer = buffer,
@@ -35,17 +34,15 @@ pub const Memory = struct {
         };
     }
 
-    /// Deinitialize the memory
     pub fn deinit(self: *Memory) void {
         self.buffer.deinit(alloc_mod.get());
     }
 
-    /// Get the current memory size
+    /// Size in bytes (always a multiple of 32 on the opcode path).
     pub fn size(self: Memory) usize {
         return self.buffer.items.len;
     }
 
-    /// Get the current memory size in words
     pub fn sizeInWords(self: Memory) usize {
         return (self.buffer.items.len + 31) / 32;
     }
@@ -54,17 +51,14 @@ pub const Memory = struct {
     pub fn set(self: *Memory, offset: usize, data: []const u8) !void {
         const end_offset = offset + data.len;
 
-        // Check memory limit
         if (end_offset > self.memory_limit) {
             return error.MemoryLimitExceeded;
         }
 
-        // Expand memory if necessary
         if (end_offset > self.buffer.items.len) {
             try self.buffer.resize(alloc_mod.get(), end_offset);
         }
 
-        // Copy data
         @memcpy(self.buffer.items[offset..end_offset], data);
     }
 
@@ -72,17 +66,14 @@ pub const Memory = struct {
     pub fn setData(self: *Memory, memory_offset: usize, data_offset: usize, len: usize, data: []const u8) !void {
         const end_offset = memory_offset + len;
 
-        // Check memory limit
         if (end_offset > self.memory_limit) {
             return error.MemoryLimitExceeded;
         }
 
-        // Expand memory if necessary
         if (end_offset > self.buffer.items.len) {
             try self.buffer.resize(alloc_mod.get(), end_offset);
         }
 
-        // Copy data
         @memcpy(self.buffer.items[memory_offset..end_offset], data[data_offset .. data_offset + len]);
     }
 
@@ -91,17 +82,14 @@ pub const Memory = struct {
         const end_dest = destination + len;
         const end_src = source + len;
 
-        // Check memory limit
         if (end_dest > self.memory_limit or end_src > self.memory_limit) {
             return error.MemoryLimitExceeded;
         }
 
-        // Expand memory if necessary
         if (end_dest > self.buffer.items.len) {
             try self.buffer.resize(end_dest);
         }
 
-        // Copy data
         @memcpy(self.buffer.items[destination..end_dest], self.buffer.items[source..end_src]);
     }
 
@@ -131,12 +119,10 @@ pub const Memory = struct {
         _ = data_end;
         const end_offset = memory_offset + len;
 
-        // Check memory limit
         if (end_offset > self.memory_limit) {
             return error.MemoryLimitExceeded;
         }
 
-        // Expand memory if necessary
         if (end_offset > self.buffer.items.len) {
             try self.buffer.resize(alloc_mod.get(), end_offset);
         }
@@ -280,9 +266,7 @@ pub const Memory = struct {
         try self.set(offset, &[_]u8{byte});
     }
 
-    /// Calculate memory expansion cost. Single source of truth for the
-    /// `3*words + words^2/512` formula lives in gas_costs.memoryExpansionCost;
-    /// this just converts the byte sizes involved to word counts.
+    /// Expansion gas to grow to `new_size` bytes (formula in gas_costs.memoryExpansionCost).
     pub fn expansionCost(self: Memory, new_size: usize) u64 {
         if (new_size <= self.buffer.items.len) {
             return 0;
@@ -293,22 +277,17 @@ pub const Memory = struct {
         );
     }
 
-    /// Grow memory to at least `new_size` bytes, charging the expansion cost against
-    /// `gas`. Returns false if `gas` can't cover the cost, if rounding `new_size` up to
-    /// a 32-byte boundary would overflow, or if the resize fails. Note gas charged via
-    /// `spend` is not refunded on a later failure — this is consistent with EVM
-    /// out-of-gas semantics (a frame that fails to expand memory halts and forfeits its
-    /// remaining gas regardless).
-    /// New bytes are zero-initialized per EVM memory semantics.
+    /// Grow memory to at least `new_size` bytes (rounded up to a word, zero-filled),
+    /// charging the expansion cost against `gas`. Returns false if gas runs out, the
+    /// rounding overflows, or the resize fails; gas already spent is not returned, which
+    /// is moot since the caller halts with all gas consumed.
     pub fn expandWithGas(self: *Memory, gas: *Gas, new_size: usize) bool {
         if (new_size == 0 or new_size <= self.buffer.items.len) return true;
 
         const cost = self.expansionCost(new_size);
         if (!gas.spend(cost)) return false;
 
-        // Checked: toWordSize used in expansionCost saturates rather than overflow-panics
-        // on huge new_size, so the round-trip back to an aligned byte size must be
-        // checked separately — words*32 can still exceed usize
+        // expansionCost saturates on a huge new_size; words * 32 can still overflow here.
         const new_words = std.math.divCeil(usize, new_size, 32) catch return false;
         const aligned_size = std.math.mul(usize, new_words, 32) catch return false;
         const old_size = self.buffer.items.len;
@@ -326,19 +305,17 @@ pub const Memory = struct {
         try self.buffer.resize(new_size);
     }
 
-    /// Clear memory
+    /// Empty the memory, keeping the buffer's capacity.
     pub fn clear(self: *Memory) void {
         self.buffer.clearRetainingCapacity();
         self.checkpoint = 0;
         self.child_checkpoint = null;
     }
 
-    /// Set memory limit
     pub fn setMemoryLimit(self: *Memory, limit: u64) void {
         self.memory_limit = limit;
     }
 
-    /// Get memory limit
     pub fn getMemoryLimit(self: Memory) u64 {
         return self.memory_limit;
     }

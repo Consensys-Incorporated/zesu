@@ -54,7 +54,7 @@ pub const MainBuilder = struct {
         owned.instructions = main.Instructions.new(spec);
         owned.precompiles = main.Precompiles.new(spec);
         owned.evm = main.Evm.init(self, null, &owned.instructions, &owned.precompiles);
-        // EIP-2929: precompiles are always warm — set once per block at construction.
+        // EIP-2929: precompiles are always warm.
         self.journaled_state.inner.warm_addresses.setPrecompileBitset(owned.precompiles.precompiles.precompile_bitset);
         return owned;
     }
@@ -67,7 +67,7 @@ pub const MainBuilder = struct {
         owned.instructions = main.Instructions.new(spec);
         owned.precompiles = main.Precompiles.new(spec);
         owned.evm = main.Evm.init(self, inspector, &owned.instructions, &owned.precompiles);
-        // EIP-2929: precompiles are always warm — set once per block at construction.
+        // EIP-2929: precompiles are always warm.
         self.journaled_state.inner.warm_addresses.setPrecompileBitset(owned.precompiles.precompiles.precompile_bitset);
         return owned;
     }
@@ -106,11 +106,13 @@ pub const MainnetHandler = struct {
         try validation.Validation.validateAgainstStateAndDeductCaller(evm, initial_gas.initial_gas);
     }
 
-    /// Pre-execution phase — warm addresses and mark access-list items.
+    /// Pre-execution phase — warm coinbase and the access list, then apply EIP-7702
+    /// authorizations.
     ///
     /// Must run after validate() so the caller is already loaded and nonce bumped.
-    /// Populates `initial_gas.auth_refund` with 12,500 (PER_EMPTY_ACCOUNT_COST/2) per valid
-    /// EIP-7702 authorization where the authority account is non-empty (existing); 0 for new accounts.
+    /// Records authorization gas in `initial_gas`: pre-Amsterdam, `auth_refund` gets 12,500
+    /// (PER_EMPTY_ACCOUNT_COST/2) per valid authorization whose authority already exists;
+    /// Amsterdam+, the set_delegation charges (`auth_*_charge`, `auth_oog`, `auth_checkpoint`).
     pub fn preExecution(evm: anytype, initial_gas: *validation.InitialAndFloorGas) !void {
         const ctx = evm.getContext();
         const tx = &ctx.tx;
@@ -122,12 +124,8 @@ pub const MainnetHandler = struct {
             js.warmCoinbaseAccount(ctx.block.beneficiary);
         }
 
-        // EIP-2929: Pre-warm all access-list addresses and their storage slots.
-        // Use warmAccessList to mark addresses/slots warm in the access list WITHOUT eagerly
-        // loading them from the database.  Gas accounting uses isCold()/isStorageCold() which
-        // check warm_addresses.access_list — independent of whether the account was DB-loaded.
-        // This ensures pre-warmed-but-never-touched accounts are not tracked as accessed state,
-        // which is required for correct EIP-7928 Block Access List construction.
+        // EIP-2929: warm access-list addresses and slots WITHOUT loading them, so entries the
+        // tx never touches stay out of the EIP-7928 Block Access List.
         if (tx.access_list.items) |items| {
             const allocator = alloc_mod.get();
             var map = std.HashMap(
@@ -461,7 +459,7 @@ pub const MainnetHandler = struct {
                 // later execution failure.
                 var auth_spill: u64 = 0;
                 if (primitives.isEnabledIn(spec, .amsterdam)) {
-                    // applyAuthList already decided whether set_delegation OOGs (auth_oog) and,
+                    // preExecution already decided whether set_delegation OOGs (auth_oog) and,
                     // if not, accumulated charges that fit within the top-frame gas.
                     if (initial.auth_oog) {
                         if (initial.auth_checkpoint) |cp| ctx.journaled_state.checkpointRevert(cp);
@@ -658,24 +656,17 @@ pub const MainnetHandler = struct {
                     spec,
                     call_regular,
                 );
-                // EIP-8037: initialize root frame reservoir. The EIP-7702 set_delegation charges
-                // were already deducted from call_regular/call_reservoir before dispatch, so the
-                // reservoir baseline here already excludes them (a later execution failure will
-                // not credit them back — the delegations and their cost are permanent).
+                // EIP-8037: the reservoir baseline already excludes the set_delegation charges,
+                // which a later execution failure does not credit back.
                 root_interp.gas.reservoir = call_reservoir;
-                // EIP-2780/8037 (Amsterdam+): charge the top-frame NEW_ACCOUNT state gas
-                // before execution. spendStateGas draws from the reservoir, spilling into
-                // gas; the standard non-success refund path (below) returns it if the frame
-                // fails and the recipient was never created.
-                // EIP-2780 devnet-7 (Amsterdam+): a prepare_dispatch OOG (recipient NEW_ACCOUNT or
-                // delegation access charge) rolls back the WHOLE preparation, including the applied
-                // EIP-7702 delegations (reference interpreter.py). Revert to the pre-set_delegation
-                // checkpoint when there were authorizations, else the top-level call checkpoint
-                // (undoing the value transfer). All gas is burned.
-                const dispatch_oog_checkpoint = initial.auth_checkpoint orelse call_checkpoint;
-                // The rollback also reverts the applied delegations, so every state charge
-                // refills and the reservoir returns whole (reference process_top_level
+                // EIP-2780/8037 (Amsterdam+): charge the top-frame NEW_ACCOUNT state gas before
+                // execution (reservoir first, spilling into regular gas); the non-success path
+                // below returns it if the recipient was never created.
+                // A prepare_dispatch OOG (NEW_ACCOUNT or delegation access) rolls back the whole
+                // preparation, delegations included (to the pre-set_delegation checkpoint, else
+                // the call checkpoint), burns all gas, and returns the reservoir whole (reference
                 // restore_state_gas_to_entry).
+                const dispatch_oog_checkpoint = initial.auth_checkpoint orelse call_checkpoint;
                 if (top_new_account_state_gas > 0) {
                     if (!root_interp.gas.spendStateGas(top_new_account_state_gas)) {
                         ctx.journaled_state.checkpointRevert(dispatch_oog_checkpoint);
@@ -794,20 +785,17 @@ pub const MainnetHandler = struct {
             }
         }
 
-        // 3. Effective gas price (EIP-1559 aware)
+        // Effective gas price (EIP-1559)
         const basefee: u128 = @as(u128, block.basefee);
         const effective_gas_price: u128 = if (tx.gas_priority_fee) |tip|
             @min(tx.gas_price, basefee + tip)
         else
             tx.gas_price;
 
-        // 4. Reimburse caller and pay beneficiary — skipped if fee charging is disabled
-        //    (e.g. eth_call simulation where no fee was deducted upfront).
+        // Reimburse caller and pay beneficiary — skipped when fee charging is disabled
+        // (system calls), matching the skipped upfront deduction.
         const gas_returned: u64 = tx.gas_limit - final_cost;
         if (!ctx.cfg.disable_fee_charge) {
-            // Reimburse caller: gas_returned = gas_limit - final_cost (always >= 0).
-            //    Normal case (no floor): gas_returned = gas_remaining + capped_refund.
-            //    Floor case: gas_returned = gas_limit - floor_total.
             const reimburse_amount: primitives.U256 = @as(primitives.U256, effective_gas_price) * @as(primitives.U256, gas_returned);
             try js.balanceIncr(tx.caller, reimburse_amount);
 
@@ -817,7 +805,7 @@ pub const MainnetHandler = struct {
             try js.balanceIncr(block.beneficiary, beneficiary_amount);
         }
 
-        // 6. Extract logs before commitTx destroys them (only on success — reverted state has no logs).
+        // Take logs before commitTx destroys them (reverted txs have none).
         if (result.result.status == .Success) {
             // EIP-7708 (Amsterdam+): emit deferred burn logs (sorted by address) after coinbase payment.
             if (is_amsterdam) {
@@ -826,11 +814,9 @@ pub const MainnetHandler = struct {
             result.result.logs = js.takeLogs();
         }
 
-        // 7. Commit transaction state.
-        // commitTx() records committed-changed storage and flushes per-tx BAL tracking internally.
+        // commitTx() also records committed storage changes and flushes per-tx BAL tracking.
         js.commitTx();
 
-        // 8. Update ExecutionResult with final accounting.
         // EIP-7778 + EIP-8037 (Amsterdam+, reference settle_transaction_gas): the block counts two
         // lanes, both pre-refund. The state lane is the net state gas the top frame consumed —
         // reservoir drawn down plus the spill still owed (reference tx_state_gas_used) — which
@@ -1126,9 +1112,8 @@ fn executeIterative(
     }
 }
 
-/// Execute EVM — run a full transaction through validate → pre-exec → exec → post-exec.
-/// Accepts `*main.Evm` so it works with both heap-allocated `*MainnetEvm` (pass `&mevm.evm`)
-/// and stack-allocated test patterns (pass `&evm` directly).
+/// Runs a full transaction through validate → pre-exec → exec → post-exec. `evm` is a
+/// pointer to any `EvmFor(DB)` (for a `*MainnetEvm`, pass `&mevm.evm`).
 pub const ExecuteEvm = struct {
     pub fn execute(evm: anytype) !main.ExecutionResult {
         var initial_gas = validation.InitialAndFloorGas{ .initial_gas = 0, .floor_gas = 0 };
@@ -1139,7 +1124,7 @@ pub const ExecuteEvm = struct {
             return main.ExecutionResult.new(.Fail, 0);
         };
 
-        // Pre-execution (warm access lists)
+        // Pre-execution (warming, EIP-7702 authorizations)
         MainnetHandler.preExecution(evm, &initial_gas) catch |err| {
             MainnetHandler.catchError(evm, err);
             return main.ExecutionResult.new(.Fail, 0);
@@ -1161,8 +1146,7 @@ pub const ExecuteEvm = struct {
     }
 };
 
-/// Execute commit EVM — execute then commit state to the underlying database.
-/// Note: commitTx() is called inside postExecution; no second commit needed here.
+/// Alias of ExecuteEvm.execute: postExecution already commits the transaction.
 pub const ExecuteCommitEvm = struct {
     pub fn executeAndCommit(evm: anytype) !main.ExecutionResult {
         return ExecuteEvm.execute(evm);
@@ -1210,9 +1194,7 @@ pub const testing = struct {
         const evm = MainBuilder.buildMainnet(&ctx);
         defer evm.destroy();
 
-        // Test handler in isolation — validate/preExecution are NOOPs when
-        // called directly without a properly-populated context, so just test
-        // the struct construction.
+        // Only checks construction.
         const handler = MainnetHandler{};
         _ = handler;
 

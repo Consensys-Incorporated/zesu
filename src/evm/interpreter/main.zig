@@ -53,9 +53,8 @@ test {
     _ = @import("opcodes/host_ops_tests.zig");
     _ = @import("opcodes/environment_tests.zig");
     _ = @import("host_tests.zig");
-    // The remaining opcode suites were unreachable from any test graph: each is imported
-    // only by its sibling source file, and nothing imported those siblings, so
-    // `zig build test` silently skipped all of them.
+    // Each *_tests.zig is otherwise imported only by its sibling opcode file, which no
+    // test root reaches, so suites not listed here are silently skipped.
     _ = @import("opcodes/bitwise_tests.zig");
     _ = @import("opcodes/comparison_tests.zig");
     _ = @import("opcodes/control_tests.zig");
@@ -66,7 +65,7 @@ test {
     _ = @import("dispatch_pc_tests.zig");
 }
 
-/// Main interpreter module for EVM bytecode execution
+/// Debug-print smoke checks (not run by `zig build test`).
 pub const testing = struct {
     pub fn testGas() !void {
         var gas = Gas.new(1000000);

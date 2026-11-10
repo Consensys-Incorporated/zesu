@@ -117,8 +117,8 @@ pub const CreateResult = struct {
 
 // ─── Journal vtable ─────────────────────────────────────────────────────────
 
-/// Type-erased vtable for Journal operations.
-/// 14 simple entries (operate on *anyopaque journal) + 4 complex entries (operate on *Host).
+/// Type-erased vtable for Journal operations: simple entries take the *anyopaque
+/// journal, complex entries take *Host.
 pub const JournalVTable = struct {
     // Simple entries — operate on the type-erased journal pointer directly.
     isAddressCold: *const fn (*anyopaque, primitives.Address) bool,
@@ -601,7 +601,7 @@ pub const Host = struct {
     // -----------------------------------------------------------------------
     // TEST PATH — synchronous helpers used by unit tests only.
     // Production execution goes through executeIterative in mainnet_builder.zig,
-    // which builds the instruction table once before the frame loop.
+    // which uses the comptime per-fork table (protocol_schedule.instructionTable).
     // These helpers rebuild the table per call; do not use on hot paths.
     // -----------------------------------------------------------------------
 

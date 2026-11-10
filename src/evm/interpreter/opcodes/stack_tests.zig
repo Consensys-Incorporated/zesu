@@ -216,15 +216,12 @@ test "SWAP1: stack underflow (need 2, have 1)" {
 test "DUPN: valid imm=128 (n=17) duplicates item at depth 17" {
     var interp = Interpreter.defaultExt();
     defer interp.deinit();
-    // Push 18 items; item at depth 17 (0-indexed from top) has value 99.
+    // Scratch pushes, discarded below.
     var i: usize = 0;
     while (i < 17) : (i += 1) interp.stack.pushUnsafe(@as(U, i));
-    interp.stack.pushUnsafe(@as(U, 99)); // depth 17 from the new top after this push: actually push bottom first
-    // Let's be precise: push 17 filler items then the target at the bottom.
-    // Rebuild: depth n=17 means the 17th item from the top (1-indexed).
-    // After dupUnsafe(17) the top becomes a copy of item[top-17+1] in dupUnsafe convention.
-    // Easier: push target first, then 16 fillers, then call DUPN imm=128.
-    interp.stack.length = 0; // clear; Stack is heap-backed now, so it cannot be re-initialised
+    interp.stack.pushUnsafe(@as(U, 99));
+    // Target first, then 16 fillers, so DUPN imm=128 (n=17) must copy the target.
+    interp.stack.length = 0; // clear: the heap-backed Stack is not re-initialised
     interp.stack.pushUnsafe(@as(U, 0xBEEF)); // will be at depth 17 after 16 more pushes
     var j: usize = 0;
     while (j < 16) : (j += 1) interp.stack.pushUnsafe(@as(U, j + 1));
@@ -259,7 +256,7 @@ test "DUPN: invalid imm=110 halts with invalid_opcode (maps to n=255, old code l
     defer interp.deinit();
     var i: usize = 0;
     while (i < 1024) : (i += 1) interp.stack.pushUnsafe(@as(U, i));
-    const code = [_]u8{ 0xE6, 110 }; // DUPN imm=110 → n=255, old n<=16 check missed this
+    const code = [_]u8{ 0xE6, 110 }; // DUPN imm=110 → n=255
     interp.bytecode = ExtBytecode.newOwned(bytecode_mod.Bytecode.newLegacy(&code));
     interp.bytecode.pc = 1;
     var ctx = InstructionContext{ .interpreter = &interp };
@@ -317,7 +314,7 @@ test "SWAPN: valid imm=128 (n=17) swaps top with item at depth 17" {
     var interp = Interpreter.defaultExt();
     defer interp.deinit();
     // Push target at bottom, then 17 fillers so target is at depth 17 from new top.
-    interp.stack.pushUnsafe(@as(U, 0xDEAD)); // depth 18 after 17 more pushes
+    interp.stack.pushUnsafe(@as(U, 0xDEAD)); // depth 17 (0-indexed) after 17 more pushes
     var i: usize = 0;
     while (i < 17) : (i += 1) interp.stack.pushUnsafe(@as(U, i + 1));
     // Stack: [0xDEAD, 1, 2, ..., 17] (17 is top, 0xDEAD at depth 17, index 0)
@@ -338,7 +335,7 @@ test "SWAPN: invalid imm=91 halts with invalid_opcode (was completely unchecked)
     defer interp.deinit();
     var i: usize = 0;
     while (i < 1024) : (i += 1) interp.stack.pushUnsafe(@as(U, i));
-    const code = [_]u8{ 0xE7, 91 }; // SWAPN imm=91: no check existed before fix
+    const code = [_]u8{ 0xE7, 91 }; // SWAPN imm=91 (first invalid)
     interp.bytecode = ExtBytecode.newOwned(bytecode_mod.Bytecode.newLegacy(&code));
     interp.bytecode.pc = 1;
     var ctx = InstructionContext{ .interpreter = &interp };
@@ -351,7 +348,7 @@ test "SWAPN: invalid imm=110 halts with invalid_opcode (maps to n=255, was unche
     defer interp.deinit();
     var i: usize = 0;
     while (i < 1024) : (i += 1) interp.stack.pushUnsafe(@as(U, i));
-    const code = [_]u8{ 0xE7, 110 }; // imm=110 → n=255, stack has 1024 items → old code swapped!
+    const code = [_]u8{ 0xE7, 110 }; // imm=110 → n=255; deep enough to swap if unchecked
     interp.bytecode = ExtBytecode.newOwned(bytecode_mod.Bytecode.newLegacy(&code));
     interp.bytecode.pc = 1;
     var ctx = InstructionContext{ .interpreter = &interp };
@@ -408,10 +405,7 @@ test "SWAPN: stack underflow" {
 test "EXCHANGE: valid imm=0 swaps depths 1 and 2" {
     var interp = Interpreter.defaultExt();
     defer interp.deinit();
-    // imm=0: k=0^143=143, q=8, r=15; q<r → n=q+1=9, m=r+1=16
-    // Actually let's use a simpler imm. imm=0xBE=190: k=190^143=49, q=3, r=1; q>=r → n=r+1=2, m=29-q=26
-    // Use imm=128+1=129: k=129^143=14, q=0, r=14; q<r → n=1, m=15
-    // Let's use imm=129: n=1, m=15 → need 16 items.
+    // imm=129: k=129^143=14, q=0, r=14; q<r → n=1, m=15 → needs 16 items.
     interp.stack.pushUnsafe(@as(U, 0xAAAA)); // depth 15 from top
     var i: usize = 0;
     while (i < 14) : (i += 1) interp.stack.pushUnsafe(@as(U, i + 1));

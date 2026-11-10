@@ -14,15 +14,16 @@
 ///   --output.basedir DIR  Base directory for output files
 ///   --output.alloc FILE   Post-state allocation (default: alloc.json)
 ///   --output.result FILE  Execution result (default: result.json)
-///   --output.body FILE    RLP-encoded transactions (optional, stub)
+///   --output.body FILE    RLP-encoded transactions (stub: always writes "0xc0")
 ///
 /// Execution flags:
 ///   --state.fork FORK     Fork name (default: Cancun)
 ///   --state.chainid N     Chain ID (default: 1)
 ///   --state.reward N      Mining reward in wei, -1 to disable (default: -1)
 ///
-/// Special file values: "stdout" or "stderr" write to those streams.
-/// When multiple outputs go to stdout, they are combined as {"alloc":..., "result":...}.
+/// Output path "stdout" writes to stdout; "" suppresses the output. When both alloc and
+/// result go to stdout they are combined as {"alloc":..., "result":...}. Input path
+/// "stdin" reads from stdin.
 const std = @import("std");
 
 const input_mod = @import("input.zig");
@@ -33,7 +34,6 @@ const output_mod = @import("output.zig");
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    // Arena for all parsing and transition work
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -58,7 +58,6 @@ pub fn main(init: std.process.Init) !void {
     while (i < args.len) : (i += 1) {
         const arg = args[i];
 
-        // Handle --flag=value and --flag value forms
         const val = getFlag(arg, args, &i);
 
         if (matchFlag(arg, "--input.alloc")) {
@@ -144,12 +143,10 @@ pub fn main(init: std.process.Init) !void {
     const alloc_out = resolveOutputPath(arena, output_basedir, output_alloc_path) catch output_alloc_path;
     const result_out = resolveOutputPath(arena, output_basedir, output_result_path) catch output_result_path;
 
-    // Determine if any outputs go to stdout (combined mode)
     const alloc_stdout = std.mem.eql(u8, alloc_out, "stdout");
     const result_stdout = std.mem.eql(u8, result_out, "stdout");
 
     if (alloc_stdout and result_stdout) {
-        // Combined stdout mode — buffer everything then write at once
         var out = std.ArrayListUnmanaged(u8).empty;
         const w: output_mod.ListWriter = .{ .list = &out, .alloc = arena };
         try w.writeAll("{\"alloc\": ");
@@ -159,7 +156,6 @@ pub fn main(init: std.process.Init) !void {
         try w.writeAll("}\n");
         try std.Io.File.stdout().writeStreamingAll(init.io, out.items);
     } else {
-        // Write alloc
         if (alloc_stdout) {
             var out = std.ArrayListUnmanaged(u8).empty;
             const w: output_mod.ListWriter = .{ .list = &out, .alloc = arena };
@@ -172,7 +168,6 @@ pub fn main(init: std.process.Init) !void {
             };
         }
 
-        // Write result
         if (result_stdout) {
             var out = std.ArrayListUnmanaged(u8).empty;
             const w: output_mod.ListWriter = .{ .list = &out, .alloc = arena };
@@ -186,7 +181,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // output.body: stub — write empty RLP list
+    // output.body stub: always the empty RLP list.
     if (output_body_path) |body_path| {
         const body_out = resolveOutputPath(arena, output_basedir, body_path) catch body_path;
         if (!std.mem.eql(u8, body_out, "stdout") and !std.mem.eql(u8, body_out, "")) {
@@ -194,7 +189,6 @@ pub fn main(init: std.process.Init) !void {
                 const f = std.Io.Dir.cwd().createFile(init.io, body_out, .{}) catch null;
                 if (f) |file| {
                     defer file.close(init.io);
-                    // Empty RLP list: 0xc0
                     file.writeStreamingAll(init.io, "\"0xc0\"\n") catch {};
                 }
             }
@@ -238,7 +232,6 @@ fn resolveOutputPath(
     basedir: ?[]const u8,
     path: []const u8,
 ) ![]const u8 {
-    // Special values pass through
     if (std.mem.eql(u8, path, "stdout") or
         std.mem.eql(u8, path, "stderr") or
         std.mem.eql(u8, path, "")) return path;
@@ -267,19 +260,17 @@ fn matchFlag(arg: []const u8, flag: []const u8) bool {
 }
 
 fn getFlag(arg: []const u8, args: []const [:0]const u8, i: *usize) ?[]const u8 {
-    // --flag=value form
     if (std.mem.indexOf(u8, arg, "=")) |eq| {
         if (eq < arg.len - 1) return arg[eq + 1 ..];
     }
-    // --flag value form (consume next arg)
     if (i.* + 1 < args.len) {
         const next = args[i.* + 1];
         if (next.len == 0 or next[0] != '-') {
             i.* += 1;
             return next;
         }
-        // Next arg starts with '-' but might still be a value (e.g. --state.reward -1)
-        // Accept only if it looks like a negative number: '-' followed by a digit
+        // A leading '-' is still a value if it looks like a negative number
+        // (e.g. --state.reward -1).
         if (next.len > 2 and next[1] == '-' and std.ascii.isDigit(next[2])) {
             i.* += 1;
             return next;

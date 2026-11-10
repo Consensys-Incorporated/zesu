@@ -1,5 +1,5 @@
-//! Integration tests: a database error surfaced during block execution must mark
-//! the block invalid rather than complete as if a failure were legitimate.
+//! Block-level transition tests: a witness that cannot serve a read must mark the
+//! block invalid, plus per-chain system-contract and deposit-contract addresses.
 
 const std = @import("std");
 const primitives = @import("primitives");

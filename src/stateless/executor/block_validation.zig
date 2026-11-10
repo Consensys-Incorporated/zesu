@@ -15,8 +15,8 @@ const BLOB_BASE_COST: u64 = 8_192;
 // EIP-7934 max RLP-encoded block size (8 MiB)
 const MAX_RLP_BLOCK_SIZE: u64 = 8_388_608;
 
-/// Validates block-level invariants before execution.
-/// Returns an error if the block header is invalid.
+/// Pre-execution header checks. Parent-dependent checks are skipped when the
+/// corresponding `parent_*` field of `env` is null.
 pub fn validateBlock(env: types.Env, spec: primitives.SpecId) !void {
     // GASLIMIT_TOO_BIG: gas limit must fit in a signed 64-bit integer
     if (env.gas_limit > MAX_GAS_LIMIT) return error.GasLimitTooBig;
@@ -133,8 +133,7 @@ pub const BalHashes = struct {
     expected: [32]u8,
 };
 
-/// Post-execution block validation.
-/// Called after transition() with the actual gas totals.
+/// Post-execution block validation against the header's declared values.
 ///   total_gas_used — cumulative gas from all transactions (result.cumulative_gas)
 ///   blob_gas_used  — total blob gas from type-3 transactions (result.blob_gas_used)
 ///   bal            — computed/declared BAL hashes (Amsterdam+), or null to skip
@@ -239,7 +238,7 @@ fn defaultBlobUpdateFraction(spec: primitives.SpecId) u64 {
 }
 
 /// fake_exponential(factor=1, numerator=excess_blob_gas, denominator=update_fraction)
-/// Mirrors the EIP-4844 blob gas price formula in zevm/src/context/block.zig.
+/// Mirrors the EIP-4844 blob gas price formula in src/evm/context/block.zig.
 fn fakeBlobGasPrice(excess_blob_gas: u64, update_fraction: u64) u128 {
     if (update_fraction == 0) return std.math.maxInt(u128);
     const numerator: u128 = excess_blob_gas;

@@ -1,5 +1,4 @@
-/// Tests for the post-execution pipeline (gas refund capping, floor gas, reimbursement).
-/// Imported from mainnet_builder.zig via `test { _ = @import("postexecution_tests.zig"); }`.
+//! Tests for the post-execution pipeline (gas refund capping, floor gas, reimbursement).
 const std = @import("std");
 const primitives = @import("primitives");
 const context = @import("context");
@@ -106,7 +105,7 @@ test "postExecution: caller reimbursed for unused gas, coinbase receives tip" {
     try std.testing.expectEqual(handler_main.ExecutionStatus.Success, result.status);
 
     // Intrinsic gas = 21000, STOP costs 0 → gas_used = 21000, gas_returned = 79_000
-    // EIP-1559 fix: deduction and reimbursement both at effective_gas_price = min(10,1+2) = 3*gwei.
+    // Deduction and reimbursement both use effective_gas_price = min(10, 1+2) = 3 gwei.
     // Net cost = gas_used * effective_gas_price = 21000 * 3*gwei = 63_000 gwei.
     const effective_price = 3 * gwei;
     const gas_returned: u64 = 79_000;
@@ -146,7 +145,7 @@ test "postExecution: EIP-7623 floor gas enforced on Prague" {
     const gas_spent: u64 = 3_000; // < floor
     const raw_refund: u64 = 1_000;
 
-    // Simulate the calculation from postExecution directly
+    // Re-implements postExecution's arithmetic; does not call it.
     const is_london = true;
     const quotient: u64 = if (is_london) 5 else 2;
     var capped_refund = @min(raw_refund, gas_spent / quotient);

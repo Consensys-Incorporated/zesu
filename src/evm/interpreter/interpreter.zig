@@ -23,24 +23,15 @@ const host_mod = @import("host.zig");
 
 /// Input data for current execution context
 pub const InputsImpl = struct {
-    /// Caller address
     caller: primitives.Address,
-    /// Target address
     target: primitives.Address,
-    /// Value
     value: primitives.U256,
-    /// Data
     data: primitives.Bytes,
-    /// Gas limit
     gas_limit: u64,
-    /// Call scheme
     scheme: CallScheme,
-    /// Is static call
     is_static: bool,
-    /// Depth
     depth: usize,
 
-    /// Create new inputs
     pub fn new(
         caller: primitives.Address,
         target: primitives.Address,
@@ -63,7 +54,6 @@ pub const InputsImpl = struct {
         };
     }
 
-    /// Create default inputs
     pub fn default() InputsImpl {
         return InputsImpl{
             .caller = [_]u8{0} ** 20,
@@ -524,41 +514,32 @@ pub const Interpreter = struct {
 // Labeled-switch computed-goto dispatch (Tier 1 hot path)
 // ---------------------------------------------------------------------------
 //
-// Hot opcodes are inlined directly in switch cases — no per-opcode function
+// Hot opcodes are inlined directly in switch arms — no per-opcode function
 // call or InstructionContext construction. `continue :sw` compiles to a
-// computed goto (single indirect branch). ctx is built once per runWithHost
-// call and lives in registers across iterations.
+// computed goto (single indirect branch). ctx is built once per run/runWithHost
+// call.
 //
-// comptime check_pending=false (run):         pending check is folded away.
-// comptime check_pending=true  (runWithHost): checks after every op.
+// comptime check_pending=false (run): the pending check is folded away.
+// comptime check_pending=true (runWithHost): checked after each cold-path op,
+// the only path that can suspend the frame.
 //
-// Cold opcodes fall to `else` which calls through InstructionTable as before.
+// Cold opcodes go through the InstructionTable (`coldReg`).
 //
-// INVARIANT: only add opcodes here that are:
+// INVARIANT: only inline opcodes that are:
 //   1. Valid since Frontier (no fork gate needed), AND
 //   2. Behavior-stable across all forks (no semantic changes per EIP).
-// Fork-*modified* opcodes (e.g. SELFDESTRUCT post-EIP-6780) must stay in the
-// cold `else` path where the InstructionTable enforces the correct per-fork
-// handler — a single flag cannot express "different handler per fork".
+// Fork-*modified* opcodes (e.g. SELFDESTRUCT post-EIP-6780) must stay cold,
+// where the InstructionTable supplies the per-fork handler.
 //
-// A fork-*gated* opcode — one that is either the same handler or invalid, never
-// a different handler — is admissible under a narrow exception: hoist the fork
-// test out of the loop into a `const` below and guard the case with it, falling
-// through to `else` when the gate is closed so the table still supplies
-// opUnknown. This is sound because the spec is fixed for the lifetime of a
-// frame. It is worth doing only for opcodes hot enough that a register-resident
-// branch beats a table load plus an indirect call; SHL/SHR/SAR qualified on the
-// Amsterdam benchmark tiers, where they measured 3,500-4,810 cost-per-gas
-// against a median of 1,962 with ~80% of it in dispatch rather than the shift.
-// PUSH0 and the rest stay cold.
+// Exception: a fork-*gated* opcode (same handler or invalid, never a different
+// handler) may be inlined by hoisting the fork test into a loop-invariant
+// `const` and calling `coldReg` when the gate is closed, so the table still
+// supplies opUnknown. Sound because the spec is fixed for the frame; worth it
+// only for opcodes hot enough that a register branch beats a table load plus
+// an indirect call (SHL/SHR/SAR, RETURNDATASIZE, PUSH0).
 
-/// Fetch the opcode at `pc` from an already-resolved code slice.
-///
-/// `ExtBytecode.opcode()` goes through `Bytecode.bytes()`, which switches on the
-/// Bytecode union tag and reloads ptr/len from the payload — on every single opcode
-/// fetch. The bytecode of a frame cannot change while its dispatch loop runs (CALL and
-/// CREATE build new frames; JUMP only moves pc), so runDispatch resolves the slice once
-/// and fetches through this instead.
+/// Fetch the opcode at `pc` from the code slice runDispatch resolves once per frame
+/// (`ExtBytecode.opcode()` would switch on the Bytecode union tag on every fetch).
 ///
 /// `code` is the zero-padded `exec` copy: running off the end reads STOP, so the fetch
 /// needs no bounds check.
@@ -571,10 +552,8 @@ inline fn opcodeAt(code: []const u8, pc: usize) u8 {
 /// anything that reads or writes them through `self`/`ctx` (every handler outside
 /// the inlined arms) must be bracketed by `spill` and `reload`.
 ///
-/// They were reloaded from memory on every opcode: a pushed word's four limb
-/// stores may alias `stack.length` (Zig has no type-based alias analysis), and the
-/// handlers reach the stack and gas through `ctx`, so LLVM could not keep either
-/// in a register across an arm.
+/// Kept in locals because LLVM cannot register-allocate them through `self`: a pushed
+/// word's limb stores may alias `stack.length` (Zig has no type-based alias analysis).
 const Regs = struct {
     pc: usize,
     gas: u64,
@@ -613,7 +592,7 @@ inline fn charge(self: *Interpreter, r: *Regs, cost: u64) bool {
     return true;
 }
 
-/// Pop two, push f(top, second). Gas before the stack check, as the handlers did.
+/// Pop two, push f(top, second). Gas is charged before the stack check, as in the handlers.
 inline fn binop(self: *Interpreter, r: *Regs, comptime cost: u64, comptime f: fn (primitives.U256, primitives.U256) primitives.U256) bool {
     if (!charge(self, r, cost)) return false;
     if (r.sp < 2) {
@@ -731,11 +710,11 @@ fn runDispatch(
     comptime check_pending: bool,
 ) void {
     if (!self.bytecode.isNotEnd()) return;
-    // Hoisted once per frame — see opcodeAt. Fetch from the zero-padded executable copy,
-    // so neither opcode fetch nor PUSH immediates check bounds.
-    // A delegation designator is executable too (a delegation that points at a
-    // delegated account runs the target's 0xef01.. bytes, and halts on 0xef); its
-    // 23 bytes are padded here, on the stack, for the length of this call.
+    // Resolved once per frame (see opcodeAt) from the zero-padded executable copy, so
+    // neither opcode fetch nor PUSH immediates check bounds.
+    // A delegation designator is executable too (a delegation to a delegated account
+    // runs the target's 0xef01.. bytes and halts on 0xef); its 23 bytes are padded
+    // here, on the stack.
     var designator: [23 + bytecode.EXEC_PAD]u8 = undefined;
     const code: []const u8 = switch (self.bytecode.inner) {
         .legacy_analyzed => |*a| a.exec,
@@ -891,11 +870,9 @@ fn runDispatch(
             r.sp -= 1;
             continue :sw opcodeAt(code, r.pc);
         },
-        // MLOAD/MSTORE/MSTORE8 — Frontier, behaviour-stable, G_VERYLOW static with
-        // memory expansion billed inside the handler (through `self.gas`).
-        // MLOAD/MSTORE stay in registers when the word is already inside memory
-        // (no expansion, so no gas beyond the static G_VERYLOW). Anything else, including
-        // every error, goes through the handler unchanged.
+        // MLOAD/MSTORE stay in registers when the word is already inside memory (no
+        // expansion gas). Anything else, including every error, goes through the
+        // handler, which bills memory expansion through `self.gas`.
         0x51 => { // MLOAD
             r.pc += 1;
             if (r.sp >= 1 and r.gas >= gas_costs.G_VERYLOW and inMemory(self, r.sb[r.sp - 1])) {
@@ -1059,10 +1036,8 @@ fn runDispatch(
             }
             continue :sw opcodeAt(code, r.pc);
         },
-        // Cold path: table lookup + indirect call.
-        // Fork-gated opcodes (PUSH0, TLOAD/TSTORE etc.) land here and are handled
-        // correctly via the table — opUnknown on old forks, real handler on new
-        // forks. SHL/SHR/SAR and PUSH0 reach it too whenever their fork gate is closed.
+        // Cold path: table lookup + indirect call. Fork-gated opcodes (TLOAD/TSTORE
+        // etc.) get opUnknown on old forks from the table.
         // Naming every cold value explicitly (rather than using `else`) keeps the jump
         // table dense over the whole u8 domain — no upper-bound compare needed.
         0x04...0x0f, 0x1e, 0x1f, 0x20...0x2f, 0x31, 0x32, 0x37, 0x39...0x3c, 0x3e, 0x3f...0x4f, 0x54, 0x55, 0x5c...0x5e, 0xa0...0xff => |op| {

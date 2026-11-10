@@ -1,9 +1,6 @@
-/// Core state transition for the EVM executor.
-///
-/// Implements the Ethereum state transition function:
-///   post_state, receipts = transition(pre_state, env, txs, fork, chain_id, reward)
-///
-/// Uses zevm's execution pipeline for actual EVM computation.
+//! Block state transition: pre-block system calls, transactions, rewards and
+//! withdrawals, post-block system calls, then post-state, receipts, BAL hash
+//! (EIP-7928) and requests hash (EIP-7685).
 const std = @import("std");
 const primitives = @import("primitives");
 const state_mod = @import("state");
@@ -17,8 +14,7 @@ const input = @import("executor_types");
 const bloom = @import("bloom.zig");
 
 /// Address-keyed map using the tuned AddressContext rather than Zig's auto-derived hash and
-/// equality for [20]u8. BaTracker keys almost everything by address and touches these maps on
-/// every state access, so the generic context showed up as a large share of BAL tracking.
+/// equality for [20]u8: BaTracker touches these maps on every state access.
 fn AddrMap(comptime V: type) type {
     return std.HashMapUnmanaged(input.Address, V, primitives.AddressContext, 80);
 }
@@ -86,9 +82,8 @@ const BaTracker = struct {
     slot_chg: AddrMap(primitives.SlotMapUnmanaged(std.ArrayListUnmanaged(bal_mod.SlotBaiValue))),
     // Storage slots written then wiped by same-tx SELFDESTRUCT → appear as storage_reads, no changes.
     selfdestruct_reads: AddrMap(primitives.SlotMapUnmanaged(void)),
-    // bal-devnet-7: SYSTEM_ADDRESS is included in BAL iff it was touched by USER tx code
-    // (BALANCE/EXTCODE*/CALL etc.) or was a withdrawal recipient. Touches solely from
-    // pre/post-block system calls must not pull it into the BAL.
+    // SYSTEM_ADDRESS belongs in the BAL only if user tx code touched it (BALANCE/EXTCODE*/
+    // CALL etc.) or it was a withdrawal recipient, not for touches by system calls alone.
     system_address_user_touched: bool = false,
 
     fn initFromPreAlloc(a: std.mem.Allocator, pre: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount)) BaTracker {
@@ -125,10 +120,9 @@ const BaTracker = struct {
         return self;
     }
 
-    /// bal-devnet-7: detect whether the just-finished user tx warmed SYSTEM_ADDRESS.
-    /// Called after each user tx (post-commitTx). transaction_id was incremented during
-    /// commitTx; an account warmed in the just-finished tx has acct.transaction_id ==
-    /// current transaction_id - 1.
+    /// Detect whether the just-finished user tx warmed SYSTEM_ADDRESS. Called after
+    /// commitTx, which increments transaction_id, so an account warmed in that tx has
+    /// acct.transaction_id == transaction_id - 1.
     fn checkUserTxTouchedSystemAddress(self: *BaTracker, ctx: anytype) void {
         if (self.system_address_user_touched) return;
         const acct = ctx.journaled_state.inner.evm_state.getPtr(SYSTEM_ADDRESS) orelse return;
@@ -155,22 +149,14 @@ const BaTracker = struct {
         // all post-block system calls, which each do their own commitTx().
         const filter_by_tx = bai > 0;
 
-        // Candidates to consider. For a per-tx call these come from the
-        // journal's first-touch list, which is a superset of the accounts this
-        // call can record; scanning all of `evm_state` and filtering made the
-        // block quadratic in (transactions x accounts). The pre-block call has
-        // no such list and runs once, so it still walks the map.
-        //
-        // The `transaction_id` predicate below is unchanged and still decides:
-        // narrowing the candidates cannot change which accounts are recorded.
+        // Candidates. A per-tx call takes the journal's first-touch list, a superset of
+        // what it can record (walking all of `evm_state` per tx would be quadratic); the
+        // pre-block call walks the map. The `transaction_id` predicate below still decides.
         var cands = std.ArrayListUnmanaged(Candidate).empty;
         defer cands.deinit(a);
         if (filter_by_tx) {
-            // The list may repeat an address across transaction boundaries, and
-            // the first pass appends to change lists, so a duplicate would
-            // record the same change twice. A set, not a linear scan: a single
-            // transaction can touch thousands of distinct accounts (an
-            // EXTCODEHASH or BALANCE sweep), where a scan is quadratic.
+            // The list may repeat an address, which would record a change twice. Dedup with a
+            // set: one transaction can touch thousands of accounts (an EXTCODEHASH sweep).
             const touched = ctx.journaled_state.inner.tx_touched.items;
             var seen = std.HashMapUnmanaged(input.Address, void, primitives.AddressContext, 80){};
             defer seen.deinit(a);
@@ -191,8 +177,6 @@ const BaTracker = struct {
 
         for (cands.items) |cand| {
             const addr = cand.addr;
-            // By pointer: copying the whole struct — balance, code hash, the
-            // storage map header — happened before the filter rejected it.
             const acct = cand.acct;
             if (filter_by_tx and acct.transaction_id < from_tx_id) continue;
             if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
@@ -208,7 +192,6 @@ const BaTracker = struct {
                     if (!sm.found_existing) sm.value_ptr.* = .{};
                     sm.value_ptr.*.put(a, se.key_ptr.*, {}) catch @panic("out of memory");
                 }
-                // Record balance change if pre-existing balance was nonzero (ETH transferred out).
                 const known = blk: {
                     if (self.committed.get(addr)) |k| break :blk k;
                     const pre = ctx.journaled_state.database.basic(addr) catch null;
@@ -361,20 +344,15 @@ const BaTracker = struct {
         // Collect storage reads: all accessed slots NOT in slot_chg.
         // Includes pure reads (was_written=false) AND net-zero writes (was_written=true
         // but value returned to original, so absent from slot_chg).
-        // Per-address slot lists, not sets: the slots come from maps and so are already
-        // unique within each source. Only the two sources can overlap, and that is resolved
-        // by an adjacent-dedup after the sort these lists get anyway -- which is cheaper than
-        // hashing every slot into a set to discover it was already unique.
+        // Per-address lists, not sets: slots are unique within each source, and overlap
+        // between the two sources is removed by an adjacent-dedup after sorting.
         var storage_reads = AddrMap(std.ArrayListUnmanaged(u256)){};
         {
             var it = ctx.journaled_state.inner.evm_state.iterator();
             while (it.next()) |e| {
                 const addr = e.key_ptr.*;
-                // Hoisted: the changed-slot map for this address is loop-invariant, so look it
-                // up once per account rather than once per slot.
                 const chg_for_addr = self.slot_chg.get(addr);
-                // The destination list depends only on `addr`, so resolve it once per account
-                // instead of once per slot. Lazy so an account with no read slots adds no
+                // Resolved lazily, once per account, so an account with no read slots adds no
                 // entry. Safe to hold across this account's slots: the only insert that could
                 // rehash the map is this account's own, made before the pointer is used.
                 var dst: ?*std.ArrayListUnmanaged(u256) = null;
@@ -397,7 +375,6 @@ const BaTracker = struct {
             var it = self.selfdestruct_reads.iterator();
             while (it.next()) |e| {
                 const addr = e.key_ptr.*;
-                // Hoisted -- see above.
                 const chg_for_addr = self.slot_chg.get(addr);
                 // Resolved once per account -- see above.
                 var dst: ?*std.ArrayListUnmanaged(u256) = null;
@@ -441,8 +418,8 @@ const BaTracker = struct {
             while (it.next()) |k| all_addrs.put(a, k.*, {}) catch @panic("out of memory");
         }
 
-        // Sort the addresses once, as big-endian words, and build the entries in that order.
-        // Sorting the ~200-byte EncodeEntry values afterwards moved whole structs per swap.
+        // Sort the addresses once, as big-endian words, and build the entries in that order,
+        // rather than sorting the much larger EncodeEntry values.
         const AddrKey = struct {
             hi: u64,
             mid: u64,
@@ -482,10 +459,8 @@ const BaTracker = struct {
         for (keys) |key| {
             const addr = key.address();
 
-            // bal-devnet-7: SYSTEM_ADDRESS is included if a user tx touched it
-            // (BALANCE/EXTCODE*/CALL etc.) OR if it has real state changes / storage
-            // reads. Touches solely from pre/post-block system calls are excluded
-            // (the system call nonce bump/patch-back must not pull it into the BAL).
+            // SYSTEM_ADDRESS is included if a user tx touched it or it has real changes or
+            // storage reads; touches solely from system calls are excluded.
             if (std.mem.eql(u8, &addr, &SYSTEM_ADDRESS)) {
                 const has_changes = self.bal_chg.contains(addr) or
                     self.nonce_chg.contains(addr) or
@@ -514,8 +489,7 @@ const BaTracker = struct {
             // Build storage_reads (not-changed slots), sorted and deduplicated
             var sr_list = std.ArrayListUnmanaged(u256).empty;
             if (storage_reads.get(addr)) |sr_slots| {
-                // No slot_chg filter here: collection above already skipped changed slots and
-                // slot_chg is not touched in between, so re-testing every slot cannot drop one.
+                // Already excludes changed slots (filtered during collection).
                 try sr_list.appendSlice(a, sr_slots.items);
                 std.mem.sort(u256, sr_list.items, {}, struct {
                     pub fn lessThan(_: void, x: u256, y: u256) bool {
@@ -586,7 +560,7 @@ fn buildDb(
 
         const code_hash: primitives.Hash = if (acct.code.len > 0) blk: {
             // Detect EIP-7702 delegation designators (EF 01 00 <20-byte address>)
-            // and load them as Eip7702Bytecode so zevm recognizes them as delegations.
+            // and load them as Eip7702Bytecode so the EVM treats them as delegations.
             const bc: bytecode_mod.Bytecode = if (acct.code.len == 23 and
                 acct.code[0] == 0xEF and acct.code[1] == 0x01 and acct.code[2] == 0x00)
             blk2: {
@@ -663,9 +637,8 @@ fn effectiveGasPrice(tx: *const input.TxInput, base_fee: u64) u128 {
 
 // ─── Main transition function ─────────────────────────────────────────────────
 
-/// Backward-compatible entry point: builds InMemoryDB from pre_alloc, then runs transition.
-/// Used by blockchain-test runner, t8n, and the stateful executor path.
-/// The journal (evm_state, BAL maps, etc.) is allocated from alloc_mod.get() internally and
+/// Builds an InMemoryDB from pre_alloc, then runs the transition (t8n and the test
+/// runners, via executeBlockFromAlloc). The journal (evm_state, BAL maps, etc.) is allocated from alloc_mod.get() internally and
 /// freed before this function returns — callers receive a TransitionResult whose code slices
 /// are owned by `arena`, not the journal.
 pub fn transition(
@@ -681,12 +654,9 @@ pub fn transition(
     return transitionWithDb(arena, db, pre_alloc_in, env, txs, spec, chain_id, reward);
 }
 
-/// Entry point for stateless execution: accepts any DB type (InMemoryDB for the stateful
-/// path, WitnessDatabase for the stateless path), plus optional pre-recovered public keys.
-/// Builds the EVM context internally and owns its full lifecycle: the journal is freed before
-/// this function returns and the returned TransitionResult's code slices are arena-owned.
-/// Use transitionWithContext when you need access to the context (and its DB or journal)
-/// after execution — e.g., to read its database through ctx.getDb().
+/// Runs the transition over any database type, building the EVM context internally and
+/// freeing its journal and database before returning; the result is arena-owned. Use
+/// transitionWithContext to keep the context (e.g. ctx.getDb()) after execution.
 pub fn transitionWithDb(
     arena: std.mem.Allocator,
     db: anytype,
@@ -729,16 +699,11 @@ pub fn transitionWithContext(
     // EIP-2929: precompiles are always warm — set once per block, persists across commitTx/discardTx.
     ctx.journaled_state.inner.warm_addresses.setPrecompileBitset(precompiles.precompiles.precompile_bitset);
 
-    // Pre-size journal HashMaps and ArrayLists to avoid repeated grows under the bump allocator.
-    // Upper bound: all pre-state accounts plus a few new accounts per tx.
+    // Pre-size evm_state to avoid repeated grows: all pre-state accounts plus a few per tx.
     const account_hint: u32 = @intCast(pre_alloc_in.count() + txs.len * 4);
     try ctx.journaled_state.inner.evm_state.ensureTotalCapacity(account_hint);
-    // commitTx and discardTx both clear the journal, so it only ever holds one transaction's
-    // entries and is sized for the heaviest transaction rather than for the whole block. At the ~64
-    // entries an average transaction produces, 4096 absorbs all but a negligible amount of regrowth
-    // and reserves 768 KiB after ArrayList growth overshoot, which the guest free-list allocator
-    // rounds up to a 1 MiB block. Sizing by the block costs 19 MiB of peak heap for the same result.
-    // Reserving nothing instead costs 0.19% more proving cost, again for the same peak heap.
+    // commitTx and discardTx both clear the journal, so it holds one transaction's entries:
+    // size it for a heavy transaction, not the whole block (which would waste peak heap).
     try ctx.journaled_state.inner.journal.ensureTotalCapacity(alloc_mod.get(), 4096);
 
     // ── EIP-7928 BAL tracker (Amsterdam+) ────────────────────────────────────
@@ -837,7 +802,7 @@ pub fn transitionWithContext(
             if (max_blob_gas_per_block > 0 and total_blob_gas + tx_blob_gas > max_blob_gas_per_block) {
                 return error.BlobGasLimitExceeded;
             }
-            // EIP-7594 (Osaka+): per-tx blob count limit = 6, independent of per-block max
+            // EIP-7594 (Osaka+): per-tx blob count limit, independent of the per-block max
             if (primitives.isEnabledIn(spec, .osaka) and blobs > primitives.MAX_BLOB_NUMBER_PER_TX) {
                 return error.Eip7594TooManyBlobsPerTx;
             }
@@ -983,7 +948,7 @@ pub fn transitionWithContext(
             return error.EmptyAuthorizationList;
         }
 
-        // 3b. Pre-validate sender state — zevm's ExecuteEvm.execute() swallows
+        // 3b. Pre-validate sender state — ExecuteEvm.execute() swallows
         // validation errors and returns Fail(0 gas). To correctly classify
         // invalid txs as "rejected" (vs failed-execution with a receipt), we
         // pre-check nonce, balance, EIP-3607, and base fee here.
@@ -1317,7 +1282,7 @@ pub fn transitionWithContext(
         ctx.journaled_state.commitTx();
     }
 
-    // ── Post-block system calls (EIP-7002, EIP-7251) ──────────────────────────
+    // ── Post-block system calls (EIP-7002, EIP-7251, EIP-8282) ────────────────
     // Capture return data for EIP-7685 requests_hash computation.
     // A call that failed because the witness could not serve one of its reads leaves an
     // incomplete witness, not a failed system call.
@@ -1474,7 +1439,7 @@ fn extractPostState(
     ctx: anytype,
     spec: primitives.SpecId,
 ) !std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) {
-    // Start with a mutable copy of pre_alloc (use arena allocation for storage maps)
+    // Start from a copy of pre_alloc, overlaid with evm_state below.
     var post = std.AutoHashMapUnmanaged(input.Address, input.AllocAccount).empty;
     try post.ensureTotalCapacity(arena, pre_alloc.count() + ctx.journaled_state.inner.evm_state.count());
 
@@ -1549,9 +1514,8 @@ fn extractPostState(
 
         // Update code: use code_hash as the source of truth.
         // KECCAK_EMPTY means empty code; otherwise look up actual bytes.
-        // IMPORTANT: Eip7702Bytecode.raw() returns &self.raw_bytes where self is a value
-        // parameter, so it returns a dangling pointer when called on a copy. For EIP-7702
-        // bytecode we construct the bytes directly from the address field instead.
+        // An EIP-7702 designator's originalBytes() points into the Bytecode value itself, and
+        // `bc`/`db_bc` are local copies, so rebuild those 23 bytes from the address instead.
         if (!std.mem.eql(u8, &account.info.code_hash, &primitives.KECCAK_EMPTY)) {
             if (account.info.code) |bc| {
                 if (bc == .eip7702) {
@@ -1584,11 +1548,9 @@ fn extractPostState(
             acct.code = &.{};
         }
 
-        // Update storage: emit block-level changes only.
-        // Only slots whose present_value differs from pre_block_value (the value at first
-        // DB load this block) need to appear in the MPT delta. Read-only slots and
-        // net-zero writes are skipped; this eliminates the bulk of batchUpdateIndexed work.
-        // fresh_storage (newly created / storage_wiped): all storage is new, use as-is.
+        // Emit block-level storage changes only: slots whose present_value differs from
+        // pre_block_value (the value at first load this block). Read-only slots and net-zero
+        // writes are skipped. With fresh_storage, all storage is new and taken as-is.
         var stor_it = account.storage.iterator();
         while (stor_it.next()) |slot| {
             const key = slot.key_ptr.*;
@@ -1597,8 +1559,7 @@ fn extractPostState(
                 // Skip slots unchanged vs. block start — no MPT update needed.
                 const pre_block = slot.value_ptr.*.pre_block_value;
                 if (present == pre_block) continue;
-                // Emit deletion marker if slot existed before and is now zero.
-                // Emit updated value otherwise.
+                // A zero value is the deletion marker.
                 try acct.storage.put(arena, key, present);
             } else {
                 if (present == 0) {

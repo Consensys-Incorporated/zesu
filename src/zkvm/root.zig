@@ -3,10 +3,8 @@
 /// Provides:
 ///   - std_options: routes std.log through extern zkvm_log
 ///   - panic handler: calls zkvm_log then zkvm_abort() (host-provided, VM-specific)
-///   - export fn main(): called by the zkVM's _start (via libziskos _zisk_main,
-///     or a target-specific startup.S). Returns 0/1 in a0 per the RISC-V C ABI;
-///     each host's entry point is responsible for turning that into its own
-///     halt sequence (ZisK's own _start already does this for free on return).
+///   - export fn main(): called by the host's startup code. Returns 0/1 in a0 per
+///     the RISC-V C ABI; each host's entry point turns that into its halt sequence.
 ///
 /// External symbols required (resolved at link time from zkVM host object):
 ///   zkvm_log(level, msg_ptr, msg_len)  — logging sink (e.g. UART)

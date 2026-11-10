@@ -1,8 +1,7 @@
 //! Tests for the MPT module.
 //!
 //! Integration tests (first half) drive the public API with synthetic vectors built
-//! using the same RLP rules the verifier decodes; the flat node pool replaces the old
-//! ordered-proof-array: put the node(s) in a slice and the verifier finds them by hash.
+//! using the same RLP rules the verifier decodes; the verifier finds pool nodes by hash.
 //!
 //! Internal tests (second half) exercise the private update functions through
 //! `mpt.testing`, which re-exports them for this file.

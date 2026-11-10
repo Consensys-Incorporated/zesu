@@ -1,7 +1,4 @@
-/// Canonical EVM state transition types.
-///
-/// Defines the core types used by the executor, t8n tool, and spec-test runner.
-/// JSON parsing lives in t8n/input.zig; these are pure data definitions.
+//! Plain data types shared by the executor, t8n and the test runners.
 const std = @import("std");
 
 // ─── Primitive aliases ────────────────────────────────────────────────────────
@@ -18,14 +15,11 @@ pub const AllocAccount = struct {
     code: []const u8 = &.{},
     storage: std.AutoHashMapUnmanaged(U256, U256) = .{},
     /// Pre-execution storage root (proven via MPT witness).
-    /// When non-null, `storage` is treated as a delta: only touched slots are stored,
-    /// and 0-valued entries indicate deletions.  computeStorageRoot() applies these
-    /// deltas to this root instead of building a new trie from scratch.
+    /// When non-null, `storage` is a delta: only touched slots are stored, and 0-valued
+    /// entries are deletions, applied to this root instead of building a trie from scratch.
     pre_storage_root: ?[32]u8 = null,
-    /// Authoritative code hash from EVM state.  Set by extractPostState() so that
-    /// computeStateRootDelta() uses the correct hash even when `code` bytes are absent
-    /// (e.g. a touched contract whose code is not included in the stateless witness).
-    /// When null, the hash is computed from `code` (backwards-compatible).
+    /// Authoritative code hash from EVM state, set by extractPostState so the state root
+    /// is right even when `code` is absent from the witness. When null, hashed from `code`.
     code_hash: ?[32]u8 = null,
 };
 
@@ -66,9 +60,8 @@ pub const Env = struct {
     parent_excess_blob_gas: ?u64 = null,
     parent_blob_gas_used: ?u64 = null,
     parent_beacon_block_root: ?Hash = null,
-    /// Per-block blob base fee update fraction override.
-    /// When set, used instead of the spec-derived default in buildBlockEnv.
-    /// Read from config.blobSchedule[fork].baseFeeUpdateFraction in test fixtures.
+    /// Blob base fee update fraction override (test fixtures' blobSchedule); when null,
+    /// the spec default is used.
     blob_base_fee_update_fraction: ?u64 = null,
     /// EIP-2935: parent block hash for history storage contract (Prague+).
     parent_hash: ?Hash = null,
@@ -128,20 +121,19 @@ pub const Receipt = struct {
 
 // ─── Transaction types ────────────────────────────────────────────────────────
 
-/// EIP-7702 authorization item (pre-recovered: signer known from fixture).
+/// EIP-7702 authorization item.
 pub const AuthorizationItem = struct {
     chain_id: U256 = 0,
     address: Address = [_]u8{0} ** 20,
     nonce: u64 = 0,
-    /// The recovered signer (authority). If null, treated as Invalid.
+    /// Pre-recovered signer (authority), e.g. from a test fixture. When null, transition
+    /// recovers it from the signature.
     signer: ?Address = null,
     /// Signature fields (needed for tx signing hash and signer recovery).
     y_parity: u256 = 0,
     r: u256 = 0,
     s: u256 = 0,
 };
-
-// ─── Block access list types ──────────────────────────────────────────────────
 
 pub const TxInput = struct {
     type: u8 = 0,

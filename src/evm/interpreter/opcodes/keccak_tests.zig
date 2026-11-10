@@ -83,7 +83,7 @@ test "KECCAK256: dynamic word gas (100 bytes = ceil(100/32)=4 words = 24 gas)" {
 }
 
 test "KECCAK256: auto-expands memory" {
-    // keccak256 should expand memory itself, unlike old implementation
+    // The handler expands memory itself.
     var interp = Interpreter.defaultExt();
     // Memory is empty, but we hash 32 bytes at offset 0
     interp.stack.pushUnsafe(@as(U, 32)); // length 32

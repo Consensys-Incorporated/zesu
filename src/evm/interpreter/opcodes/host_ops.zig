@@ -102,8 +102,7 @@ pub fn opExtcodesize(ctx: *InstructionContext) void {
         return;
     };
 
-    // Use originalBytes().len: the analyzed bytecode may include a STOP-padding byte
-    // that is NOT part of the on-chain code, so EXTCODESIZE must return the original length.
+    // originalBytes(), not bytes(): analyzed empty code is a lone STOP byte.
     stack.setTopUnsafe().* = @intCast(info.bytecode.originalBytes().len);
 }
 
@@ -542,7 +541,6 @@ pub fn makeLogFn(comptime n: u8) *const fn (ctx: *InstructionContext) void {
                 break :blk copy;
             } else &[_]u8{};
 
-            // Emit the log
             const log_entry = primitives.Log{
                 .address = ctx.interpreter.input.target,
                 .topics = topics,

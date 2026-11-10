@@ -22,7 +22,6 @@ pub const LocalContext = struct {
         }
     }
 
-    /// Creates a new local context, initcodes are hashes and added to the mapping.
     pub fn new() LocalContext {
         return LocalContext.default();
     }

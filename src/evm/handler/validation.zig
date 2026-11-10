@@ -8,7 +8,8 @@ const interpreter_mod = @import("interpreter");
 // Gas constants for intrinsic gas calculation
 const TX_BASE_COST: u64 = 21000;
 const TX_CREATE_COST: u64 = 32000;
-// EIP-8037 (Amsterdam+): reduced regular CREATE cost
+// EIP-8037 (Amsterdam+): reduced regular CREATE cost (unreached: Amsterdam uses
+// calculateInitialGasAmsterdam)
 const TX_CREATE_COST_AMSTERDAM: u64 = 9000;
 const CALLDATA_ZERO_BYTE_COST: u64 = 4;
 const CALLDATA_NONZERO_BYTE_COST: u64 = 16;
@@ -127,7 +128,7 @@ pub const Validation = struct {
         const spec = ctx.cfg.spec;
 
         // EIP-3860 (Shanghai+): initcode size limit for CREATE transactions.
-        // EIP-7954 (Amsterdam+): max code size doubles to 32768, so max initcode = 65536.
+        // EIP-7954 (Amsterdam+): max code size rises to 65536, so max initcode = 131072.
         if (primitives.isEnabledIn(spec, .shanghai)) {
             if (tx.kind == .Create) {
                 const max_initcode: usize = if (primitives.isEnabledIn(spec, .amsterdam)) primitives.AMSTERDAM_MAX_INITCODE_SIZE else primitives.MAX_INITCODE_SIZE;
@@ -157,9 +158,8 @@ pub const Validation = struct {
             return ValidationError.InsufficientGas;
         }
 
-        // EIP-7623 (Prague+): gas_limit must also cover the floor (21000 base + floor exec gas).
-        // floor_gas is the exec-portion only; the 21000 base is the fixed floor minimum.
-        // Skipped if disable_eip7623 is set (floor_gas will be 0 in that case).
+        // EIP-7623 (Prague+): gas_limit must also cover the floor (base + floor_gas).
+        // floor_gas is 0 when disable_eip7623 is set.
         if (primitives.isEnabledIn(spec, .prague)) {
             // EIP-2780 devnet-7 (Amsterdam+): the floor is anchored on base_regular_gas
             // (TX_BASE + recipient_regular_gas), not TX_BASE alone. Pre-Amsterdam uses 21000.
@@ -187,14 +187,14 @@ pub const Validation = struct {
         // EIP-2780 devnet-7 (Amsterdam+): the intrinsic no longer carries any state gas.
         // CREATE NEW_ACCOUNT and EIP-7702 auth state gas (NEW_ACCOUNT + AUTH_BASE) are
         // charged conditionally at the top frame (reference prepare_dispatch /
-        // set_delegation) — see the create path and applyAuthList.
+        // set_delegation) — see executeFrame's create path and preExecution.
         return InitialAndFloorGas{
             .initial_gas = initial_gas,
             .floor_gas = floor_gas,
         };
     }
 
-    /// Validate caller account state and deduct the maximum gas fee + value.
+    /// Validate caller account state, then deduct the upfront fee and bump the nonce.
     ///
     /// - Loads caller from the DB (cold load, records journal warming entry)
     /// - Validates EIP-3607 (reject if caller has code; EIP-7702 delegation accounts are exempt)
@@ -290,8 +290,7 @@ pub const Validation = struct {
             if (!cfg.disable_balance_check) {
                 return ValidationError.InsufficientBalance;
             }
-            // When balance check is disabled (e.g. eth_call simulation), grant the caller
-            // enough balance so execution does not fail due to insufficient funds.
+            // Balance check disabled: top the caller up so the deduction below cannot underflow.
             account_info.balance = max_cost;
         }
 
@@ -303,7 +302,7 @@ pub const Validation = struct {
             }
         }
 
-        _ = initial_gas; // used in Phase 3 for floor gas check
+        _ = initial_gas;
 
         // Record journal entries BEFORE mutating (so revert can restore old state)
         const old_balance = account_info.balance;
@@ -311,12 +310,11 @@ pub const Validation = struct {
 
         // Deduct effective gas fee + blob fee from caller balance upfront.
         // (Value transfer is handled in executeFrame, not here.)
-        // Skip if fee charging is disabled (e.g. eth_call on OP-chains where basefee=0 is insufficient).
+        // Skipped when fee charging is disabled (system calls).
         if (!cfg.disable_fee_charge) {
             account_info.balance = old_balance - effective_gas_fee - blob_fee;
         }
 
-        // Bump nonce
         account_info.nonce += 1;
     }
 
@@ -324,17 +322,18 @@ pub const Validation = struct {
     // Internal helpers
     // -------------------------------------------------------------------------
 
-    /// Calculates the intrinsic gas for a transaction.
+    /// Calculates the intrinsic gas for a transaction. Amsterdam+ delegates to
+    /// calculateInitialGasAmsterdam; the Amsterdam branches below are unreachable.
     ///
-    /// Breakdown:
-    ///   21,000 base (always)
-    /// + 32,000 for CREATE transactions (pre-Amsterdam) or 9,000 + 112*cpsb (Amsterdam+)
-    /// + 4 per zero calldata byte, 16 per non-zero calldata byte
+    /// Breakdown (pre-Amsterdam):
+    ///   21,000 base
+    /// + 32,000 for CREATE (Homestead+) and 2 per initcode word (Shanghai+)
+    /// + 4 per zero calldata byte, 16 per non-zero byte (68 before Istanbul)
     /// + 2,400 per access-list address, 1,900 per access-list storage slot
-    /// + 25,000 per EIP-7702 authorization list entry (pre-Amsterdam) or 7,500 + 135*cpsb (Amsterdam+)
-    /// + GAS_PER_BLOB per EIP-4844 blob hash
+    /// + 25,000 per EIP-7702 authorization
+    /// Blob gas is a separate fee market and is not included.
     pub fn calculateInitialGas(tx: *const context.TxEnv, spec: primitives.SpecId, block_gas_limit: u64) u64 {
-        // EIP-2780 (Amsterdam+): decomposed intrinsic gas model. Returns regular + state.
+        // EIP-2780 (Amsterdam+): decomposed intrinsic gas model.
         if (primitives.isEnabledIn(spec, .amsterdam)) {
             return calculateInitialGasAmsterdam(tx, block_gas_limit);
         }
@@ -410,8 +409,6 @@ pub const Validation = struct {
         return gas;
     }
 
-    /// EIP-2780 (Amsterdam+) decomposed intrinsic gas: returns regular + state total.
-    /// Mirrors execution-specs amsterdam/transactions.py calculate_intrinsic_cost.
     /// EIP-2780 (Amsterdam+) recipient execution-gas cost = base_execution_gas − TX_BASE.
     /// Reference calculate_intrinsic_cost recipient_execution_gas: CREATE_ACCESS for a
     /// create; COLD_ACCOUNT_ACCESS (+TX_VALUE_COST for a value call); 0 for a
@@ -428,6 +425,9 @@ pub const Validation = struct {
         }
     }
 
+    /// EIP-2780 (Amsterdam+) decomposed intrinsic gas. Regular gas only: the state gas
+    /// is charged at the top frame. Mirrors execution-specs amsterdam/transactions.py
+    /// calculate_intrinsic_cost.
     pub fn calculateInitialGasAmsterdam(tx: *const context.TxEnv, block_gas_limit: u64) u64 {
         _ = block_gas_limit;
 
@@ -466,7 +466,7 @@ pub const Validation = struct {
         // EIP-7702 authorizations. EIP-2780 devnet-7: the intrinsic charges only the
         // state-independent REGULAR_PER_AUTH_BASE_COST per auth. The state-dependent
         // ACCOUNT_WRITE (regular), NEW_ACCOUNT (state) and AUTH_BASE (state) are charged
-        // conditionally at the top frame by applyAuthList (reference set_delegation).
+        // conditionally at the top frame by preExecution (reference set_delegation).
         if (tx.authorization_list) |auth_list| {
             const num_auths: u64 = @intCast(auth_list.items.len);
             regular += num_auths * AM_REGULAR_PER_AUTH_BASE_COST;
@@ -491,7 +491,7 @@ pub const Validation = struct {
 
     /// Validate EIP-7702 set-code transaction fields (Prague+).
     ///
-    /// - Rejects if Prague is not enabled
+    /// No-op before Prague or without an authorization list. Otherwise:
     /// - Rejects if the authorization list is empty
     /// - Rejects Type 4 (EIP-7702) transactions that are also CREATE transactions
     pub fn validateEip7702Tx(tx: *const context.TxEnv, spec: primitives.SpecId) !void {
@@ -560,7 +560,8 @@ pub const Validation = struct {
         }
     }
 
-    /// Floor gas exec-portion (excludes the 21000 base; receipt code adds it).
+    /// Floor gas exec-portion; callers add the base (21000, or Amsterdam's
+    /// TX_BASE + recipient gas).
     ///
     /// Prague (EIP-7623): floor_tokens = sum(1 per zero byte, 4 per nonzero byte) over calldata; gas = tokens * 10.
     /// Amsterdam (EIP-7976): all calldata bytes count uniformly as 4 floor tokens; gas = tokens * 16.
@@ -621,12 +622,11 @@ pub const InitialAndFloorGas = struct {
     initial_gas: u64,
     /// EIP-7623 floor gas requirement
     floor_gas: u64,
-    /// EIP-7702: gas refund accumulated during authorization list processing (preExecution).
-    /// 25,000 (PER_EMPTY_ACCOUNT_COST) added for each valid authorization that sets code.
-    /// Applied in postExecution with the standard 1/5 cap against total gas used.
+    /// EIP-7702 (pre-Amsterdam): refund accumulated in preExecution, 12,500 per valid
+    /// authorization whose authority already exists. Subject to the refund cap in postExecution.
     auth_refund: i64 = 0,
     /// EIP-2780 devnet-7 (Amsterdam+): regular gas charged at the top frame for EIP-7702
-    /// authorizations (reference set_delegation). ACCOUNT_WRITE (8000) per authority whose
+    /// authorizations (reference set_delegation). ACCOUNT_WRITE (9000) per authority whose
     /// leaf is first written by an authorization (sender/recipient already written are free).
     /// Deducted from the top-frame regular exec gas; OOG rolls back all applied auths.
     auth_regular_charge: u64 = 0,
@@ -634,13 +634,13 @@ pub const InitialAndFloorGas = struct {
     /// authorizations (reference set_delegation). NEW_ACCOUNT (120*cpsb) per non-existing
     /// authority + AUTH_BASE (23*cpsb) per net-new delegation. Deducted from the reservoir.
     auth_state_charge: u64 = 0,
-    /// EIP-2780 devnet-7 (Amsterdam+): journal checkpoint taken before applyAuthList applied
+    /// EIP-2780 devnet-7 (Amsterdam+): journal checkpoint taken before preExecution applied
     /// the delegations, so an OOG while charging set_delegation at the top frame can roll them
-    /// back (reference restores the pre-set_delegation snapshot). Null when no auth list.
+    /// back (reference restores the pre-set_delegation snapshot). Null pre-Amsterdam or without auths.
     auth_checkpoint: ?context.JournalCheckpoint = null,
     /// EIP-2780 devnet-7 (Amsterdam+): set true when the cumulative set_delegation charge
     /// exceeds the top-frame gas, so execution must burn all gas and skip dispatch (reference
-    /// set_delegation OOG). applyAuthList stops processing further authorizations at that point,
+    /// set_delegation OOG). preExecution stops processing further authorizations at that point,
     /// matching which authorities the reference reads into the BAL before halting.
     auth_oog: bool = false,
 };

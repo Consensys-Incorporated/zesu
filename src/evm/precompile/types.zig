@@ -1,9 +1,7 @@
-/// Core precompile types — no external module dependencies.
-///
-/// Defined here (rather than in main.zig) so that a "precompile_overrides"
-/// module can import these types without creating a circular module dependency.
-/// main.zig re-exports everything from this file for backward compatibility.
-/// Precompile error type
+//! Core precompile types, in their own dependency-free module so crypto backends
+//! can return them without importing (and cycling back into) the precompile module.
+//! main.zig re-exports them.
+
 pub const PrecompileError = error{
     OutOfGas,
     Other,

@@ -135,17 +135,12 @@ pub const JournalEntry = union(enum) {
             },
             .CodeChanged => |data| {
                 if (evm_state.getPtr(data.address)) |account| {
-                    // The code being reverted away (set by the setCodeWithHash call this
-                    // entry recorded) is uniquely owned by this account — codeByHash/
-                    // analyzeLegacy allocates a fresh jump-table per load, and code changes
-                    // only ever happen at frame boundaries (CREATE finalization, EIP-7702
-                    // dispatch prep), never while another frame holds a live reference to
-                    // it — so it's safe to free before restoring the pre-change value.
+                    // Safe to free: the code being reverted away is uniquely owned (each
+                    // load analyzes a fresh jump table) and code only changes at frame
+                    // boundaries, so no live frame references it.
                     if (account.info.code) |*code| code.deinit();
-                    // Restore the pre-change code so reverting an EIP-7702 delegation
-                    // clear/re-set (or any code overwrite) puts back the original code,
-                    // not an empty account. For a freshly created contract the old code
-                    // was empty (null / KECCAK_EMPTY), so this still clears it.
+                    // Restore the old code (a delegation clear/re-set reverts to the original
+                    // delegation; a fresh contract reverts to empty).
                     account.info.code = data.old_code;
                     account.info.code_hash = data.old_code_hash;
                 }
@@ -186,12 +181,8 @@ pub const JournalEntry = union(enum) {
 /// Warm addresses
 pub const WarmAddresses = struct {
     coinbase: ?primitives.Address,
-    /// Bitset of registered precompile short-address indices.
-    /// SHORT_ADDRESS_CAP = 300, so 5 × u64 = 320 bits covers the full range.
-    /// Bit n is set when precompile at short-address index n is registered.
-    /// P256_VERIFY lives at index 256 (0x0100), which requires this full width —
-    /// a u64 alone or a max-index scalar would either miss it or falsely warm
-    /// the large gap between 0x12 and 0x100.
+    /// Bit n set ⇔ a precompile lives at short address n. 320 bits cover
+    /// SHORT_ADDRESS_CAP (300), including P256VERIFY at 0x100 without warming 0x12..0xff.
     precompile_bitset: [5]u64,
     access_list: std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80),
 
@@ -288,16 +279,9 @@ pub const JournalCheckpoint = struct {
     burn_i: usize,
 };
 
-/// EIP-7708 deferred burn entry.
-///
-/// Tracks an account in `accounts_to_delete` that may receive ETH after its SELFDESTRUCT opcode
-/// executes and before the transaction finalizes (e.g. a payer contract calling into the already-
-/// destructed address, or the coinbase receiving its priority fee).  These accounts are added to
-/// `pending_burns` at SELFDESTRUCT time; `emitBurnLogs()` re-reads their balance after the
-/// coinbase payment and emits a Burn log for any non-zero remainder.
-///
-/// `amount` is unused — it is kept for potential future use (e.g. assertions) but the finalization
-/// path always reads the live balance from `evm_state`.
+/// EIP-7708 deferred burn entry: an account whose balance at finalization is logged as burned
+/// (see emitBurnLogs). `amount` is unused; the live balance is read instead. Never populated
+/// since EIP-8246 removed the SELFDESTRUCT burn.
 pub const PendingBurn = struct {
     address: primitives.Address,
     amount: primitives.U256,
@@ -393,44 +377,26 @@ pub const JournalInner = struct {
     transient_storage: state.TransientStorage,
     /// Emitted logs
     logs: std.ArrayList(primitives.Log),
-    /// The journal of evm_state changes, one for each transaction
+    /// State changes of the current transaction; cleared at commitTx/discardTx.
     journal: std.ArrayList(JournalEntry),
-    /// Addresses whose `transaction_id` has been set to the current transaction
-    /// since this list was last consumed, in first-touch order.
+    /// Addresses whose `transaction_id` was set to the current transaction since this list
+    /// was last consumed, in first-touch order — so EIP-7928 BAL detection need not scan
+    /// all of `evm_state` per transaction.
     ///
-    /// EIP-7928 BAL detection needs the accounts touched by the just-committed
-    /// transaction. Scanning `evm_state` and filtering on `transaction_id` made
-    /// that O(accounts) per transaction, so the whole block was quadratic. This
-    /// records the candidates as they are touched instead.
-    ///
-    /// It is appended at exactly the two sites that set an account's
-    /// `transaction_id` to the current one, so it is a superset of
-    /// `{a : a.transaction_id >= from_tx_id}` — consumers still apply that
-    /// predicate. May contain duplicates across transaction boundaries.
-    ///
-    /// Only maintained from Amsterdam: nothing consumes it on earlier forks, so
-    /// it would otherwise grow for a whole block and never be drained.
+    /// Appended at exactly the two sites that set an account's `transaction_id`, so it is a
+    /// superset of `{a : a.transaction_id >= from_tx_id}`; consumers still apply that
+    /// predicate. May contain duplicates across transactions. Amsterdam+ only: nothing
+    /// drains it on earlier forks.
     tx_touched: std.ArrayList(primitives.Address),
-    /// Global transaction id that represent number of transactions executed (Including reverted ones).
-    /// It can be different from number of `journal_history` as some transaction could be
-    /// reverted or had a error on execution.
-    ///
-    /// This ID is used in `Self::evm_state` to determine if account/storage is touched/warm/cold.
+    /// Number of transactions committed or discarded so far. Accounts and slots record the
+    /// id of their last access, which is how warm/cold is decided per transaction.
     transaction_id: usize,
-    /// The spec ID for the EVM. Spec is required for some journal entries and needs to be set for
-    /// JournalInner to be functional.
-    ///
-    /// If spec is set it assumed that precompile addresses are set as well for this particular spec.
-    ///
-    /// This spec is used for two things:
-    ///
-    /// - EIP-161: Prior to this EIP, Ethereum had separate definitions for empty and non-existing accounts.
-    /// - EIP-6780: `SELFDESTRUCT` only in same transaction
+    /// Active hardfork; gates fork-dependent journal behaviour (EIP-161 empty accounts,
+    /// EIP-6780 SELFDESTRUCT, Amsterdam BAL tracking, ...).
     spec: primitives.SpecId,
-    /// Warm addresses containing both coinbase and current precompiles.
+    /// Coinbase, precompiles and access list: addresses warm at transaction start.
     warm_addresses: WarmAddresses,
-    /// EIP-7708: pending burn entries for same-tx-created accounts that selfdestructed to self.
-    /// Emitted as Burn logs at postExecution, sorted by address. Checkpointed via burn_i.
+    /// EIP-7708 pending burns (see PendingBurn); checkpointed via burn_i.
     pending_burns: std.ArrayList(PendingBurn),
 
     // EIP-7928: addresses whose account was loaded via loadAccountMutOptionalCode
@@ -480,21 +446,14 @@ pub const JournalInner = struct {
         return logs;
     }
 
-    /// Prepare for next transaction, by committing the current journal to history, incrementing the transaction id
-    /// and returning the logs.
-    ///
-    /// This function is used to prepare for next transaction. It will save the current journal
-    /// and clear the journal for the next transaction.
-    ///
-    /// `commit_tx` is used even for discarding transactions so transaction_id will be incremented.
+    /// Keeps the current transaction's changes: promotes storage present values to original
+    /// (EIP-2200), frees superseded code, clears the journal/transient storage/unclaimed logs
+    /// and increments transaction_id.
     pub fn commitTx(self: *JournalInner) void {
-        // EIP-2200: one journal pass instead of a full evm_state scan.
-        //
-        // Correctness: StorageChanged is appended only when present_value actually changes
-        // (sstore bails early if present == new). Reverted entries are swapRemoved before
-        // this runs. A slot written N times has N entries; the first entry that sees
-        // present != original resets it; subsequent entries see original == present
-        // and skip — idempotent. Accounts created AND selfdestructed in the same tx are skipped.
+        // EIP-2200: find written slots via the journal rather than a full evm_state scan.
+        // Every slot whose present value changed this tx has a StorageChanged entry (reverted
+        // ones are already gone); repeat entries for a slot are idempotent. Accounts created
+        // AND selfdestructed in the same tx are skipped.
         for (self.journal.items) |entry| {
             const data = switch (entry) {
                 .StorageChanged => |d| d,
@@ -508,10 +467,8 @@ pub const JournalInner = struct {
             slot.original_value = slot.present_value;
         }
 
-        // Free superseded code from committed CodeChanged entries: since this tx's
-        // changes are being kept (not reverted), old_code is never restored into any
-        // account.info.code and is otherwise unreachable once the journal is cleared.
-        // Uniquely owned per the same reasoning as CodeChanged's revert case above.
+        // Free superseded code from CodeChanged entries: it can no longer be restored and is
+        // uniquely owned (see the CodeChanged revert case).
         for (self.journal.items) |entry| {
             if (entry == .CodeChanged) {
                 if (entry.CodeChanged.old_code) |old| {
@@ -552,10 +509,7 @@ pub const JournalInner = struct {
         self.warm_addresses.clearCoinbaseAndAccessList();
     }
 
-    /// Take the [`EvmState`] and clears the journal by resetting it to initial state.
-    ///
-    /// Note: Precompile addresses and spec are preserved and initial evm_state of
-    /// warm_preloaded_addresses will contain precompiles addresses.
+    /// Takes the EvmState and resets the journal. Spec and the precompile bitset are kept.
     pub fn finalize(self: *JournalInner) state.EvmState {
         self.warm_addresses.clearCoinbaseAndAccessList();
 
@@ -599,20 +553,12 @@ pub const JournalInner = struct {
         }
     }
 
-    /// Returns the _loaded_ [Account] for the given address.
-    ///
-    /// This assumes that the account has already been loaded.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the account has not been loaded and is missing from the evm_state set.
+    /// Returns the already-loaded account; unreachable if it is not loaded.
     pub fn getAccount(self: JournalInner, address: primitives.Address) *const state.Account {
         return self.evm_state.get(address) orelse unreachable;
     }
 
-    /// Set code and its hash to the account.
-    ///
-    /// Note: Assume account is warm and that hash is calculated from code.
+    /// Sets code and its precomputed hash on a loaded account.
     pub fn setCodeWithHash(self: *JournalInner, address: primitives.Address, code: bytecode.Bytecode, hash: primitives.Hash) void {
         const account = self.evm_state.getPtr(address).?;
         JournalInner.touchAccount(&self.journal, address, account);
@@ -625,11 +571,8 @@ pub const JournalInner = struct {
         account.info.code = code;
     }
 
-    /// Use it only if you know that acc is warm.
-    ///
-    /// Assume account is warm.
-    ///
-    /// In case of EIP-7702 code with zero address, the bytecode will be erased.
+    /// Sets code on a loaded account. An EIP-7702 delegation to the zero address clears
+    /// the code instead.
     pub fn setCode(self: *JournalInner, address: primitives.Address, code: bytecode.Bytecode) void {
         if (code == .eip7702) {
             if (std.mem.eql(u8, &code.eip7702.address, &[_]u8{0} ** 20)) {
@@ -642,37 +585,29 @@ pub const JournalInner = struct {
         self.setCodeWithHash(address, code, hash);
     }
 
-    /// Add journal entry for caller accounting.
+    /// Journals the caller's upfront fee deduction (and nonce bump); the caller mutates
+    /// the account itself.
     pub fn callerAccountingJournalEntry(self: *JournalInner, address: primitives.Address, old_balance: primitives.U256, bump_nonce: bool) void {
-        // account balance changed.
         self.journal.append(alloc_mod.get(), JournalEntryFactory.balanceChanged(address, old_balance)) catch {};
-        // account is touched.
         self.journal.append(alloc_mod.get(), JournalEntryFactory.accountTouched(address)) catch {};
 
         if (bump_nonce) {
-            // nonce changed.
             self.journal.append(alloc_mod.get(), JournalEntryFactory.nonceChanged(address)) catch {};
         }
     }
 
-    /// Increments the balance of the account.
-    ///
-    /// Mark account as touched.
+    /// Loads the account, marks it touched and increments its balance; not journaled.
     pub fn balanceIncr(self: *JournalInner, db: anytype, address: primitives.Address, balance: primitives.U256) !void {
         const account = try self.loadAccountMut(db, address);
         account.data.account.incrBalance(balance);
     }
 
-    /// Increments the nonce of the account.
+    /// Journals a nonce increment; the caller performs the increment itself.
     pub fn nonceBumpJournalEntry(self: *JournalInner, address: primitives.Address) void {
         self.journal.append(alloc_mod.get(), JournalEntryFactory.nonceChanged(address)) catch {};
     }
 
-    /// Transfers balance from two accounts. Returns error if sender balance is not enough.
-    ///
-    /// # Panics
-    ///
-    /// Panics if from or to are not loaded.
+    /// Moves `balance` between two loaded accounts; returns OutOfFunds if the sender is short.
     pub fn transferLoaded(self: *JournalInner, from: primitives.Address, to: primitives.Address, balance: primitives.U256) ?TransferError {
         if (std.mem.eql(u8, &from, &to)) {
             const from_balance = self.evm_state.getPtr(to).?.info.balance;
@@ -708,30 +643,19 @@ pub const JournalInner = struct {
         return null;
     }
 
-    /// Transfers balance from two accounts. Returns error if sender balance is not enough.
+    /// Loads both accounts, then transferLoaded.
     pub fn transfer(self: *JournalInner, db: anytype, from: primitives.Address, to: primitives.Address, balance: primitives.U256) !?TransferError {
         _ = try self.loadAccount(db, from);
         _ = try self.loadAccount(db, to);
         return self.transferLoaded(from, to, balance);
     }
 
-    /// Creates account or returns false if collision is detected.
+    /// Takes a checkpoint, then creates the account at `target_address`: checks for a
+    /// collision, marks it created, sets nonce 1 (Spurious Dragon+), and moves `balance`
+    /// from the caller. On error the checkpoint is already reverted.
     ///
-    /// There are few steps done:
-    /// 1. Make created account warm loaded (AccessList) and this should
-    ///    be done before subroutine checkpoint is created.
-    /// 2. Check if there is collision of newly created account with existing one.
-    /// 3. Mark created account as created.
-    /// 4. Add fund to created account
-    /// 5. Increment nonce of created account if SpuriousDragon is active
-    /// 6. Decrease balance of caller account.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the caller is not loaded inside the EVM state.
-    /// This should have been done inside `create_inner`.
+    /// Caller and target must already be loaded.
     pub fn createAccountCheckpoint(self: *JournalInner, caller: primitives.Address, target_address: primitives.Address, balance: primitives.U256, spec_id: primitives.SpecId) !JournalCheckpoint {
-        // Enter subroutine
         const checkpoint = self.getCheckpoint();
 
         // Newly created account is present, as we just loaded it.
@@ -747,23 +671,19 @@ pub const JournalInner = struct {
             return TransferError.CreateCollision;
         }
 
-        // set account status to create.
         const is_created_globally = target_acc.markCreatedLocally();
 
-        // this entry will revert set nonce.
+        // Reverting this entry also resets the nonce.
         last_journal.append(alloc_mod.get(), JournalEntryFactory.accountCreated(target_address, is_created_globally)) catch {};
         target_acc.info.code = null;
-        // EIP-161: State trie clearing (invariant-preserving alternative)
+        // EIP-161: new contracts start at nonce 1.
         if (primitives.isEnabledIn(spec_id, .spurious_dragon)) {
-            // nonce is going to be reset to zero in AccountCreated journal entry.
             target_acc.info.nonce = 1;
         }
 
-        // touch account. This is important as for pre SpuriousDragon account could be
-        // saved even empty.
+        // Touch it: pre-Spurious Dragon even an empty account is persisted.
         JournalInner.touchAccount(last_journal, target_address, target_acc);
 
-        // Add balance to created account, as we already have target here.
         const new_balance = std.math.add(u256, target_acc.info.balance, balance) catch {
             self.checkpointRevert(checkpoint);
             return TransferError.OverflowPayment;
@@ -777,7 +697,6 @@ pub const JournalInner = struct {
         };
         self.evm_state.getPtr(caller).?.info.balance = new_caller_balance;
 
-        // add journal entry of transferred balance
         last_journal.append(alloc_mod.get(), JournalEntryFactory.balanceTransfer(caller, target_address, balance)) catch {};
 
         return checkpoint;
@@ -832,18 +751,10 @@ pub const JournalInner = struct {
         }
     }
 
-    /// Performs selfdestruct action.
-    /// Transfers balance from address to target. Check if target exist/is_cold
-    ///
-    /// Note: Balance will be lost if address and target are the same BUT when
-    /// current spec enables Cancun, this happens only when the account associated to address
-    /// is created in the same tx
-    ///
     // ─── EIP-7708 helpers ─────────────────────────────────────────────────────────
 
-    /// EIP-7708: Build and append a Transfer(from, to, amount) log to the journal log list.
-    /// Address is encoded into the upper 12 zero-padded bytes of a 32-byte topic.
-    /// OOM silently skips the log (same policy as addLog).
+    /// EIP-7708: append a Transfer(from, to, amount) log. Addresses are left-padded to
+    /// 32-byte topics.
     fn addEip7708TransferLog(self: *JournalInner, from: primitives.Address, to: primitives.Address, amount: primitives.U256) void {
         const alloc = alloc_mod.get();
         const topics = alloc.alloc(primitives.Hash, 3) catch @panic("out of memory");
@@ -879,36 +790,16 @@ pub const JournalInner = struct {
         });
     }
 
-    /// EIP-7708: Register an account for a deferred finalization burn check.
-    ///
-    /// Called at SELFDESTRUCT time for every account entering `accounts_to_delete` (i.e. same-tx-
-    /// created accounts under Cancun+, or any account pre-Cancun).  `amount` is stored but not
-    /// used by `emitBurnLogs()`; pass 0.  The entry is checkpointed so it can be reverted if the
-    /// enclosing call frame reverts.
+    /// EIP-7708: register an account for the deferred burn check in `emitBurnLogs()`.
+    /// Currently has no callers: EIP-8246 removed the SELFDESTRUCT burn.
     fn addPendingBurn(self: *JournalInner, addr: primitives.Address, amount: primitives.U256) void {
         self.pending_burns.append(alloc_mod.get(), .{ .address = addr, .amount = amount }) catch {};
     }
 
-    /// EIP-7708 finalization: emit deferred Burn logs for accounts that received ETH after their
-    /// SELFDESTRUCT opcode executed.
-    ///
-    /// # When this is called
-    /// `postExecution` in `mainnet_builder.zig` calls this after the coinbase priority-fee payment
-    /// and before `takeLogs()` collects the tx log list.  This matches the EELS ordering in
-    /// `process_transaction` (amsterdam/fork.py): miner fee is transferred first, then for each
-    /// address in `accounts_to_delete` the current balance is checked and a Burn log is emitted
-    /// if non-zero.
-    ///
-    /// # Why two Burn logs can appear for the same address
-    /// The SELFDESTRUCT opcode itself emits a Burn log for the balance held *at that moment*
-    /// (see the `addEip7708BurnLog` call in `selfdestruct()`).  The account's `evm_state` balance
-    /// is then zeroed.  Any ETH that arrives afterwards — a payer's CALL sending value, or the
-    /// coinbase receiving its priority fee — accumulates back in `evm_state`.  This second pass
-    /// emits a *separate* Burn log only for that post-SELFDESTRUCT ETH, producing two distinct
-    /// log entries exactly as the EELS reference implementation does.
-    ///
-    /// # Sorting
-    /// Logs are emitted in ascending address order (lexicographic bytes), matching EELS.
+    /// EIP-7708 finalization: emit a Burn log, in ascending address order, for each pending
+    /// burn whose account holds a balance. postExecution calls it after the coinbase payment
+    /// and before takeLogs() (EELS process_transaction order). No-op while `pending_burns`
+    /// is never populated (see addPendingBurn).
     pub fn emitBurnLogs(self: *JournalInner) void {
         if (self.pending_burns.items.len == 0) return;
         std.mem.sort(PendingBurn, self.pending_burns.items, {}, struct {
@@ -917,9 +808,6 @@ pub const JournalInner = struct {
             }
         }.lessThan);
         for (self.pending_burns.items) |burn| {
-            // The account's `evm_state` balance was zeroed when SELFDESTRUCT executed.
-            // Any non-zero balance here is ETH that arrived *after* the opcode (e.g. a
-            // subsequent CALL with value from a payer, or the coinbase priority fee).
             const finalization_balance = if (self.evm_state.get(burn.address)) |acct|
                 acct.info.balance
             else
@@ -931,6 +819,10 @@ pub const JournalInner = struct {
 
     // ─── Selfdestruct ──────────────────────────────────────────────────────────────
 
+    /// SELFDESTRUCT: moves the balance to `target` and marks the account destroyed (from
+    /// Cancun, EIP-6780, only if it was created in this tx). Before Amsterdam a
+    /// self-beneficiary destroy burns the balance; EIP-8246 keeps it.
+    ///
     /// # References:
     ///  * <https://github.com/ethereum/go-ethereum/blob/141cd425310b503c5678e674a8c3872cf46b7086/core/vm/instructions.go#L832-L833>
     ///  * <https://github.com/ethereum/go-ethereum/blob/141cd425310b503c5678e674a8c3872cf46b7086/core/evm_state/evm_statedb.go#L449>
@@ -990,34 +882,9 @@ pub const JournalInner = struct {
             self.journal.append(alloc_mod.get(), entry) catch {};
         }
 
-        // ── EIP-7708 (Amsterdam+): ETH transfer / burn log emission ─────────────────
-        //
-        // EIP-7708 requires a LOG2 event for every wei movement that would otherwise be
-        // invisible on-chain.  There are two distinct moments where logs must be emitted:
-        //
-        //  1. **Opcode time** — when SELFDESTRUCT executes:
-        //       • SELFDESTRUCT to a *different* beneficiary: the ETH is moved now, so a
-        //         Transfer log is emitted immediately (LOG3 with from/to/amount).
-        //       • SELFDESTRUCT to *self* (same-tx-created or pre-Cancun): the ETH is
-        //         destroyed now, so a Burn log is emitted immediately (LOG2 with addr/amount).
-        //         The account's `evm_state` balance is then zeroed by `entry_blk` above.
-        //
-        //  2. **Finalization time** — after the coinbase priority-fee payment:
-        //       Any account in `accounts_to_delete` (same-tx-created SELFDESTRUCTs) may
-        //       receive ETH *after* the opcode executes but *before* the tx commits — for
-        //       example a payer contract calling into the already-destructed address, or
-        //       the coinbase receiving its miner tip.  A second Burn log is emitted for
-        //       this post-opcode ETH via `emitBurnLogs()` in `postExecution`.
-        //
-        // Only accounts in `accounts_to_delete` (isCreatedLocally || pre-Cancun) are
-        // eligible for the finalization burn; pre-existing Cancun+ self-destructed accounts
-        // are a no-op (no state change, no log).
-        //
-        // Reference: ethereum/execution-specs — amsterdam/vm/instructions/system.py
-        //            (selfdestruct) and amsterdam/fork.py (process_transaction finalization).
-        // EIP-8246 (Amsterdam+): SELFDESTRUCT no longer burns ETH, so there are no burn
-        // logs. EIP-7708 still requires a Transfer log for a real ETH move to a
-        // *different* beneficiary. Self-beneficiary is a no-op (balance preserved).
+        // EIP-7708 (Amsterdam+): log a Transfer for ETH moved to a different beneficiary.
+        // EIP-8246 removed the burn, so a self-beneficiary emits nothing.
+        // Reference: execution-specs amsterdam/vm/instructions/system.py (selfdestruct).
         if (primitives.isEnabledIn(self.spec, .amsterdam)) {
             if (!std.mem.eql(u8, &address, &target) and balance > 0) {
                 self.addEip7708TransferLog(address, target, balance);
@@ -1031,22 +898,17 @@ pub const JournalInner = struct {
         }, is_cold);
     }
 
-    /// Loads account into memory. return if it is cold or warm accessed
+    /// Loads the account and marks it warm; `is_cold` reports the prior state.
     pub fn loadAccount(self: *JournalInner, db: anytype, address: primitives.Address) !StateLoad(*const state.Account) {
         return self.loadAccountOptional(db, address, false, false);
     }
 
-    /// Loads account and its code. If account is already loaded it will load its code.
-    ///
-    /// It will mark account as warm loaded. If not existing Database will be queried for data.
-    ///
-    /// In case of EIP-7702 delegated account will not be loaded,
-    /// [`Self::load_account_delegated`] should be used instead.
+    /// Loads the account with its code and marks it warm. An EIP-7702 delegation is not
+    /// followed.
     pub fn loadCode(self: *JournalInner, db: anytype, address: primitives.Address) !StateLoad(*const state.Account) {
         return self.loadAccountOptional(db, address, true, false);
     }
 
-    /// Loads account into memory. If account is already loaded it will be marked as warm.
     /// Check whether an address is cold WITHOUT loading it from the database.
     /// Used by opcode handlers to pre-check gas costs before committing to a DB load.
     pub fn isAddressCold(self: *const JournalInner, address: primitives.Address) bool {
@@ -1165,11 +1027,6 @@ pub const JournalInner = struct {
         );
     }
 
-    /// Loads storage slot.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the account is not present in the state.
     /// Check whether a storage slot is cold WITHOUT loading it from the database.
     pub fn isStorageCold(self: *const JournalInner, address: primitives.Address, key: primitives.StorageKey) bool {
         if (self.evm_state.get(address)) |acct| {
@@ -1196,8 +1053,8 @@ pub const JournalInner = struct {
         return .{ .value = null, .is_cold = !self.warm_addresses.isStorageWarm(address, key) };
     }
 
+    /// Loads a storage slot and marks it warm. The account must already be loaded.
     pub fn sload(self: *JournalInner, db: anytype, address: primitives.Address, key: primitives.StorageKey, skip_cold_load: bool) !StateLoad(primitives.StorageValue) {
-        // assume acc is warm
         const account = self.evm_state.getPtr(address).?;
         const is_newly_created = account.isCreated();
 
@@ -1205,10 +1062,8 @@ pub const JournalInner = struct {
         const gop = try account.storage.getOrPut(key);
         if (gop.found_existing) {
             const slot = gop.value_ptr;
-            // Storage slot already loaded
             var is_cold = slot.isColdTransactionId(self.transaction_id);
-            // If the slot is cold by transaction ID but the EIP-2930 access list marks it warm,
-            // treat it as warm (same effect as eager pre-warming via sload in preExecution).
+            // EIP-2930: an access-list slot is warm even before its first touch this tx.
             if (is_cold and self.warm_addresses.isStorageWarm(address, key)) {
                 is_cold = false;
             }
@@ -1240,20 +1095,15 @@ pub const JournalInner = struct {
         }
     }
 
-    /// Stores storage slot.
-    ///
-    /// And returns (original,present,new) slot value.
-    ///
-    /// **Note**: Account should already be present in our state.
+    /// Stores a storage slot and returns its (original, present, new) values.
+    /// The account must already be loaded.
     pub fn sstore(self: *JournalInner, db: anytype, address: primitives.Address, key: primitives.StorageKey, new_value: primitives.StorageValue, skip_cold_load: bool) !StateLoad(SStoreResult) {
-        // assume that acc exists and load the slot.
         const present = try self.sload(db, address, key, skip_cold_load);
         const acc = self.evm_state.getPtr(address).?;
 
-        // if there is no original value in dirty return present value, that is our original.
         const slot = acc.storage.getPtr(key).?;
 
-        // new value is same as present, we don't need to do anything
+        // No change: no journal entry (commitTx relies on this).
         if (present.data == new_value) {
             return StateLoad(SStoreResult).new(SStoreResult{
                 .original_value = slot.originalValue(),
@@ -1263,7 +1113,6 @@ pub const JournalInner = struct {
         }
 
         self.journal.append(alloc_mod.get(), JournalEntryFactory.storageChanged(address, key, present.data, slot.was_written)) catch {};
-        // insert value into present state.
         slot.present_value = new_value;
         slot.was_written = true;
         return StateLoad(SStoreResult).new(SStoreResult{
@@ -1280,12 +1129,7 @@ pub const JournalInner = struct {
         return self.transient_storage.get(.{ address, key }) orelse @as(primitives.StorageValue, 0);
     }
 
-    /// Store transient storage tied to the account.
-    ///
-    /// If values is different add entry to the journal
-    /// so that old evm_state can be reverted if that action is needed.
-    ///
-    /// EIP-1153: Transient storage opcodes
+    /// Store transient storage tied to the account, journaling any change (EIP-1153).
     pub fn tstore(self: *JournalInner, address: primitives.Address, key: primitives.StorageKey, new_value: primitives.StorageValue) void {
         const previous_value = self.transient_storage.get(.{ address, key }) orelse @as(primitives.StorageValue, 0);
 
@@ -1309,11 +1153,8 @@ pub const JournalInner = struct {
     }
 };
 
-/// A journal of evm_state changes internal to the EVM
-///
-/// On each additional call, the depth of the journaled evm_state is increased (`depth`) and a new journal is added.
-///
-/// The journal contains every evm_state change that happens within that call, making it possible to revert changes made in a specific call.
+/// Journaled EVM state over a database. One flat journal per transaction; a call frame's
+/// changes are reverted by unwinding to the JournalCheckpoint taken at its start.
 pub fn Journal(comptime DB: type) type {
     return struct {
         /// Database
@@ -1332,26 +1173,17 @@ pub fn Journal(comptime DB: type) type {
             self.inner.deinit();
         }
 
-        /// Creates a new JournaledState by copying evm_state data from a JournalInit and provided database.
-        /// This allows reusing the evm_state, logs, and other data from a previous execution context while
-        /// connecting it to a different database backend.
+        /// Wraps an existing JournalInner (state, logs, ...) around a different database.
         pub fn newWithInner(db: DB, inner: JournalInner) @This() {
             return .{ .database = db, .inner = inner };
         }
 
-        /// Consumes the [`Journal`] and returns [`JournalInner`].
-        ///
-        /// If you need to preserve the original journal, use [`Self::to_inner`] instead which clones the state.
+        /// Returns the inner journal by value (no clone).
         pub fn intoInit(self: @This()) JournalInner {
             return self.inner;
         }
 
-        /// Creates a new [`JournalInner`] by cloning all internal evm_state data (evm_state, storage, logs, etc)
-        /// This allows creating a new journaled evm_state with the same evm_state data but without
-        /// carrying over the original database.
-        ///
-        /// This is useful when you want to reuse the current evm_state for a new transaction or
-        /// execution context, but want to start with a fresh database.
+        /// Same as intoInit: returns the inner journal by value; nothing is cloned.
         pub fn toInner(self: @This()) JournalInner {
             return self.inner;
         }
@@ -1425,7 +1257,7 @@ pub fn Journal(comptime DB: type) type {
             try self.inner.balanceIncr(self.getDbMut(), address, balance);
         }
 
-        /// Increments the nonce of the account.
+        /// Journals a nonce increment; the caller performs the increment itself.
         pub fn nonceBumpJournalEntry(self: *@This(), address: primitives.Address) void {
             self.inner.nonceBumpJournalEntry(address);
         }
@@ -1475,7 +1307,6 @@ pub fn Journal(comptime DB: type) type {
         }
 
         pub fn createAccountCheckpoint(self: *@This(), caller: primitives.Address, address: primitives.Address, balance: primitives.U256, spec_id: primitives.SpecId) !JournalCheckpoint {
-            // Ignore error.
             return self.inner.createAccountCheckpoint(caller, address, balance, spec_id);
         }
 
@@ -1489,17 +1320,14 @@ pub fn Journal(comptime DB: type) type {
             self.inner.addEip7708TransferLog(from, to, amount);
         }
 
-        /// EIP-7708: Sort and emit pending burn logs into the log list.
-        /// Call after coinbase payment and before takeLogs() in postExecution.
+        /// See JournalInner.emitBurnLogs.
         pub fn emitBurnLogs(self: *@This()) void {
             self.inner.emitBurnLogs();
         }
 
         pub fn commitTx(self: *@This()) void {
-            // Notify DB of bytecodes deployed by CREATE in this transaction. We scan
-            // the journal (O(tx ops)) rather than all of evm_state (O(loaded accounts)).
-            // Reverted AccountCreated entries are already removed from the journal by
-            // checkpointRevert, so only committed CREATEs appear here.
+            // Notify the DB of code deployed by this tx's CREATEs, found via the journal
+            // rather than a scan of evm_state. Reverted CREATEs are already out of the journal.
             if (comptime @hasDecl(DB, "notifyCodeDeployed")) {
                 for (self.inner.journal.items) |entry| {
                     switch (entry) {
@@ -1523,7 +1351,7 @@ pub fn Journal(comptime DB: type) type {
             self.inner.discardTx();
         }
 
-        /// Clear current journal resetting it to initial evm_state and return changes state.
+        /// Takes the EvmState and resets the journal.
         pub fn finalize(self: *@This()) state.EvmState {
             return self.inner.finalize();
         }
@@ -1560,9 +1388,7 @@ pub fn Journal(comptime DB: type) type {
             return false;
         }
 
-        /// Check whether an address is already in the EVM state cache (was loaded before
-        /// this call). Used to avoid un-tracking addresses that were legitimately accessed
-        /// earlier in the same transaction.
+        /// Whether the address is already in the EVM state cache (loaded earlier in the block).
         pub fn isAddressLoaded(self: *const @This(), address: primitives.Address) bool {
             return self.inner.evm_state.contains(address);
         }
