@@ -1,17 +1,16 @@
 /// zkevm-blockchain-test-runner — runner for zkevm execution-specs fixtures.
 ///
-/// Fixture format (zkevm@v0.8.4 — under `blockchain_tests/`):
+/// Fixture format (tests-zkevm, under `blockchain_tests/`):
 ///   { "test_name": { "network": "Amsterdam", "blocks": [
 ///       { "statelessInputBytes": "0x...", "statelessOutputBytes": "0x...", ... }
 ///   ] } }
 ///
 /// For each block, decodes the SSZ input, runs stateless execution, serializes
 /// the 43-byte SSZ output and asserts it matches `statelessOutputBytes`.
-/// (The `blockchain_tests_engine/` directory uses a different JSON engine-API
-///  layout and is NOT consumed by this runner.)
+/// The `blockchain_tests_engine/` layout is not consumed by this runner.
 ///
 /// Usage:
-///   zkevm-blockchain-test-runner [--fixtures DIR] [--file FILE] [-q] [-x]
+///   zkevm-blockchain-test-runner [--fixtures DIR] [--file FILE] [-x]
 const std = @import("std");
 
 const ssz_decode = @import("ssz_decode");
@@ -103,8 +102,7 @@ fn processFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8, passe
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // 2 GiB: zkevm@v0.8.4 ships a 276 MiB fixture (invalid_negative_excess_blob_gas,
-    // 2744 test cases) that a 256 MiB cap silently dropped from the run.
+    // Some zkevm fixture files exceed 256 MiB; a too-small cap silently drops them.
     const json_text = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(2 * 1024 * 1024 * 1024)) catch |err| {
         std.debug.print("error: cannot read '{s}': {}\n", .{ path, err });
         return;
@@ -197,13 +195,8 @@ fn runBlock(
     const input_bytes = try alloc.alloc(u8, in_stripped.len / 2);
     _ = try std.fmt.hexToBytes(input_bytes, in_stripped);
 
-    // EIP-8025 (optional proofs): when the stateless input cannot be decoded, the guest
-    // emits the "default failed" result (root=0, successful_validation=false,
-    // chain_id=0, schema_id=0) — reference stateless_guest run_stateless_guest /
-    // _default_failed_stateless_output. Assert the fixture's expected output equals the
-    // exact bytes the guest commits (ssz_output.DEFAULT_FAILED_OUTPUT) byte-for-byte, so
-    // a regression in the guest's failed-output encoding is caught here instead of
-    // silently passing.
+    // EIP-8025: an undecodable input yields the all-zero "default failed" output the guest
+    // commits (ssz_output.DEFAULT_FAILED_OUTPUT); compare it byte-for-byte.
     const si = ssz_decode.decode(alloc, input_bytes) catch {
         const failed_hex = std.fmt.bytesToHex(ssz_output.DEFAULT_FAILED_OUTPUT, .lower);
         if (std.ascii.eqlIgnoreCase(out_stripped, &failed_hex)) return true;
@@ -211,18 +204,16 @@ fn runBlock(
         return false;
     };
 
-    // zkevm@v0.8.4: SszStatelessValidationResult is a flat 43-byte container
-    // (root + successful_validation + chain_id + schema_id) → 86 hex chars.
+    // SszStatelessValidationResult: root ‖ successful_validation ‖ chain_id ‖ schema_id.
     if (out_stripped.len != 2 * ssz_output.OUTPUT_SIZE) return error.BadOutputLength;
     var expected: [ssz_output.OUTPUT_SIZE]u8 = undefined;
     _ = try std.fmt.hexToBytes(&expected, out_stripped);
 
     const ep = &si.new_payload_request.execution_payload;
 
-    // Pre-execution: check that the SSZ transactions match the block's transactionsTrie
-    // from the fixture.  When they differ the SSZ is missing transactions (e.g. a block
-    // with an invalid tx that cannot be SSZ-encoded).  The block is invalid in that case,
-    // so we set successful_validation=false and verify the output without executing.
+    // If the SSZ transactions don't match the fixture's transactionsTrie, the SSZ is missing
+    // a tx that could not be SSZ-encoded; the block is invalid, so skip execution and
+    // expect successful_validation=false.
     var tx_root_mismatch = false;
     if (expected_tx_root_hex) |hex| {
         const stripped = if (std.mem.startsWith(u8, hex, "0x")) hex[2..] else hex;
@@ -234,10 +225,8 @@ fn runBlock(
         }
     }
 
-    // successful_validation mirrors spec: True iff execution succeeds AND
-    // post_state_root, receipts_root and logs_bloom match the payload. executeStatelessInput
-    // validates the roots and logs bloom itself (StateRootMismatch / ReceiptsRootMismatch / InvalidLogsBloom), so a
-    // successful return is authoritative.
+    // executeStatelessInput validates the state/receipts roots and logs bloom against the
+    // payload itself, so a successful return is authoritative.
     var exec_err: anyerror = error.Success;
     const successful_validation = if (tx_root_mismatch) false else blk: {
         _ = executor.executeStatelessInput(alloc, si, fork_name) catch |err| {

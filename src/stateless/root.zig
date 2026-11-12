@@ -1,6 +1,4 @@
-//! zevm-stateless: guest program for ZK proof Ethereum block execution.
-//!
-//! Public API surface when used as a library dependency.
+//! Stateless block-execution API, re-exported as `zesu.stateless` by src/root.zig.
 
 pub const input = @import("input");
 pub const output = @import("output");

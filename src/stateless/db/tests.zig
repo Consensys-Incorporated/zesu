@@ -207,7 +207,7 @@ test "basic returns null for valid non-inclusion proof (empty trie)" {
 
 // ─── Test 3: basic — non-inclusion via leaf suffix mismatch ───────────────────
 //
-// The trie contains addr1; we query addr2.  verifyProof decodes the leaf,
+// The trie contains addr1; we query addr2.  The proof walk decodes the leaf,
 // finds the suffix does not match addr2's key nibbles, and returns null.
 
 test "basic returns null when queried address differs from trie leaf" {
@@ -364,7 +364,7 @@ test "storage returns verified slot value" {
 // ─── Test 7: storage — EMPTY_TRIE_HASH storage root returns 0 ─────────────────
 //
 // When an account's storage root is the well-known empty trie hash,
-// verifyProof short-circuits to null without requiring any pool nodes.
+// the storage read short-circuits to 0 without requiring any pool nodes.
 
 test "storage returns 0 for account with empty storage trie" {
     var address: primitives.Address = @splat(0x00);
@@ -394,7 +394,7 @@ test "storage returns 0 for account with empty storage trie" {
     try std.testing.expectEqual(@as(u256, 0), value);
 }
 
-// ─── Test 8: blockHash — returns zero hash ─────────────────────────────────────
+// ─── Test 8: blockHash — missing hash is InvalidWitness ────────────────────────
 
 test "blockHash returns InvalidWitness for missing hash" {
     const w = input.StateWitness{

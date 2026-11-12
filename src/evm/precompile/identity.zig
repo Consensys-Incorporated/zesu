@@ -15,19 +15,15 @@ pub const IDENTITY_BASE: u64 = 15;
 /// The cost per word
 pub const IDENTITY_PER_WORD: u64 = 3;
 
-/// Takes the input bytes, copies them, and returns it as the output.
-///
-/// See: https://ethereum.github.io/yellowpaper/paper.pdf
-/// See: https://etherscan.io/address/0000000000000000000000000000000000000004
+/// Returns a copy of the input (Yellow Paper, Appendix E).
 pub fn identityRun(input: []const u8, gas_limit: u64) main.PrecompileResult {
     const gas_used = main.calcLinearCost(input.len, IDENTITY_BASE, IDENTITY_PER_WORD);
     if (gas_used > gas_limit) {
         return main.PrecompileResult{ .err = main.PrecompileError.OutOfGas };
     }
 
-    // Must return an owned copy: the caller's RETURNDATACOPY would alias their own
-    // execution memory if we returned `input` directly (input is a slice of the
-    // caller's memory buffer).
+    // Must copy: `input` is a slice of the caller's memory, which RETURNDATACOPY
+    // would otherwise alias.
     const output = alloc_mod.get().dupe(u8, input) catch @panic("out of memory");
     return main.PrecompileResult{ .success = main.PrecompileOutput.new(gas_used, output) };
 }

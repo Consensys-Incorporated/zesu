@@ -5,9 +5,7 @@ const primitives = @import("primitives");
 pub const BlockEnv = struct {
     /// The number of ancestor blocks of this block (block height).
     number: primitives.U256,
-    /// Beneficiary (Coinbase or miner) is a address that have signed the block.
-    ///
-    /// This is the receiver address of all the gas spent in the block.
+    /// Fee recipient (COINBASE); receives the priority fee of every transaction.
     beneficiary: primitives.Address,
     /// The timestamp of the block in seconds since the UNIX epoch
     timestamp: primitives.U256,
@@ -49,8 +47,7 @@ pub const BlockEnv = struct {
         };
     }
 
-    /// Takes `blob_excess_gas` saves it inside env
-    /// and calculates `blob_fee` with [`BlobExcessGasAndPrice`].
+    /// Stores `excess_blob_gas` and the blob gas price derived from it.
     pub fn setBlobExcessGasAndPrice(self: *BlockEnv, excess_blob_gas: u64, base_fee_update_fraction: u64) void {
         self.blob_excess_gas_and_price = BlobExcessGasAndPrice.new(excess_blob_gas, base_fee_update_fraction);
     }
@@ -112,13 +109,8 @@ pub const BlobExcessGasAndPrice = struct {
 /// Calculate blob gasprice using the fake_exponential function from EIP-4844.
 /// blob_gasprice = fake_exponential(MIN_BLOB_GASPRICE=1, excess_blob_gas, base_fee_update_fraction)
 fn calculateBlobGasprice(excess_blob_gas: u64, base_fee_update_fraction: u64) u128 {
-    // fake_exponential(factor=1, numerator=excess_blob_gas, denominator=base_fee_update_fraction)
-    // Implements: https://eips.ethereum.org/EIPS/eip-4844#helpers
-    //
-    // Saturating arithmetic (+|=, *|) is used throughout to prevent u128 overflow panics.
-    // When excess_blob_gas/base_fee_update_fraction exceeds ~88 (reachable after sustained
-    // max-blob usage), intermediate products exceed u128 max. Saturation clamps to u128::MAX
-    // instead of panicking; the result saturates at u128::MAX for astronomically high excess.
+    // Saturating ops: once excess/fraction exceeds ~88 the intermediate terms overflow
+    // u128, and the price clamps instead of panicking.
 
     if (base_fee_update_fraction == 0) {
         return std.math.maxInt(u128);

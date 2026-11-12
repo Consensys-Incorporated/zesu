@@ -1,13 +1,10 @@
-/// Blockchain test runner for zevm-stateless.
+/// Blockchain test runner for zesu.
 ///
-/// Reads blockchain test fixtures (JSON), executes the single block in each
-/// test case, and validates:
-///   1. post_state_root  == blocks[0].blockHeader.stateRoot
-///   2. receipts_root    == blocks[0].blockHeader.receiptTrie
-///   3. lastblockhash    == blocks[0].blockHeader.hash   (if 1+2 pass and no exec error)
-///                       == genesisBlockHeader.hash      (otherwise)
-///
-/// Multi-block fixtures (blocks.len != 1) are skipped.
+/// Reads blockchain test fixtures (JSON) and executes each test's blocks in order,
+/// threading post-state from one valid block to the next. Per block it validates
+/// stateRoot, receiptTrie and (when present) blockAccessListHash, and checks
+/// `expectException` blocks fail with a matching exception. Finally `lastblockhash`
+/// must equal the hash of the last block committed (genesis if none).
 const std = @import("std");
 const hardfork = @import("hardfork");
 const executor = @import("executor");
@@ -315,10 +312,6 @@ pub fn runFixture(
             };
 
             const post_state_root = result.post_state_root;
-
-            // Pre-Byzantium: per-tx state roots are now computed inside transition().
-            // Each receipt already has .state_root set correctly.
-
             const receipts_root = result.receipts_root;
 
             const state_ok = std.mem.eql(u8, &post_state_root, &expected_block_state_root);
@@ -414,7 +407,7 @@ pub fn runFixture(
 ///
 /// Each returned entry is in canonical wire format:
 ///   legacy tx (type 0): full RLP list bytes
-///   typed tx  (1–4):    type_byte || rlp_payload (content of the RLP byte string)
+///   typed tx:           type_byte || rlp_payload (content of the RLP byte string)
 fn decodeTxsFromBlock(alloc: std.mem.Allocator, block_rlp: []const u8) ![]const []const u8 {
     const outer = try mpt.rlp.decodeItem(block_rlp);
     const block_payload = switch (outer.item) {

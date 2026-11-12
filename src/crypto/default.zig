@@ -1,7 +1,5 @@
-/// Native cryptographic accelerator implementation (accel_impl interface).
-///
-/// Provides pub functions matching the accel_impl interface consumed by accelerators.zig.
-/// Include paths and C library links are added by build.zig to each exe/test step.
+/// Native accel_impl (`-Dcrypto-backend=default`), consumed by accelerators.zig.
+/// C include paths and library links are added by build.zig.
 const std = @import("std");
 
 const secp256k1_wrapper = @import("backends/secp256k1_wrapper.zig");

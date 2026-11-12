@@ -1,6 +1,7 @@
 const std = @import("std");
 const primitives = @import("primitives");
 
+/// Gas grant for an EIP-8037 system call (see `CfgEnv.system_call_gas`).
 pub const SystemCallGas = struct {
     execution: u64,
     reservoir: u64,
@@ -8,115 +9,56 @@ pub const SystemCallGas = struct {
 
 /// EVM configuration
 pub const CfgEnv = struct {
-    /// Chain ID of the EVM. Used in CHAINID opcode and transaction's chain ID check.
-    ///
-    /// Chain ID is introduced EIP-155.
+    /// Returned by CHAINID and checked against the tx chain ID (EIP-155).
     chain_id: u64,
     /// Whether to check the transaction's chain ID.
-    ///
-    /// If set to `false`, the transaction's chain ID check will be skipped.
     tx_chain_id_check: bool,
-    /// Specification for EVM represent the hardfork
+    /// Active hardfork.
     spec: primitives.SpecId,
-    /// Contract code size limit override.
-    ///
-    /// If None, the limit will be determined by the SpecId (EIP-170 or EIP-7907) at runtime.
-    /// If Some, this specific limit will be used regardless of SpecId.
-    ///
-    /// Useful to increase this because of tests.
+    /// Code size override read by `maxCodeSize()`. The deployment and initcode checks
+    /// (interpreter/host.zig, validation.zig) use the spec constants and ignore it.
     limit_contract_code_size: ?usize,
-    /// Contract initcode size limit override.
-    ///
-    /// If None, the limit will check if `limit_contract_code_size` is set.
-    /// If it is set, it will double it for a limit.
-    /// If it is not set, the limit will be determined by the SpecId (EIP-170 or EIP-7907) at runtime.
-    ///
-    /// Useful to increase this because of tests.
+    /// Initcode size override read by `maxInitcodeSize()` (defaults to twice
+    /// `limit_contract_code_size` when only that is set).
     limit_contract_initcode_size: ?usize,
-    /// Skips the nonce validation against the account's nonce
+    /// Skips the tx-nonce vs account-nonce check.
     disable_nonce_check: bool,
-    /// Blob max count. EIP-7840 Add blob schedule to EL config files.
-    ///
-    /// If this config is not set, the check for max blobs will be skipped.
+    /// Max blobs per transaction (EIP-7840 blob schedule); null skips the check.
     max_blobs_per_tx: ?u64,
-    /// Blob base fee update fraction. EIP-4844 Blob base fee update fraction.
-    ///
-    /// If this config is not set, the blob base fee update fraction will be set to the default value.
-    /// See also [CfgEnv::blob_base_fee_update_fraction].
-    ///
-    /// Default values: Cancun (3338477), Prague/Osaka (5007716), BPO1 (8346193), BPO2 (11684671).
-    /// See [`CfgEnv::blobBaseFeeUpdateFraction`] for the resolution logic.
+    /// Blob base fee update fraction override; null means the spec default
+    /// (see `blobBaseFeeUpdateFraction()`).
     blob_base_fee_update_fraction: ?u64,
-    /// Configures the gas limit cap for the transaction.
-    ///
-    /// If `None`, default value defined by spec will be used.
-    ///
-    /// Introduced in Osaka in EIP-7825: Transaction Gas Limit Cap
-    /// with initials cap of 30M.
+    /// Per-transaction gas limit cap (EIP-7825). Opt-in: validation enforces it only
+    /// when set.
     tx_gas_limit_cap: ?u64,
-    /// A hard memory limit in bytes beyond which
-    /// OutOfGasError::Memory cannot be resized.
-    ///
-    /// In cases where the gas limit may be extraordinarily high, it is recommended to set this to
-    /// a sane value to prevent memory allocation panics.
-    ///
-    /// Defaults to `2^32 - 1` bytes per EIP-1985.
+    /// Memory size limit in bytes (EIP-1985: 2^32 - 1). Not read: the interpreter's
+    /// Memory carries its own limit.
     memory_limit: u64,
-    /// Skip balance checks if `true`
-    ///
-    /// Adds transaction cost to balance to ensure execution doesn't fail.
-    ///
-    /// By default, it is set to `false`.
+    /// Skips the balance check; an underfunded caller is topped up to the max tx cost.
     disable_balance_check: bool,
-    /// There are use cases where it's allowed to provide a gas limit that's higher than a block's gas limit.
-    ///
-    /// To that end, you can disable the block gas limit validation.
-    ///
-    /// By default, it is set to `false`.
+    /// Skips the tx gas limit <= block gas limit check (used for system calls).
     disable_block_gas_limit: bool,
-    /// EIP-3541 rejects the creation of contracts that starts with 0xEF
-    ///
-    /// This is useful for chains that do not implement EIP-3541.
-    ///
-    /// By default, it is set to `false`.
+    /// Disables EIP-3541 (reject deployed code starting with 0xEF).
     disable_eip3541: bool,
-    /// EIP-3607 rejects transactions from senders with deployed code
-    ///
-    /// In development, it can be desirable to simulate calls from contracts, which this setting allows.
-    ///
-    /// By default, it is set to `false`.
+    /// Disables EIP-3607 (reject transactions from senders with deployed code).
     disable_eip3607: bool,
-    /// EIP-7623 increases calldata cost.
-    ///
-    /// This EIP can be considered irrelevant in the context of an EVM-compatible L2 rollup,
-    /// if it does not make use of blobs.
-    ///
-    /// By default, it is set to `false`.
+    /// Disables the EIP-7623 calldata floor cost.
     disable_eip7623: bool,
-    /// Disables base fee checks for EIP-1559 transactions
-    ///
-    /// This is useful for testing method calls with zero gas price.
-    ///
-    /// By default, it is set to `false`.
+    /// Skips the gas price >= base fee check (set when the block has no base fee,
+    /// and for system calls).
     disable_base_fee: bool,
-    /// Disables "max fee must be less than or equal to max priority fee" check for EIP-1559 transactions.
-    /// This is useful because some chains (e.g. Arbitrum) do not enforce this check.
-    /// By default, it is set to `false`.
+    /// Skips the EIP-1559 "max priority fee <= max fee" check.
     disable_priority_fee_check: bool,
     /// EIP-8037 (Amsterdam+): fixed execution grant and state-gas reservoir for a system call,
     /// replacing the TX_MAX_GAS_LIMIT split of the tx gas limit. Null for ordinary transactions.
     system_call_gas: ?SystemCallGas = null,
-    /// Disables fee charging for transactions.
-    /// This is useful when executing `eth_call` for example, on OP-chains where setting the base fee
-    /// to 0 isn't sufficient.
-    /// By default, it is set to `false`.
+    /// Skips the upfront fee deduction, refund and beneficiary payment (system calls).
     disable_fee_charge: bool,
 
     pub fn default() CfgEnv {
         return CfgEnv.newWithSpec(primitives.SpecId.prague);
     }
 
-    /// Creates new `CfgEnv` with default values.
     pub fn new() CfgEnv {
         return CfgEnv.default();
     }
@@ -145,7 +87,7 @@ pub const CfgEnv = struct {
         };
     }
 
-    /// Consumes `self` and returns a new `CfgEnv` with the specified chain ID.
+    /// Returns a copy with `chain_id` replaced.
     pub fn withChainId(self: CfgEnv, chain_id: u64) CfgEnv {
         return .{
             .chain_id = chain_id,
@@ -217,7 +159,7 @@ pub const CfgEnv = struct {
         };
     }
 
-    /// Consumes `self` and returns a new `CfgEnv` with the specified spec.
+    /// Returns a copy with `spec` replaced.
     pub fn withSpec(self: CfgEnv, spec: primitives.SpecId) CfgEnv {
         return .{
             .chain_id = self.chain_id,
@@ -241,7 +183,6 @@ pub const CfgEnv = struct {
         };
     }
 
-    /// Sets the blob target
     pub fn withMaxBlobsPerTx(self: CfgEnv, max_blobs_per_tx: u64) CfgEnv {
         return .{
             .chain_id = self.chain_id,
@@ -265,17 +206,14 @@ pub const CfgEnv = struct {
         };
     }
 
-    /// Sets the blob target
     pub fn setMaxBlobsPerTx(self: *CfgEnv, max_blobs_per_tx: u64) void {
         self.max_blobs_per_tx = max_blobs_per_tx;
     }
 
-    /// Clears the blob target and max count over hardforks.
     pub fn clearMaxBlobsPerTx(self: *CfgEnv) void {
         self.max_blobs_per_tx = null;
     }
 
-    /// Sets the disable priority fee check flag.
     pub fn withDisablePriorityFeeCheck(self: CfgEnv, disable: bool) CfgEnv {
         return .{
             .chain_id = self.chain_id,
@@ -299,7 +237,6 @@ pub const CfgEnv = struct {
         };
     }
 
-    /// Sets the disable fee charge flag.
     pub fn withDisableFeeCharge(self: CfgEnv, disable: bool) CfgEnv {
         return .{
             .chain_id = self.chain_id,
@@ -323,7 +260,6 @@ pub const CfgEnv = struct {
         };
     }
 
-    /// Sets the disable eip7623 flag.
     pub fn withDisableEip7623(self: CfgEnv, disable: bool) CfgEnv {
         return .{
             .chain_id = self.chain_id,
@@ -347,13 +283,8 @@ pub const CfgEnv = struct {
         };
     }
 
-    /// Returns the blob base fee update fraction from [CfgEnv::blob_base_fee_update_fraction].
-    ///
-    /// If this field is not set, the default is derived from the active spec:
-    /// - BPO2+:   11684671 (`BLOB_BASE_FEE_UPDATE_FRACTION_BPO2`)
-    /// - BPO1:    8346193 (`BLOB_BASE_FEE_UPDATE_FRACTION_BPO1`)
-    /// - Prague+:   5007716 (`BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE`, EIP-7691)
-    /// - Cancun:  3338477 (`BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN`)
+    /// The override if set, else the active spec's default (Cancun, Prague/EIP-7691,
+    /// BPO1, BPO2).
     pub fn blobBaseFeeUpdateFraction(self: CfgEnv) u64 {
         return self.blob_base_fee_update_fraction orelse
             if (primitives.isEnabledIn(self.spec, .bpo2))
@@ -416,7 +347,6 @@ pub const CfgEnv = struct {
         return self.disable_balance_check;
     }
 
-    /// Returns `true` if the block gas limit is disabled.
     pub fn isBlockGasLimitDisabled(self: CfgEnv) bool {
         return self.disable_block_gas_limit;
     }

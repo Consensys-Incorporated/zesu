@@ -105,22 +105,19 @@ pub const Either = union(enum) {
     Right: RecoveredAuthorization,
 };
 
-/// The Transaction Environment is a struct that contains all fields that can be found in all Ethereum transaction,
-/// including EIP-4844, EIP-7702, EIP-7873, etc.
+/// Union of the fields of every supported transaction type (legacy through EIP-7702).
 pub const TxEnv = struct {
     /// Transaction type
     tx_type: u8,
-    /// Caller aka Author aka transaction signer
+    /// Recovered transaction signer.
     caller: primitives.Address,
     /// The gas limit of the transaction.
     gas_limit: u64,
-    /// The gas price of the transaction.
-    ///
-    /// For EIP-1559 transaction this represent max_gas_fee.
+    /// Gas price; for EIP-1559-style transactions, max_fee_per_gas.
     gas_price: u128,
     /// The destination of the transaction
     kind: TxKind,
-    /// The value sent to `transact_to`
+    /// Wei sent to the destination.
     value: primitives.U256,
     /// The data of the transaction
     data: ?std.ArrayList(u8),
@@ -138,22 +135,13 @@ pub const TxEnv = struct {
     ///
     /// Incorporated as part of the London upgrade via EIP-1559.
     gas_priority_fee: ?u128,
-    /// The list of blob versioned hashes
-    ///
-    /// Per EIP there should be at least one blob present if `max_fee_per_blob_gas` is `Some`.
-    ///
-    /// Incorporated as part of the Cancun upgrade via EIP-4844.
+    /// Blob versioned hashes (EIP-4844); non-empty for a blob transaction.
     blob_hashes: ?std.ArrayList(primitives.Hash),
     /// The max fee per blob gas
     ///
     /// Incorporated as part of the Cancun upgrade via EIP-4844.
     max_fee_per_blob_gas: u128,
-    /// List of authorizations
-    ///
-    /// `authorization_list` contains the signature that authorizes this
-    /// caller to place the code to signer account.
-    ///
-    /// Set EOA account code for one transaction via EIP-7702.
+    /// EIP-7702 authorizations, each delegating its signer's code to an address.
     authorization_list: ?std.ArrayList(Either),
 
     pub fn default() TxEnv {
@@ -166,7 +154,7 @@ pub const TxEnv = struct {
             .value = @as(primitives.U256, 0),
             .data = null,
             .nonce = 0,
-            .chain_id = 1, // Mainnet chain ID is 1
+            .chain_id = 1,
             .access_list = AccessList.init(alloc_mod.get()),
             .gas_priority_fee = null,
             .blob_hashes = null,

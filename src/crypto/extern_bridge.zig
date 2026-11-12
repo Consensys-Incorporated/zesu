@@ -1,7 +1,7 @@
-/// accel_impl bridge for zesu-core (zkvm builds only).
+/// accel_impl for `-Dcrypto-backend=extern` (zkVM builds).
 ///
-/// Translates the accel_impl module interface into extern fn zkvm_* C symbols
-/// that are resolved via zkvm accel object at link time.  See:
+/// Translates the accel_impl interface into extern fn zkvm_* C symbols that the
+/// zkVM host resolves at link time. See:
 /// https://github.com/eth-act/zkvm-standards/blob/main/standards/c-interface-accelerators/zkvm_accelerators.h
 
 // Local pair types — same binary layout as accelerators.zig pub pair types.
@@ -10,7 +10,7 @@ const Bls12G1MsmPair = extern struct { point: [96]u8, scalar: [32]u8 };
 const Bls12G2MsmPair = extern struct { point: [192]u8, scalar: [32]u8 };
 const Bls12PairingPair = extern struct { g1: [96]u8, g2: [192]u8 };
 
-// ── extern fn declarations — resolved via zkvm provided accel implementation at link time ────────────
+// ── extern fn declarations (resolved at link time) ────────────
 
 extern fn zkvm_keccak256(data: [*]const u8, len: usize, output: *[32]u8) i32;
 extern fn zkvm_sha256(data: [*]const u8, len: usize, output: *[32]u8) i32;
@@ -51,9 +51,8 @@ pub fn ecrecover(msg: *const [32]u8, sig: *const [64]u8, recid: u8, output: *[64
 }
 
 pub fn ripemd160(data: []const u8, output: *[32]u8) void {
-    // zkvm_ripemd160 writes the 20-byte digest right-aligned in the
-    // 32-byte word (12 leading zero bytes) — exactly the accel contract's EVM
-    // output layout. Pass through directly: no marshalling steps on the guest.
+    // zkvm_ripemd160 already writes the EVM layout (12 zero bytes, then the
+    // 20-byte digest), so no marshalling is needed.
     _ = zkvm_ripemd160(data.ptr, data.len, output);
 }
 

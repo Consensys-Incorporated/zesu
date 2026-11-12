@@ -7,8 +7,7 @@ const Interpreter = interpreter_mod.Interpreter;
 const InstructionFn = interpreter_mod.InstructionFn;
 const opcodes = @import("opcodes/main.zig");
 
-// Re-export dispatch table types so callers that previously used
-// `protocol_schedule.InstructionTable` continue to compile unchanged.
+// Dispatch table types live in interpreter.zig; re-exported for callers.
 pub const InstructionEntry = interpreter_mod.InstructionEntry;
 pub const InstructionTable = interpreter_mod.InstructionTable;
 
@@ -128,7 +127,7 @@ fn makeFrontierTable() InstructionTable {
     // Environment: host-requiring opcodes
     table[bytecode_mod.ORIGIN] = entry(opcodes.opOrigin, gas_costs.G_BASE);
     table[bytecode_mod.GASPRICE] = entry(opcodes.opGasprice, gas_costs.G_BASE);
-    // Frontier/Homestead gas (20 each); Tangerine Whistle (EIP-150) raises these to 700/700/400.
+    // Frontier gas (20 each); EIP-150 raises EXTCODESIZE/EXTCODECOPY to 700 and BALANCE to 400.
     table[bytecode_mod.EXTCODESIZE] = entry(opcodes.opExtcodesize, 20);
     table[bytecode_mod.EXTCODECOPY] = entry(opcodes.opExtcodecopy, 20);
     table[bytecode_mod.BLOCKHASH] = entry(opcodes.opBlockhash, 20);

@@ -1,26 +1,20 @@
 const std = @import("std");
 const primitives = @import("primitives");
 
-// Core types come from the precompile_types module so that a
-// "precompile_overrides" build module can import them without creating a
-// circular module dependency.  main.zig re-exports them for backward compat.
+// Core types live in the dependency-free precompile_types module (see types.zig).
 const T = @import("precompile_types");
 pub const PrecompileError = T.PrecompileError;
 pub const PrecompileOutput = T.PrecompileOutput;
 pub const PrecompileResult = T.PrecompileResult;
 pub const PrecompileFn = T.PrecompileFn;
 
-// Complete precompile implementation table.  For native builds this is
-// native_impls.zig (all host-OS implementations).  Inject a custom module via
-//   precompile_module.addImport("precompile_implementations", your_module)
-// to supply alternative implementations (e.g. zkVM hardware circuits).
+// EVM-ABI wrappers over the `accelerators` crypto interface, whose backend is
+// chosen at build time with -Dcrypto-backend=default|extern.
 const impls = @import("default_impls.zig");
 
-// Allocator used by Precompiles hash-maps.
-// Inject a custom "zevm_allocator" module in build.zig to control this.
 const alloc_mod = @import("zesu_allocator");
 
-// Pure-Zig precompile modules — safe to compile on any target (no C deps).
+// Precompiles with their own wrapper files (the rest are in default_impls.zig).
 pub const identity = @import("identity.zig");
 pub const hash = @import("hash.zig");
 pub const modexp = @import("modexp.zig");
@@ -103,10 +97,8 @@ pub const PrecompileId = union(enum) {
     /// For precompiles not yet introduced in the given spec, returns the
     /// closest activation fork variant.
     ///
-    /// C-dependent precompiles (ecrecover, bn254, kzg, bls12, secp256r1) are
-    /// sourced exclusively from the injected "precompile_implementations" module.
-    /// Pure-Zig precompiles (sha256, ripemd160, identity, modexp, blake2f) use
-    /// their built-in implementations directly.
+    /// ecrecover, bn254, kzg, bls12 and secp256r1 wrappers live in default_impls.zig;
+    /// sha256, ripemd160, identity, modexp and blake2f in their own files.
     pub fn precompile(self: PrecompileId, spec: PrecompileSpecId) ?Precompile {
         return switch (self) {
             .EcRec => Precompile.new(.EcRec, u64ToAddress(1), impls.ecrecover),
@@ -228,9 +220,8 @@ pub const Precompiles = struct {
     optimized_access: [256]?Precompile,
     /// Whether all precompiles are short addresses
     all_short_addresses: bool,
-    /// 320-bit bitset (5 × u64) of registered short-address indices.
-    /// Bit n is set when a precompile at short-address index n is registered.
-    /// Built incrementally in add() — no separate initialization step needed.
+    /// Bit n set ⇔ a precompile is registered at short address n. Copied into the
+    /// journal's warm-address set so precompile warmth is a bit test.
     precompile_bitset: [5]u64,
 
     /// Create new precompiles collection
@@ -257,7 +248,6 @@ pub const Precompiles = struct {
             }
         }
 
-        // Update precompile_bitset for O(1) isCold checks in the journal.
         if (primitives.shortAddress(precompile.address)) |n| {
             const word = n / 64;
             const bit = @as(u64, 1) << @intCast(n % 64);
@@ -375,7 +365,6 @@ pub const Precompiles = struct {
     }
 };
 
-// Import test module
 pub const tests = @import("tests.zig");
 
 test {

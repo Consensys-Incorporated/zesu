@@ -3,8 +3,7 @@
 /// Produces geth-compatible result.json and alloc.json files.
 /// All numbers are hex-encoded with 0x prefix; hashes are 0x-prefixed 32-byte hex.
 ///
-/// Trie root computations (computeStateRoot, computeReceiptsRoot, etc.) are
-/// canonical implementations in executor/output.zig; re-exported here.
+/// The trie-root functions are re-exported from the executor's output module.
 const std = @import("std");
 
 /// Minimal anytype-writer wrapper backed by an ArrayListUnmanaged(u8).
@@ -82,7 +81,6 @@ pub fn writeResultJson(
     const tx_root = try executor_output.computeTxRoot(alloc, result.accepted_txs, result.chain_id);
     const receipts_root = try executor_output.computeReceiptsRoot(alloc, result.receipts);
 
-    // Collect all fields into a list, then join with commas
     var fields = std.ArrayListUnmanaged([]const u8).empty;
     defer fields.deinit(alloc);
 
@@ -91,37 +89,31 @@ pub fn writeResultJson(
 
     var bw: ListWriter = .{ .list = &buf, .alloc = alloc };
 
-    // stateRoot
     buf.clearRetainingCapacity();
     try bw.writeAll("\"stateRoot\": ");
     try writeHash(bw, state_root);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // txRoot
     buf.clearRetainingCapacity();
     try bw.writeAll("\"txRoot\": ");
     try writeHash(bw, tx_root);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // receiptsRoot
     buf.clearRetainingCapacity();
     try bw.writeAll("\"receiptsRoot\": ");
     try writeHash(bw, receipts_root);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // logsHash
     buf.clearRetainingCapacity();
     try bw.writeAll("\"logsHash\": ");
     try writeHash(bw, logs_hash);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // logsBloom
     buf.clearRetainingCapacity();
     try bw.writeAll("\"logsBloom\": ");
     try writeBloom(bw, result.block_bloom);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // receipts
     buf.clearRetainingCapacity();
     try bw.writeAll("\"receipts\": [\n");
     for (result.receipts, 0..) |receipt, i| {
@@ -132,24 +124,21 @@ pub fn writeResultJson(
     try bw.writeAll("  ]");
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // rejected — always empty: transition() now fails-fast on any invalid tx
+    // Always empty: transition() fails fast on any invalid tx instead of rejecting it.
     buf.clearRetainingCapacity();
     try bw.writeAll("\"rejected\": []");
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // currentDifficulty
     buf.clearRetainingCapacity();
     try bw.writeAll("\"currentDifficulty\": ");
     try writeU256Hex(bw, difficulty);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // gasUsed
     buf.clearRetainingCapacity();
     try bw.writeAll("\"gasUsed\": ");
     try writeU64Hex(bw, result.cumulative_gas);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // currentBaseFee (optional)
     if (result.current_base_fee) |bf| {
         buf.clearRetainingCapacity();
         try bw.writeAll("\"currentBaseFee\": ");
@@ -157,7 +146,6 @@ pub fn writeResultJson(
         try fields.append(alloc, try alloc.dupe(u8, buf.items));
     }
 
-    // currentExcessBlobGas (optional)
     if (result.excess_blob_gas) |ebg| {
         buf.clearRetainingCapacity();
         try bw.writeAll("\"currentExcessBlobGas\": ");
@@ -165,7 +153,7 @@ pub fn writeResultJson(
         try fields.append(alloc, try alloc.dupe(u8, buf.items));
     }
 
-    // blobGasUsed (optional, if non-zero)
+    // Omitted when zero.
     if (result.blob_gas_used > 0) {
         buf.clearRetainingCapacity();
         try bw.writeAll("\"blobGasUsed\": ");
@@ -173,7 +161,6 @@ pub fn writeResultJson(
         try fields.append(alloc, try alloc.dupe(u8, buf.items));
     }
 
-    // Emit JSON
     try writer.writeAll("{\n");
     for (fields.items, 0..) |field, i| {
         try writer.writeAll("  ");

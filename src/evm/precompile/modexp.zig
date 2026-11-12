@@ -4,7 +4,8 @@ const main = @import("main.zig");
 const alloc_mod = @import("zesu_allocator");
 const accel = @import("accelerators");
 
-/// Modular exponentiation precompiles for different specs
+/// MODEXP (0x05): EIP-198 gas, repriced by EIP-2565 (Berlin) and EIP-7883 (Osaka),
+/// with EIP-7823 input-size limits from Osaka.
 pub const BYZANTIUM = main.Precompile.new(
     main.PrecompileId.ModExp,
     main.u64ToAddress(5),
@@ -47,14 +48,12 @@ fn rightPadVec(input: []const u8, len: usize) []const u8 {
     if (input.len >= len) {
         return input[0..len];
     }
-    // For simplicity, we'll handle padding in the caller
     return input;
 }
 
 /// Extract U256 from bytes (big-endian)
 fn extractU256(bytes: []const u8) primitives.U256 {
     const padded = rightPad(32, bytes);
-    // Convert to U256 - simplified for now
     var result: primitives.U256 = 0;
     for (padded) |b| {
         result = result * 256 + b;
@@ -67,7 +66,6 @@ fn calculateIterationCount(exp_length: u64, exp_highp: primitives.U256, multipli
     if (exp_length <= 32 and exp_highp == 0) {
         return 0;
     } else if (exp_length <= 32) {
-        // Count bits in exp_highp
         var bits: u64 = 0;
         var val = exp_highp;
         while (val > 0) {
@@ -126,11 +124,8 @@ fn berlinGasCalc(base_len: u64, exp_len: u64, mod_len: u64, exp_highp: primitive
     return @max(200, gas / 3);
 }
 
-/// Calculate gas cost for Osaka (EIP-7823 and EIP-7883)
-/// Formula: max(500, complexity * iteration_count)
-/// where complexity is based on max(base_len, mod_len), not exp_len
+/// Osaka (EIP-7883): max(500, complexity * max(iteration_count, 1)).
 fn osakaGasCalc(base_len: u64, exp_len: u64, mod_len: u64, exp_highp: primitives.U256) u64 {
-    // Use max(base_len, mod_len) for complexity, not exp_len
     const max_len = @max(base_len, mod_len);
     const iteration_count = calculateIterationCount(exp_len, exp_highp, 16);
 
@@ -142,7 +137,6 @@ fn osakaGasCalc(base_len: u64, exp_len: u64, mod_len: u64, exp_highp: primitives
         complexity = 2 * words * words;
     }
 
-    // EIP-7883: use max(1, iteration_count) so a zero exponent costs complexity, not 0
     const effective_iter = if (iteration_count == 0) @as(u64, 1) else iteration_count;
     const gas = complexity * effective_iter;
     return @max(@as(u64, 500), gas);
@@ -162,14 +156,11 @@ fn runInner(
 
     const HEADER_LENGTH: usize = 96;
 
-    // EVM spec: if input is shorter than the 96-byte header, missing bytes are treated as zeros.
-    // Never error here — the precompile always succeeds (or OOGs), it never returns an error
-    // for short input.
+    // Input shorter than the header is zero-extended, never an error.
     var header: [HEADER_LENGTH]u8 = [_]u8{0} ** HEADER_LENGTH;
     const header_copy = @min(input.len, HEADER_LENGTH);
     @memcpy(header[0..header_copy], input[0..header_copy]);
 
-    // Extract lengths from header (32 bytes each, big-endian)
     const base_len_bytes = rightPad(32, header[0..32]);
     const exp_len_bytes = rightPad(32, header[32..64]);
     const mod_len_bytes = rightPad(32, header[64..96]);
@@ -178,7 +169,7 @@ fn runInner(
     const exp_len_u256 = extractU256(&exp_len_bytes);
     const mod_len_u256 = extractU256(&mod_len_bytes);
 
-    // Check EIP-7823 limits for Osaka (1024 bytes per parameter)
+    // EIP-7823: each length is capped at 1024 bytes from Osaka.
     const EIP7823_LIMIT: u64 = 1024;
     if (is_osaka) {
         if (base_len_u256 > EIP7823_LIMIT or exp_len_u256 > EIP7823_LIMIT or mod_len_u256 > EIP7823_LIMIT) {
@@ -199,29 +190,24 @@ fn runInner(
     var exp_highp_bytes: [32]u8 = [_]u8{0} ** 32;
     if (input.len > exp_start) {
         const available = @min(exp_highp_len, input.len - exp_start);
-        // Place available bytes at the MSB side of the 32-byte big-endian representation.
-        // Remaining (exp_highp_len - available) bytes are implicitly zero (right-padding for truncated input).
+        // Right-align the exp_highp_len-byte value; bytes past the end of input stay zero.
         const padding = 32 - exp_highp_len;
         @memcpy(exp_highp_bytes[padding..][0..available], input[exp_start..][0..available]);
     }
     const exp_highp = extractU256(&exp_highp_bytes);
 
-    // Calculate gas cost
     const gas_cost = calc_gas(base_len, exp_len, mod_len, exp_highp);
     if (gas_cost > gas_limit) {
         return main.PrecompileResult{ .err = main.PrecompileError.OutOfGas };
     }
 
-    // mod_len == 0 → output is always empty, regardless of base_len.
-    // Must check before computing total_data_len to avoid allocating a
-    // multi-TB buffer when base_len is large (e.g. truncated 96-byte header).
+    // mod_len == 0 → empty output. Checked before sizing the data buffer, which
+    // would otherwise be huge when a truncated header claims a large base_len.
     if (mod_len == 0) {
         return main.PrecompileResult{ .success = main.PrecompileOutput.new(gas_cost, &[_]u8{}) };
     }
 
-    // Extract base, exponent, and modulus.
-    // EVM spec: reading calldata beyond its length gives zeros — zero-pad if input is short.
-    // Guard against input shorter than the 96-byte header (already zero-extended in header above).
+    // Zero-extend base/exp/mod data when the input is short.
     const data_after_header = if (input.len > HEADER_LENGTH) input[HEADER_LENGTH..] else &[_]u8{};
     const total_data_len = std.math.add(usize, base_len, std.math.add(usize, exp_len, mod_len) catch
         return main.PrecompileResult{ .err = main.PrecompileError.OutOfGas }) catch
@@ -244,8 +230,7 @@ fn runInner(
     const exp = if (exp_len > 0) data[base_len..][0..exp_len] else &[_]u8{};
     const modulus = if (mod_len > 0) data[base_len + exp_len ..][0..mod_len] else &[_]u8{};
 
-    // Allocate output buffer (left-padded with zeros to mod_len bytes) via c_allocator.
-    // This buffer is owned by the caller and must NOT be freed here.
+    // Output is mod_len bytes, left-padded with zeros; caller frees it.
     const heap_out = alloc_mod.get().alloc(u8, mod_len) catch @panic("out of memory");
     @memset(heap_out, 0);
     _ = accel.modexp(base, exp, modulus, heap_out);

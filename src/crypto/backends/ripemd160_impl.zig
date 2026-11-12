@@ -1,5 +1,4 @@
-/// RIPEMD-160 hash function — standalone pure-Zig implementation.
-/// Extracted from src/evm/precompile/ripemd160.zig for use as a crypto backend.
+/// RIPEMD-160 hash function in pure Zig.
 ///
 /// Full two-line (left + right) RIPEMD-160 per the Dobbertin/Bosselaers/Preneel spec.
 const std = @import("std");

@@ -1,12 +1,9 @@
 //! Single-threaded scratch arena: bump within a chunk, free every chunk at once.
 //!
-//! `std.heap.ArenaAllocator` is threadsafe by construction — 17 atomic
-//! operations for lock-free node lists, ABA avoidance and acquire/release
-//! resize pairs. zesu executes one block on one thread, and the rv64im guest
-//! has no atomic instructions at all (the target subtracts `.a`/`.zaamo`/
-//! `.zalrsc`), so every one of those lowers to an out-of-line libcall there.
-//! None of that synchronisation can ever be observed, so this drops it: the
-//! arena is a bump pointer and a chunk list, and does strictly less work.
+//! `std.heap.ArenaAllocator` is threadsafe, and the rv64im guest has no atomic
+//! instructions (the target drops the A extension), so each of its atomics lowers to
+//! an out-of-line libcall there. zesu executes a block on one thread, so this arena
+//! is just a bump pointer and a chunk list.
 //!
 //! Semantics match the part of `ArenaAllocator` callers actually rely on:
 //! allocate freely, never free individually, reclaim everything in `deinit`.

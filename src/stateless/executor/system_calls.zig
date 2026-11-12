@@ -1,20 +1,9 @@
-/// EIP system contract call handlers for pre- and post-block processing.
-///
-/// "System contract calls" here refers to EVM-level calls made by the
-/// protocol itself (from SYSTEM_ADDRESS) to designated system contracts —
-/// not OS/machine-level system calls.
-///
-/// All system contract calls execute outside normal gas accounting and
-/// tx validation. State changes are committed on success and discarded
-/// on revert.
-///
-/// Pre-block  (Cancun+/Prague+, before user transactions):
-///   EIP-4788 — call beacon roots contract with parent_beacon_block_root as calldata.
-///   EIP-2935 — call block history contract with parent_hash as calldata.
-///
-/// Post-block (Prague+, after user transactions):
-///   EIP-7002 — withdrawal requests system contract call.
-///   EIP-7251 — consolidation requests system contract call.
+//! Protocol calls from SYSTEM_ADDRESS to system contracts, outside normal gas
+//! accounting and tx validation.
+//!
+//! Pre-block:  EIP-4788 beacon roots (Cancun+), EIP-2935 block history (Prague+).
+//! Post-block: EIP-7002 withdrawals, EIP-7251 consolidations (Prague+);
+//!             EIP-8282 builder deposits/exits (Amsterdam+).
 const std = @import("std");
 const primitives = @import("primitives");
 const input = @import("executor_types");
@@ -45,12 +34,10 @@ const SYSTEM_ADDRESS = primitives.SYSTEM_ADDRESS;
 
 /// Execute a single privileged system call as SYSTEM_ADDRESS.
 ///
-/// Skips the call silently if the target contract is not deployed.
-/// Discards state on any execution error — a broken system contract must not
-/// invalidate the block. When `capture` is true, returns a caller-owned copy of
-/// the call's return data and surfaces execution failure as
-/// error.SystemContractCallFailed (see applyPostBlockCallsCapture); when false,
-/// the call is fire-and-forget (see applyPreBlockCalls).
+/// Skips the call if the target has no code; an unprovable target sets ctx_error.
+/// When `capture` is true, returns a caller-owned copy of the return data and surfaces
+/// a failed call as error.SystemContractCallFailed (see applyPostBlockCallsCapture);
+/// when false, the call is fire-and-forget and its failure ignored (see applyPreBlockCalls).
 fn runSystemCallImpl(
     comptime capture: bool,
     ctx: anytype,
@@ -165,8 +152,8 @@ fn runSystemCallImpl(
     if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
     ctx.tx.data = null;
 
-    // System calls must not increment the caller's nonce.
-    // zevm always bumps nonce unconditionally, so patch it back.
+    // System calls must not increment the caller's nonce, but the handler always bumps
+    // it, so patch it back.
     if (ctx.journaled_state.inner.evm_state.getPtr(SYSTEM_ADDRESS)) |sa| {
         if (sa.info.nonce > 0) sa.info.nonce -= 1;
     }

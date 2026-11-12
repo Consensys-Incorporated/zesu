@@ -12,8 +12,9 @@
 ///   -q                Quiet — only print FAIL lines and the summary
 ///   --json            Print JSON diagnostics on failure
 ///
-/// For each fixture, validates post_state_root, receipts_root, and lastblockhash.
-/// Multi-block test cases are skipped.
+/// Each fixture file runs in a child process (re-invoking this binary with --file) so a
+/// crash or heap corruption is isolated to that file; children report counts on a
+/// `STATS:` stderr line that the parent aggregates.
 const std = @import("std");
 
 const runner = @import("runner");
@@ -93,7 +94,6 @@ pub fn main(init: std.process.Init) !void {
             }
         }.lessThan);
 
-        // Get exe path for subprocess spawning.
         var exe_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const exe_len = std.process.executablePath(init.io, &exe_buf) catch 0;
         const exe_path: []const u8 = if (exe_len > 0) exe_buf[0..exe_len] else args[0];
@@ -102,7 +102,6 @@ pub fn main(init: std.process.Init) !void {
             const full_path = try std.Io.Dir.path.join(allocator, &.{ fixtures_dir, rel_path });
             defer allocator.free(full_path);
 
-            // Run each file in a subprocess to isolate heap state.
             var argv = std.ArrayList([]const u8).empty;
             defer argv.deinit(allocator);
             try argv.appendSlice(allocator, &.{ exe_path, "--file", full_path });

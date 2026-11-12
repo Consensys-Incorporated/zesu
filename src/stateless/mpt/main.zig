@@ -1,18 +1,14 @@
-//! Merkle Patricia Trie: proof verification for stateless execution.
-//!
-//! Verification works against a flat node pool (from debug_executionWitness).
-//! For each step, the next node is located by scanning the pool for an entry
-//! whose keccak256 hash matches the expected reference — no pre-assembled
-//! ordered proof paths are needed.
-//!
-//! All functions are allocation-free; stack buffers are used for nibble paths.
+//! Merkle Patricia Trie over an unordered witness node pool: proof walks, secured-trie
+//! path validation, and root updates. Each step resolves the next node by its keccak256,
+//! via a NodeIndex (the hot path) or a linear pool scan; no ordered proof paths are needed.
+//! Verification is allocation-free; updates allocate the nodes they create.
 
 const std = @import("std");
 const primitives = @import("primitives");
 const input = @import("input");
 const accel = @import("accelerators");
 
-/// RLP decoder — also re-exported so callers (e.g. io.zig) can reuse it.
+/// RLP decoder, re-exported for rlp_decode.zig and tools.
 pub const rlp = @import("rlp.zig");
 pub const builder = @import("builder.zig");
 const nibbles = @import("nibbles.zig");
@@ -39,14 +35,13 @@ pub const AccountState = struct {
     code_hash: primitives.Hash,
 };
 
-/// RLP encoding of an empty node (single byte 0x80). Used as a static sentinel
-/// to avoid bump-allocator dupe calls for the common empty-node case in trie updates.
+/// RLP encoding of an empty node. A static sentinel so trie updates need not allocate one.
 pub const EMPTY_NODE_RLP: [1]u8 = .{0x80};
 
 // ─── keccak256 ─────────────────────────────────────────────────────────────────
 
-/// Delegates to the injected accelerators module.
-/// Default: std.crypto pure-Zig.  Zisk build: hardware CSR circuit.
+/// Delegates to the accelerators module (std.crypto under the default backend,
+/// `zkvm_keccak256` under the extern backend).
 pub fn keccak256(data: []const u8) [32]u8 {
     var hash: [32]u8 = undefined;
     accel.keccak256(data, &hash);
@@ -55,14 +50,11 @@ pub fn keccak256(data: []const u8) [32]u8 {
 
 // ─── NodeIndex ─────────────────────────────────────────────────────────────────
 
-/// Pre-computed hash → node-bytes map built once from the witness node pool.
-/// Use buildNodeIndex() to populate, then pass to the *Indexed verification
-/// functions for O(1) node lookups instead of O(N·keccak) linear scans.
+/// Hash → node-bytes map built once from the witness node pool (buildNodeIndex), used by
+/// the *Indexed functions, validateSecuredTriePaths and batchUpdateIndexed.
 pub const NodeIndex = std.HashMap([32]u8, []const u8, primitives.HashContext, 80);
 
-/// Build a NodeIndex from a flat node pool.
-/// Each entry maps keccak256(node_bytes) → node_bytes.
-/// The returned map is owned by the caller; call deinit() when done.
+/// Values slice into `pool`, which must outlive the index. Caller owns the map.
 pub fn buildNodeIndex(allocator: std.mem.Allocator, pool: []const []const u8) !NodeIndex {
     var index = NodeIndex.init(allocator);
     try index.ensureTotalCapacity(@intCast(pool.len));
@@ -73,7 +65,6 @@ pub fn buildNodeIndex(allocator: std.mem.Allocator, pool: []const []const u8) !N
     return index;
 }
 
-/// O(1) index lookup — used by the indexed API for large witness pools.
 fn findNodeInIndex(index: *const NodeIndex, hash: primitives.Hash) ?[]const u8 {
     return index.get(hash);
 }
@@ -858,12 +849,10 @@ pub fn updateStorageChained(
         return;
     }
 
-    // Find root in combined pool (original witness nodes + nodes produced by prior updates)
     const root_bytes = findNode(pool, root.*) orelse
         findNode(extra.items, root.*) orelse
         return error.InvalidProof;
     const new_root_rlp = try updNodeEx(alloc, root_bytes, &key_nibs, new_val_enc, pool, extra);
-    // Store new root in extra so the next update can find it
     try extra.append(alloc, new_root_rlp);
     root.* = if (new_root_rlp.len == 1 and new_root_rlp[0] == 0x80)
         EMPTY_TRIE_HASH

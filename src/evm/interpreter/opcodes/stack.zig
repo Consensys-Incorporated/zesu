@@ -25,16 +25,15 @@ pub fn opPush0(ctx: *InstructionContext) void {
     stack.pushUnsafe(0);
 }
 
-/// Inline implementation for PUSH1..PUSH32, callable with comptime n from runDispatch.
-/// Reads n immediate bytes, pushes as big-endian U256, advances PC by n.
+/// PUSH1..PUSH32 body: reads n immediate bytes (zero-filled past the end of code),
+/// pushes them as a big-endian U256, advances PC by n.
 pub inline fn opPushNImpl(ctx: *InstructionContext, comptime n: u8) void {
     const stack = &ctx.interpreter.stack;
     if (!stack.hasSpace(1)) {
         ctx.interpreter.halt(.stack_overflow);
         return;
     }
-    // Read n immediate bytes directly into the right-aligned position of the 32-byte
-    // buffer, skipping the intermediate [n]u8 copy that readImmediates would allocate.
+    // `bytes()` is the unpadded code, so the immediate may run past the end.
     var buf: [32]u8 = .{0} ** 32;
     const ext = &ctx.interpreter.bytecode;
     const bytes = ext.bytes();
@@ -54,9 +53,7 @@ pub inline fn opPushNImpl(ctx: *InstructionContext, comptime n: u8) void {
     ctx.interpreter.bytecode.relativeJump(n);
 }
 
-/// Comptime PUSH generator for PUSH1..PUSH32.
-/// Reads n immediate bytes at current PC, pushes as big-endian U256, advances PC by n.
-/// Static gas (G_VERYLOW) is charged by the dispatch loop.
+/// Table handler for PUSHn. runDispatch inlines PUSH1..PUSH32 itself.
 pub fn makePushFn(comptime n: u8) InstructionFn {
     return struct {
         fn op(ctx: *InstructionContext) void {
@@ -65,7 +62,7 @@ pub fn makePushFn(comptime n: u8) InstructionFn {
     }.op;
 }
 
-/// Inline implementation for DUP1..DUP16, callable with comptime n from runDispatch.
+/// DUP1..DUP16 body.
 pub inline fn opDupNImpl(ctx: *InstructionContext, comptime n: u8) void {
     const stack = &ctx.interpreter.stack;
     if (!stack.hasItems(n)) {
@@ -79,9 +76,8 @@ pub inline fn opDupNImpl(ctx: *InstructionContext, comptime n: u8) void {
     stack.dupUnsafe(n);
 }
 
-/// Comptime DUP generator for DUP1..DUP16.
-/// Duplicates the nth stack item (1-indexed from top).
-/// Static gas (G_VERYLOW) is charged by the dispatch loop.
+/// Table handler for DUPn: duplicates the nth item (1-indexed from top).
+/// runDispatch inlines DUP1..DUP16 itself.
 pub fn makeDupFn(comptime n: u8) InstructionFn {
     return struct {
         fn op(ctx: *InstructionContext) void {
@@ -90,7 +86,7 @@ pub fn makeDupFn(comptime n: u8) InstructionFn {
     }.op;
 }
 
-/// Inline implementation for SWAP1..SWAP16, callable with comptime n from runDispatch.
+/// SWAP1..SWAP16 body.
 pub inline fn opSwapNImpl(ctx: *InstructionContext, comptime n: u8) void {
     const stack = &ctx.interpreter.stack;
     if (!stack.hasItems(n + 1)) {
@@ -100,9 +96,8 @@ pub inline fn opSwapNImpl(ctx: *InstructionContext, comptime n: u8) void {
     stack.swapUnsafe(n);
 }
 
-/// Comptime SWAP generator for SWAP1..SWAP16.
-/// Swaps top of stack with the (n+1)th item.
-/// Static gas (G_VERYLOW) is charged by the dispatch loop.
+/// Table handler for SWAPn: swaps the top with the (n+1)th item.
+/// runDispatch inlines SWAP1..SWAP16 itself.
 pub fn makeSwapFn(comptime n: u8) InstructionFn {
     return struct {
         fn op(ctx: *InstructionContext) void {
@@ -125,7 +120,7 @@ pub fn opDupN(ctx: *InstructionContext) void {
         return;
     }
     const n: usize = (@as(usize, imm) + 145) % 256;
-    // n == 0 or n <= 16: depth 0 is invalid, depths 1-16 overlap DUP1-DUP16 (also invalid for DUPN).
+    // Valid immediates decode to 17..=235, so `n <= 16` is only a defensive guard.
     if (n <= 16 or !stack.hasItems(n)) {
         ctx.interpreter.halt(.stack_underflow);
         return;

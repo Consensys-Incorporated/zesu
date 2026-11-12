@@ -91,7 +91,7 @@ test "GAS: stack overflow" {
 test "JUMP: valid jump to JUMPDEST" {
     var interp = Interpreter.defaultExt();
     defer interp.deinit();
-    // Bytecode: 5 NOP bytes then JUMPDEST at index 5
+    // Bytecode: 5 STOP bytes then JUMPDEST at index 5
     const code = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x5B }; // 0x5B = JUMPDEST
     interp.bytecode = ExtBytecode.newOwned(bytecode_mod.Bytecode.newLegacy(&code));
     interp.stack.pushUnsafe(@as(U, 5));

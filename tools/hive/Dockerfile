@@ -31,7 +31,7 @@ RUN git clone --depth=1 https://github.com/supranational/blst.git /tmp/blst && \
     cp bindings/blst.h bindings/blst_aux.h /usr/local/include/ && \
     rm -rf /tmp/blst
 
-# Build mcl from source → /usr/local/lib/libmcl.a
+# Build mcl from source → /usr/local/lib/libmcl.so (linked dynamically on Linux; see build.zig)
 RUN git clone --depth=1 https://github.com/herumi/mcl.git /tmp/mcl && \
     cd /tmp/mcl && \
     mkdir build && cd build && \

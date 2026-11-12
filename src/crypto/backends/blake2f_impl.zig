@@ -1,5 +1,4 @@
-/// BLAKE2f compression function — standalone, no external dependencies.
-/// Extracted from zevm precompile/blake2.zig.
+/// BLAKE2f compression function in pure Zig.
 ///
 /// Reference: EIP-152, RFC 7693 §3.2
 /// Input: state vector h (8×u64 LE), message block m (16×u64 LE),
@@ -58,10 +57,7 @@ inline fn round(v: *[16]u64, m: *const [16]u64, r: usize) void {
     g(v, 3, 4, 9, 14, m[s[14]], m[s[15]]);
 }
 
-/// Run the BLAKE2f compression function.
-/// `rounds` iterations; `h` updated in place; `f` = final-block flag.
-/// Matches the accelerators interface:
-///   blake2f(rounds, h *[64]u8, m *[128]u8, t *[16]u8, f u8) bool
+/// `rounds` iterations; `h` updated in place. Returns false if `f_flag` > 1.
 pub fn compress(
     rounds: u32,
     h_bytes: *[64]u8,

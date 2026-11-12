@@ -133,7 +133,7 @@ pub fn mapBlockError(err: anyerror) ?[]const u8 {
 
 /// Maps a transition error to the canonical TransactionException string expected
 /// by the execution-spec-tests exception vocabulary.
-/// Used by runner.zig (and t8n) to classify errors returned by transition().
+/// Unmapped errors fall back to their own name.
 pub fn mapTransactionError(err: anyerror) []const u8 {
     const E = TransactionException;
     return switch (err) {

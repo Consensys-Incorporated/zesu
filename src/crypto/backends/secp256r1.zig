@@ -1,3 +1,7 @@
+//! Not imported anywhere: P-256 verification is reached via default.zig ->
+//! openssl_wrapper.zig, and the precompile itself lives in src/evm/precompile/.
+//! This file also depends on a `build_options.enable_openssl` that build.zig no
+//! longer defines.
 const std = @import("std");
 const T = @import("precompile_types");
 const alloc_mod = @import("zesu_allocator");

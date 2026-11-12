@@ -75,7 +75,7 @@ test "dispatch pc: JUMPI taken and not taken" {
 }
 
 test "dispatch pc: cold path reaches PC through the table with a current counter" {
-    // 0: PUSH1 0  2: POP  3: CALLDATASIZE (cold)  4: PC (cold)
+    // 0: PUSH1 0  2: POP  3: CALLDATASIZE  4: PC (both now in the inlined env arm)
     var interp = newInterp(&.{ 0x60, 0x00, 0x50, 0x36, 0x58 }, .amsterdam);
     defer interp.deinit();
     const table = protocol_schedule.makeInstructionTable(.amsterdam);
@@ -108,8 +108,8 @@ test "dispatch pc: out-of-gas exit still publishes the counter" {
 
 // ---------------------------------------------------------------------------
 // The inlined environment arm (ADDRESS, CALLER, CALLVALUE, CALLDATASIZE,
-// CODESIZE, PC, MSIZE) charges G_BASE and runs the handler body directly,
-// where the table path charges `static_gas` and calls the entry's handler.
+// CODESIZE, PC, MSIZE) charges G_BASE and computes the value inline, where
+// the table path charges `static_gas` and calls the entry's handler.
 // These tests pin the assumptions that make the two interchangeable.
 // ---------------------------------------------------------------------------
 

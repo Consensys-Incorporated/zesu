@@ -1,7 +1,5 @@
-/// RLP encoding primitives for transaction hashing.
-///
-/// Supports encoding individual values and lists. All encoded items are
-/// heap-allocated slices; callers own the memory (use an arena for easy cleanup).
+//! Allocating RLP encoders. Every result is a fresh allocation the caller owns;
+//! nothing frees intermediates, so pass an arena.
 const std = @import("std");
 const accel = @import("accelerators");
 
@@ -10,7 +8,6 @@ const accel = @import("accelerators");
 /// Encode a byte slice as an RLP byte-string.
 pub fn encodeBytes(alloc: std.mem.Allocator, data: []const u8) ![]u8 {
     if (data.len == 1 and data[0] < 0x80) {
-        // Single byte < 0x80: self-encoded
         return alloc.dupe(u8, data);
     } else if (data.len == 0) {
         return alloc.dupe(u8, &.{0x80});
@@ -111,7 +108,7 @@ fn trimLeadingZero(buf: []const u8) []const u8 {
 }
 
 /// Write `n` as a minimal big-endian byte sequence into buf.
-/// Returns the written slice (right-aligned in buf).
+/// Returns the written slice, `buf[0..len]`.
 fn bigEndianLength(n: usize, buf: *[8]u8) []const u8 {
     var v = n;
     var len: usize = 0;
@@ -123,9 +120,7 @@ fn bigEndianLength(n: usize, buf: *[8]u8) []const u8 {
         if (v == 0) break;
         i -= 1;
     }
-    // Return left-aligned in buf using temporary shift
     const start = 8 - len;
-    // Shift to front of buffer so caller gets buf[0..len]
     if (start > 0) {
         for (0..len) |j| buf[j] = buf[start + j];
     }

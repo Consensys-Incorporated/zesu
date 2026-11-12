@@ -7,8 +7,7 @@
 ///
 /// All numeric fields may be hex strings ("0x1a") or decimal integers.
 ///
-/// Canonical type definitions live in executor/types.zig; this file re-exports
-/// them so callers can use input_mod.TxInput etc. without changing imports.
+/// The types are re-exported from executor_types.
 const std = @import("std");
 
 // ─── Re-export canonical types from executor ──────────────────────────────────
