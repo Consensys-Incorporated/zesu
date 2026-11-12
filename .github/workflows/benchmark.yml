@@ -330,7 +330,7 @@ jobs:
           toolchain: ${{ needs.prepare.outputs.rust }}
 
       - name: Install cargo-zisk runtime deps
-        run: sudo apt-get install -y libomp5 libopenmpi3t64
+        run: sudo apt-get update -qq && sudo apt-get install -y libomp5 libopenmpi40 clang libclang-dev
 
       - name: Install cargo-zisk
         env:
@@ -579,7 +579,7 @@ jobs:
 
       - name: Install ziskemu runtime deps
         if: steps.base.outputs.missing != 'true'
-        run: sudo apt-get install -y libomp5 libopenmpi3t64
+        run: sudo apt-get install -y libomp5 libopenmpi40
 
       - name: Install ziskemu
         if: steps.base.outputs.missing != 'true'
