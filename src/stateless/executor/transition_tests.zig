@@ -441,3 +441,26 @@ test "a post-block system call that reads unprovable storage fails as an incompl
 test "a post-block system call whose reads are provable succeeds" {
     try runEmptyPragueBlock(.{ .slot_known = true });
 }
+
+test "a state test runs no system calls" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // PUSH1 1, PUSH1 0, SSTORE, STOP at the EIP-2935 and the post-block request addresses.
+    const code = [_]u8{ 0x60, 0x01, 0x60, 0x00, 0x55, 0x00 };
+    const history = SystemContracts.MAINNET_HISTORY_STORAGE;
+    var pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) = .{};
+    for ([_]input.Address{ history, SystemContracts.MAINNET_WITHDRAWAL_REQUEST, SystemContracts.MAINNET_CONSOLIDATION_REQUEST }) |addr| {
+        try pre_alloc.put(a, addr, .{ .nonce = 1, .code = &code });
+    }
+    var env = testEnv();
+    env.parent_hash = @splat(0x44);
+
+    const block = try transition_mod.transition(a, pre_alloc, env, &.{}, .prague, 1, -1);
+    try std.testing.expectEqual(@as(?primitives.U256, 1), block.alloc.get(history).?.storage.get(0));
+
+    const state_test = try transition_mod.transitionStateTest(a, pre_alloc, env, &.{}, .prague, 1);
+    const slot = if (state_test.alloc.get(history)) |acct| acct.storage.get(0) orelse 0 else 0;
+    try std.testing.expectEqual(@as(primitives.U256, 0), slot);
+}
