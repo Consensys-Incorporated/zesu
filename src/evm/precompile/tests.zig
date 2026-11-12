@@ -1999,3 +1999,97 @@ test {
     _ = @import("bn254_tests.zig");
     _ = @import("bls12_381_tests.zig");
 }
+
+/// base^exp mod m by plain square-and-multiply on std big integers: the reference for the
+/// accelerated paths below.
+fn modexpReference(a: std.mem.Allocator, base: []const u8, exp: []const u8, mod: []const u8, out: []u8) !void {
+    const Big = std.math.big.int.Managed;
+    var b = try Big.init(a);
+    defer b.deinit();
+    var m = try Big.init(a);
+    defer m.deinit();
+    var r = try Big.init(a);
+    defer r.deinit();
+    var t = try Big.init(a);
+    defer t.deinit();
+    var q = try Big.init(a);
+    defer q.deinit();
+    try setBe(&b, base);
+    try setBe(&m, mod);
+    @memset(out, 0);
+    if (m.eqlZero()) return;
+    try t.set(1);
+    try Big.divFloor(&q, &r, &t, &m);
+    try t.copy(b.toConst());
+    try Big.divFloor(&q, &b, &t, &m);
+    for (exp) |byte| {
+        var bit: u4 = 8;
+        while (bit > 0) {
+            bit -= 1;
+            try t.sqr(&r);
+            try Big.divFloor(&q, &r, &t, &m);
+            if ((byte >> @intCast(bit)) & 1 == 1) {
+                try t.mul(&r, &b);
+                try Big.divFloor(&q, &r, &t, &m);
+            }
+        }
+    }
+    const limbs = r.toConst().limbs;
+    for (0..out.len) |i| {
+        const li = i / 8;
+        if (li < limbs.len) out[out.len - 1 - i] = @truncate(limbs[li] >> @intCast((i % 8) * 8));
+    }
+}
+
+fn setBe(x: *std.math.big.int.Managed, be: []const u8) !void {
+    try x.set(0);
+    for (be) |byte| {
+        try x.shiftLeft(x, 8);
+        try x.addScalar(x, byte);
+    }
+}
+
+test "ModExp matches square-and-multiply on random operands of every size and parity" {
+    const accel = @import("accelerators");
+    var prng = std.Random.DefaultPrng.init(0x5eed_0006);
+    const rnd = prng.random();
+    const a = testing.allocator;
+    const mod_lens = [_]usize{ 1, 7, 8, 9, 31, 32, 33, 64, 65, 100, 128, 129, 256, 257, 512, 513, 1024, 1025, 1100 };
+    for (mod_lens) |ml| {
+        for (0..6) |case| {
+            const mod = try a.alloc(u8, ml);
+            defer a.free(mod);
+            rnd.bytes(mod);
+            if (case % 3 == 1) mod[0] = 0; // leading zero byte
+            if (case % 2 == 0) mod[ml - 1] |= 1 else mod[ml - 1] &= 0xfe; // odd / even
+            const base = try a.alloc(u8, rnd.uintAtMost(usize, 300));
+            defer a.free(base);
+            rnd.bytes(base);
+            const exp = try a.alloc(u8, if (case == 5) 0 else rnd.uintAtMost(usize, 40));
+            defer a.free(exp);
+            rnd.bytes(exp);
+            const got = try a.alloc(u8, ml);
+            defer a.free(got);
+            const want = try a.alloc(u8, ml);
+            defer a.free(want);
+            try testing.expect(accel.modexp(base, exp, mod, got));
+            try modexpReference(a, base, exp, mod, want);
+            testing.expectEqualSlices(u8, want, got) catch |err| {
+                std.debug.print("mod_len {d} case {d} base_len {d} exp_len {d}\n", .{ ml, case, base.len, exp.len });
+                return err;
+            };
+        }
+    }
+    // Edge cases: modulus 1, exponent 0 with modulus 1, base a multiple of the modulus.
+    var out: [32]u8 = undefined;
+    var one: [32]u8 = @splat(0);
+    one[31] = 1;
+    try testing.expect(accel.modexp(&([_]u8{0xff} ** 40), &[_]u8{3}, &one, &out));
+    try testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &out);
+    try testing.expect(accel.modexp(&[_]u8{7}, &.{}, &one, &out));
+    try testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &out);
+    var m7: [32]u8 = @splat(0);
+    m7[31] = 7;
+    try testing.expect(accel.modexp(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 14 }, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 5 }, &m7, &out));
+    try testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &out);
+}
