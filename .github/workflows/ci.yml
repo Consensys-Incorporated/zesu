@@ -244,7 +244,7 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Install cargo-zisk runtime deps
-        run: sudo apt-get install -y libomp5 libopenmpi3t64
+        run: sudo apt-get install -y libomp5 libopenmpi40
 
       - name: Install cargo-zisk
         run: |
