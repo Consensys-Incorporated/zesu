@@ -697,6 +697,35 @@ pub fn transitionWithDb(
     chain_id: u64,
     reward: i64,
 ) !TransitionResult {
+    return transitionOnDb(arena, db, pre_alloc_in, env, txs, spec, chain_id, SystemContracts.forChainId(chain_id), reward);
+}
+
+/// A state test, as the reference t8n's run_state_test: the transactions applied to the
+/// pre-state with no system operations (no pre- or post-block system calls, no requests)
+/// and no mining reward.
+pub fn transitionStateTest(
+    arena: std.mem.Allocator,
+    pre_alloc_in: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
+    env: input.Env,
+    txs: []input.TxInput,
+    spec: primitives.SpecId,
+    chain_id: u64,
+) !TransitionResult {
+    const db = try buildDb(pre_alloc_in, env.block_hashes);
+    return transitionOnDb(arena, db, pre_alloc_in, env, txs, spec, chain_id, null, -1);
+}
+
+fn transitionOnDb(
+    arena: std.mem.Allocator,
+    db: anytype,
+    pre_alloc_in: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
+    env: input.Env,
+    txs: []input.TxInput,
+    spec: primitives.SpecId,
+    chain_id: u64,
+    contracts: ?SystemContracts,
+    reward: i64,
+) !TransitionResult {
     const DB = @TypeOf(db);
     var ctx = context_mod.Context(DB).new(db, spec);
     defer ctx.journaled_state.database.deinit();
@@ -704,14 +733,15 @@ pub fn transitionWithDb(
     ctx.block = buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
     ctx.cfg.disable_base_fee = (env.base_fee == null);
-    return transitionWithContext(arena, &ctx, pre_alloc_in, env, txs, spec, chain_id, SystemContracts.forChainId(chain_id), reward);
+    return transitionWithContext(arena, &ctx, pre_alloc_in, env, txs, spec, chain_id, contracts, reward);
 }
 
 /// Low-level entry point: executes block transition on a pre-built context.
 /// The caller owns the context — including its journal (alloc_mod.get() allocations) — and
 /// must call ctx.journaled_state.deinit() when done. The context and its DB remain accessible
 /// after return (e.g., for ctx.getDb()).
-/// `contracts` gives the chain's system-contract addresses (EIP-4788/2935/6110/7002/7251/8282).
+/// `contracts` gives the chain's system-contract addresses (EIP-4788/2935/6110/7002/7251/8282);
+/// null runs no system operations (a state test).
 pub fn transitionWithContext(
     arena: std.mem.Allocator,
     ctx: anytype,
@@ -720,7 +750,7 @@ pub fn transitionWithContext(
     txs: []input.TxInput,
     spec: primitives.SpecId,
     chain_id: u64,
-    contracts: SystemContracts,
+    contracts: ?SystemContracts,
     reward: i64,
 ) !TransitionResult {
     var instructions = handler_mod.Instructions.new(spec);
@@ -748,7 +778,7 @@ pub fn transitionWithContext(
         null;
 
     // ── Pre-block system calls (EIP-4788, EIP-2935) ───────────────────────────
-    system_calls.applyPreBlockCalls(ctx, &instructions, &precompiles, env, spec, chain_id, contracts);
+    if (contracts) |c| system_calls.applyPreBlockCalls(ctx, &instructions, &precompiles, env, spec, chain_id, c);
 
     if (tracker) |*t| t.detectAndRecord(0, ctx, 0);
 
@@ -1321,10 +1351,13 @@ pub fn transitionWithContext(
     // Capture return data for EIP-7685 requests_hash computation.
     // A call that failed because the witness could not serve one of its reads leaves an
     // incomplete witness, not a failed system call.
-    const post_block_reqs = system_calls.applyPostBlockCallsCapture(arena, ctx, &instructions, &precompiles, spec, chain_id, contracts) catch |err| {
-        if (ctx.ctx_error != context_mod.ContextError.ok) return error.InvalidWitness;
-        return err;
-    };
+    const post_block_reqs: system_calls.PostBlockRequestBytes = if (contracts) |c|
+        system_calls.applyPostBlockCallsCapture(arena, ctx, &instructions, &precompiles, spec, chain_id, c) catch |err| {
+            if (ctx.ctx_error != context_mod.ContextError.ok) return error.InvalidWitness;
+            return err;
+        }
+    else
+        .{ .withdrawal_requests = &.{}, .consolidation_requests = &.{} };
 
     // Detect changes from mining reward + withdrawals + post-block calls (all at BAI=N+1)
     if (tracker) |*t| t.detectAndRecord(txs.len + 1, ctx, txs.len);
@@ -1351,7 +1384,7 @@ pub fn transitionWithContext(
     const bal_hash: ?[32]u8 = if (tracker) |*t| try t.computeHash(arena, ctx, env.gas_limit) else null;
 
     // ── EIP-7685 requests_hash ────────────────────────────────────────────────
-    const deposits = if (primitives.isEnabledIn(spec, .prague)) try collectDeposits(arena, receipts.items, contracts.deposit) else &.{};
+    const deposits = if (contracts != null and primitives.isEnabledIn(spec, .prague)) try collectDeposits(arena, receipts.items, contracts.?.deposit) else &.{};
     const requests_hash = try computeRequestsHash(
         arena,
         deposits,
