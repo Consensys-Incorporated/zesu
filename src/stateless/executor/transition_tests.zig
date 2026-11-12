@@ -441,3 +441,29 @@ test "a post-block system call that reads unprovable storage fails as an incompl
 test "a post-block system call whose reads are provable succeeds" {
     try runEmptyPragueBlock(.{ .slot_known = true });
 }
+
+test "code a database owns survives the journal freeing what it loaded" {
+    // The testing allocator poisons freed memory and catches double frees.
+    const alloc_mod = @import("zesu_allocator");
+    alloc_mod.set(std.testing.allocator);
+    defer alloc_mod.set(std.heap.c_allocator);
+
+    const code = [_]u8{ 0x60, 0x01, 0x5b, 0x00 }; // PUSH1 1, JUMPDEST, STOP
+    var db = database_mod.InMemoryDB.init(std.testing.allocator);
+    defer db.deinit();
+    const owned = bytecode_mod.Bytecode.newLegacy(&code);
+    const hash = owned.hashSlow();
+    try db.insertCode(hash, owned);
+
+    // What the journal does with the code of a self-destructed account (Account.selfdestruct).
+    var loaded = try db.codeByHash(hash);
+    loaded.deinit();
+
+    // Another account with the same code loads it again.
+    const again = try db.codeByHash(hash);
+    try std.testing.expectEqualSlices(u8, &code, again.originalBytes());
+    try std.testing.expect(again.isValidJump(2));
+
+    // The database frees its own analysis, once.
+    db.code.getPtr(hash).?.deinit();
+}

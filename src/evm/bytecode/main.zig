@@ -612,7 +612,21 @@ pub const Bytecode = union(enum) {
         return Self.newLegacy(raw);
     }
 
-    /// Free any heap memory owned by this Bytecode (the jump table bit vector for legacy analyzed).
+    /// A copy that shares this bytecode's analysis without owning it: its `deinit` frees nothing.
+    /// For a database that keeps analysed code (by code hash) for its lifetime and returns it from
+    /// `codeByHash`: the journal frees the code it owns (CREATE results, superseded code,
+    /// self-destructed accounts) and leaves borrowed code to its owner.
+    pub fn borrowed(self: *const Self) Self {
+        var out = self.*;
+        switch (out) {
+            .legacy_analyzed => |*a| a.borrowed = true,
+            .eip7702 => {}, // inline bytes, nothing to own
+        }
+        return out;
+    }
+
+    /// Free any heap memory owned by this Bytecode (the jump table bit vector for legacy
+    /// analyzed); nothing for a borrowed copy.
     pub fn deinit(self: *Self) void {
         switch (self.*) {
             .legacy_analyzed => |*bc| bc.deinit(),
@@ -642,6 +656,9 @@ pub const LegacyAnalyzedBytecode = struct {
     /// lands on STOP. Everything that observes code (CODESIZE, CODECOPY, EXTCODE*,
     /// hashing) reads `bytecode`.
     exec: []align(8) const u8,
+    /// The analysis belongs to someone else (a database that keeps it for its lifetime):
+    /// `deinit` leaves it alone. See `Bytecode.borrowed`.
+    borrowed: bool = false,
 
     const Self = @This();
 
@@ -663,6 +680,7 @@ pub const LegacyAnalyzedBytecode = struct {
     }
 
     pub fn deinit(self: *LegacyAnalyzedBytecode) void {
+        if (self.borrowed) return;
         // The bit vector is heap-allocated via c_allocator only when original_len > 0
         // (non-empty bytecode) AND the allocation succeeded (data.len > 0).
         // Cases that must NOT be freed:
