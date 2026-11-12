@@ -273,6 +273,18 @@ jobs:
           path: zesu-zkvm/zisk/lib/libziskos_staticlib.a
           key: libziskos-staticlib-${{ steps.zisk.outputs.version }}-${{ runner.os }}-${{ hashFiles('zesu-zkvm/zisk/Makefile') }}
 
+      - name: Setup libclang for bindgen
+        if: steps.cache-libziskos.outputs.cache-hit != 'true'
+        run: |
+          libdir=$(llvm-config --libdir 2>/dev/null || dirname "$(ls /usr/lib/llvm-*/lib/libclang.so | sort -V | tail -1)")
+          echo "LIBCLANG_PATH=$libdir" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=$libdir"
+          ls /usr/lib/llvm-*/lib/libclang*.so* || true
+          # Fails fast here, with the header search trace, if stdint.h still
+          # does not resolve for a riscv64 target.
+          printf '#include <stdint.h>\nuint8_t x;\n' |
+            clang --target=riscv64-unknown-elf -std=c11 -xc - -fsyntax-only -H
+
       - name: Build libziskos_staticlib.a
         if: steps.cache-libziskos.outputs.cache-hit != 'true'
         working-directory: zesu-zkvm/zisk
