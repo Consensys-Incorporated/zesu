@@ -284,10 +284,10 @@ test "a configured deposit contract replaces the chain-id default" {
     try std.testing.expectEqual(@as(usize, 0), (try transition_mod.collectDeposits(a, &receipts, SystemContracts.forChainId(1).deposit)).len);
 }
 
-/// Runs an empty block under `spec` over a pre-state holding a single contract at
-/// `deployed_at` whose code returns `ret_len` zero bytes, with the given system-contract
-/// addresses.
-fn runBlockWithRequestContract(arena: std.mem.Allocator, spec: primitives.SpecId, deployed_at: input.Address, ret_len: u8, contracts: SystemContracts) !TransitionResult {
+/// Runs an empty block under `spec` over a pre-state holding a contract at `deployed_at`
+/// whose code returns `ret_len` zero bytes, and a contract that returns nothing at each of
+/// `others`, with the given system-contract addresses.
+fn runBlockWithRequestContract(arena: std.mem.Allocator, spec: primitives.SpecId, deployed_at: input.Address, ret_len: u8, contracts: SystemContracts, others: []const input.Address) !TransitionResult {
     // PUSH1 ret_len, PUSH1 0, RETURN
     const code = [_]u8{ 0x60, ret_len, 0x60, 0x00, 0xf3 };
     var db = database_mod.InMemoryDB.init(std.testing.allocator);
@@ -295,6 +295,11 @@ fn runBlockWithRequestContract(arena: std.mem.Allocator, spec: primitives.SpecId
     const code_hash = bc.hashSlow();
     try db.insertCode(code_hash, bc);
     try db.insertAccount(deployed_at, .{ .balance = 0, .nonce = 1, .code_hash = code_hash, .code = null });
+    const stop = [_]u8{0x00};
+    const stop_bc = bytecode_mod.Bytecode.newLegacy(&stop);
+    const stop_hash = stop_bc.hashSlow();
+    try db.insertCode(stop_hash, stop_bc);
+    for (others) |addr| try db.insertAccount(addr, .{ .balance = 0, .nonce = 1, .code_hash = stop_hash, .code = null });
 
     var ctx = context_mod.Context(database_mod.InMemoryDB).new(db, spec);
     defer ctx.journaled_state.database.deinit();
@@ -305,6 +310,7 @@ fn runBlockWithRequestContract(arena: std.mem.Allocator, spec: primitives.SpecId
 
     var pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) = .{};
     try pre_alloc.put(arena, deployed_at, .{ .nonce = 1, .code = &code });
+    for (others) |addr| try pre_alloc.put(arena, addr, .{ .nonce = 1, .code = &stop });
     return transitionWithContext(arena, &ctx, pre_alloc, env, &.{}, spec, 1, contracts, 0);
 }
 
@@ -316,16 +322,30 @@ test "withdrawal requests are read from the configured EIP-7002 contract" {
     const custom: input.Address = @splat(0x9a);
     const one_request: [76]u8 = @splat(0);
     const expected = try transition_mod.computeRequestsHash(a, &.{}, &one_request, &.{}, &.{}, &.{});
-    const no_requests = try transition_mod.computeRequestsHash(a, &.{}, &.{}, &.{}, &.{}, &.{});
+    const others = [_]input.Address{SystemContracts.MAINNET_CONSOLIDATION_REQUEST};
 
     // Configured to the address the contract lives at: its output is a withdrawal request.
-    const configured = try runBlockWithRequestContract(a, .prague, custom, 76, .{ .withdrawal_request = custom });
+    const configured = try runBlockWithRequestContract(a, .prague, custom, 76, .{ .withdrawal_request = custom }, &others);
     try std.testing.expectEqualSlices(u8, &expected, &configured.requests_hash);
 
     // Mainnet defaults: the call targets the canonical address, which holds no code here,
-    // so the block yields no requests.
-    const defaults = try runBlockWithRequestContract(a, .prague, custom, 76, .{});
-    try std.testing.expectEqualSlices(u8, &no_requests, &defaults.requests_hash);
+    // so the block is invalid.
+    try std.testing.expectError(error.SystemContractEmpty, runBlockWithRequestContract(a, .prague, custom, 76, .{}, &others));
+}
+
+test "a post-block system contract without code invalidates the block" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // The EIP-7002 contract is deployed, the EIP-7251 one is not.
+    try std.testing.expectError(
+        error.SystemContractEmpty,
+        runBlockWithRequestContract(arena.allocator(), .prague, SystemContracts.MAINNET_WITHDRAWAL_REQUEST, 0, .{}, &.{}),
+    );
+    try std.testing.expectEqualStrings(
+        "BlockException.SYSTEM_CONTRACT_EMPTY",
+        @import("./exceptions.zig").mapBlockError(error.SystemContractEmpty).?,
+    );
 }
 
 test "builder exit requests are read from the configured EIP-8282 contract" {
@@ -336,13 +356,16 @@ test "builder exit requests are read from the configured EIP-8282 contract" {
     const custom: input.Address = @splat(0x82);
     const one_exit: [68]u8 = @splat(0);
     const expected = try transition_mod.computeRequestsHash(a, &.{}, &.{}, &.{}, &.{}, &one_exit);
-    const no_requests = try transition_mod.computeRequestsHash(a, &.{}, &.{}, &.{}, &.{}, &.{});
+    const others = [_]input.Address{
+        SystemContracts.MAINNET_WITHDRAWAL_REQUEST,
+        SystemContracts.MAINNET_CONSOLIDATION_REQUEST,
+        SystemContracts.MAINNET_BUILDER_DEPOSIT_REQUEST,
+    };
 
-    const configured = try runBlockWithRequestContract(a, .amsterdam, custom, 68, .{ .builder_exit_request = custom });
+    const configured = try runBlockWithRequestContract(a, .amsterdam, custom, 68, .{ .builder_exit_request = custom }, &others);
     try std.testing.expectEqualSlices(u8, &expected, &configured.requests_hash);
 
-    const defaults = try runBlockWithRequestContract(a, .amsterdam, custom, 68, .{});
-    try std.testing.expectEqualSlices(u8, &no_requests, &defaults.requests_hash);
+    try std.testing.expectError(error.SystemContractEmpty, runBlockWithRequestContract(a, .amsterdam, custom, 68, .{}, &others));
 }
 
 // A witness that proves the accounts but not the recipient's code, which the top-level
@@ -391,19 +414,16 @@ test "a transaction whose recipient code is absent from the witness marks the bl
     try std.testing.expectEqual(context_mod.ContextError.database_error, ctx.ctx_error);
 }
 
-// A witness that proves the EIP-7002 request contract, whose code reads storage slot 0,
-// but proves that slot only if `slot_known`. Every other account is absent.
+// A witness that proves the EIP-7002 and EIP-7251 request contracts, whose code reads
+// storage slot 0, but proves that slot only if `slot_known`. Every other account is absent.
 const RequestQueueDb = struct {
     slot_known: bool,
 
-    const EIP7002_ADDRESS: input.Address = .{
-        0x00, 0x00, 0x09, 0x61, 0xef, 0x48, 0x0e, 0xb5, 0x5e, 0x80,
-        0xd1, 0x9a, 0xd8, 0x35, 0x79, 0xa6, 0x4c, 0x00, 0x70, 0x02,
-    };
     const CODE_HASH: primitives.Hash = @splat(0xc1);
 
     pub fn basic(_: *@This(), address: input.Address) !?state_mod.AccountInfo {
-        if (!std.mem.eql(u8, &address, &EIP7002_ADDRESS)) return null;
+        if (!std.mem.eql(u8, &address, &SystemContracts.MAINNET_WITHDRAWAL_REQUEST) and
+            !std.mem.eql(u8, &address, &SystemContracts.MAINNET_CONSOLIDATION_REQUEST)) return null;
         var info = state_mod.AccountInfo.default();
         info.code_hash = CODE_HASH;
         info.code = null; // loaded through codeByHash, as WitnessDatabase does
@@ -440,4 +460,27 @@ test "a post-block system call that reads unprovable storage fails as an incompl
 
 test "a post-block system call whose reads are provable succeeds" {
     try runEmptyPragueBlock(.{ .slot_known = true });
+}
+
+test "a state test runs no system calls" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // PUSH1 1, PUSH1 0, SSTORE, STOP at the EIP-2935 and the post-block request addresses.
+    const code = [_]u8{ 0x60, 0x01, 0x60, 0x00, 0x55, 0x00 };
+    const history = SystemContracts.MAINNET_HISTORY_STORAGE;
+    var pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) = .{};
+    for ([_]input.Address{ history, SystemContracts.MAINNET_WITHDRAWAL_REQUEST, SystemContracts.MAINNET_CONSOLIDATION_REQUEST }) |addr| {
+        try pre_alloc.put(a, addr, .{ .nonce = 1, .code = &code });
+    }
+    var env = testEnv();
+    env.parent_hash = @splat(0x44);
+
+    const block = try transition_mod.transition(a, pre_alloc, env, &.{}, .prague, 1, -1);
+    try std.testing.expectEqual(@as(?primitives.U256, 1), block.alloc.get(history).?.storage.get(0));
+
+    const state_test = try transition_mod.transitionStateTest(a, pre_alloc, env, &.{}, .prague, 1);
+    const slot = if (state_test.alloc.get(history)) |acct| acct.storage.get(0) orelse 0 else 0;
+    try std.testing.expectEqual(@as(primitives.U256, 0), slot);
 }

@@ -41,16 +41,19 @@ fn systemCallGasLimit(spec: primitives.SpecId) u64 {
 
 const SYSTEM_ADDRESS = primitives.SYSTEM_ADDRESS;
 
+/// Why a checked (post-block) system call invalidates the block.
+pub const CheckedCallError = error{ SystemContractEmpty, SystemContractCallFailed };
+
 // ─── Shared execution helper ──────────────────────────────────────────────────
 
 /// Execute a single privileged system call as SYSTEM_ADDRESS.
 ///
-/// Skips the call silently if the target contract is not deployed.
-/// Discards state on any execution error — a broken system contract must not
-/// invalidate the block. When `capture` is true, returns a caller-owned copy of
-/// the call's return data and surfaces execution failure as
-/// error.SystemContractCallFailed (see applyPostBlockCallsCapture); when false,
-/// the call is fire-and-forget (see applyPreBlockCalls).
+/// Discards state on any execution error. When `capture` is true (the checked
+/// post-block calls, see applyPostBlockCallsCapture), returns a caller-owned copy
+/// of the call's return data, fails with error.SystemContractEmpty if the target
+/// has no code and with error.SystemContractCallFailed if execution fails. When
+/// false (the pre-block calls, see applyPreBlockCalls), the call is
+/// fire-and-forget and a target without code is skipped.
 fn runSystemCallImpl(
     comptime capture: bool,
     ctx: anytype,
@@ -60,7 +63,7 @@ fn runSystemCallImpl(
     calldata: []const u8,
     chain_id: u64,
     alloc: if (capture) std.mem.Allocator else void,
-) if (capture) error{SystemContractCallFailed}![]const u8 else void {
+) if (capture) CheckedCallError![]const u8 else void {
     const SYSTEM_CALL_GAS: u64 = systemCallGasLimit(ctx.cfg.spec);
 
     // The reference reads the target account (get_account), so the witness must prove
@@ -71,15 +74,17 @@ fn runSystemCallImpl(
         ctx.journaled_state.discardTx();
         return if (capture) &.{} else {};
     };
-    // Skip the call if the contract has no code (also covers non-existing accounts).
+    // A target without code (also covers non-existing accounts): a checked call invalidates
+    // the block (process_checked_system_transaction), an unchecked one is skipped.
     // EIP-7928 (Amsterdam+): the reference process_unchecked_system_transaction still
     // reads the target account (get_account → account_reads), so it belongs in the block
     // access list even when absent. commitTx (rather than discardTx) flushes that read into
     // the permanent BAL while still leaving the account cold for user transactions — commitTx
     // bumps the journal transaction_id, so its EIP-2929 warmth does not carry over.
     if (std.mem.eql(u8, &account_load.data.info.code_hash, &primitives.KECCAK_EMPTY)) {
+        if (capture) return error.SystemContractEmpty;
         ctx.journaled_state.commitTx();
-        return if (capture) &.{} else {};
+        return;
     }
 
     // Bypass normal tx validation for system calls.
@@ -239,8 +244,9 @@ pub const PostBlockRequestBytes = struct {
 /// consolidations; Amsterdam+: EIP-8282 builder deposits/exits) and capture the raw
 /// output bytes from each so the caller can compute the EIP-7685 requests_hash.
 /// Caller owns the returned slices (allocated with `alloc`).
-/// Returns error.SystemContractCallFailed if any post-block system contract
-/// call reverts, halts, or runs out of gas (per EIP-7685: such blocks are invalid).
+/// These calls are checked, and either failure makes the block invalid:
+/// error.SystemContractEmpty if a contract has no code, error.SystemContractCallFailed
+/// if a call reverts, halts, or runs out of gas.
 pub fn applyPostBlockCallsCapture(
     alloc: std.mem.Allocator,
     ctx: anytype,
@@ -249,7 +255,7 @@ pub fn applyPostBlockCallsCapture(
     spec: primitives.SpecId,
     chain_id: u64,
     contracts: SystemContracts,
-) error{SystemContractCallFailed}!PostBlockRequestBytes {
+) CheckedCallError!PostBlockRequestBytes {
     if (!primitives.isEnabledIn(spec, .prague)) return .{ .withdrawal_requests = &.{}, .consolidation_requests = &.{} };
     var out: PostBlockRequestBytes = .{
         .withdrawal_requests = try runSystemCallCapture(alloc, ctx, instructions, precompiles, contracts.withdrawal_request, &.{}, chain_id),
@@ -265,9 +271,9 @@ pub fn applyPostBlockCallsCapture(
     return out;
 }
 
-/// Like runSystemCall but returns a caller-owned copy of the return data.
-/// Returns an empty slice if the contract is not deployed.
-/// Returns error.SystemContractCallFailed if the call reverts, halts, or runs out of gas.
+/// A checked system call: returns a caller-owned copy of the return data.
+/// Returns error.SystemContractEmpty if the contract has no code, and
+/// error.SystemContractCallFailed if the call reverts, halts, or runs out of gas.
 fn runSystemCallCapture(
     alloc: std.mem.Allocator,
     ctx: anytype,
@@ -276,6 +282,6 @@ fn runSystemCallCapture(
     target: input.Address,
     calldata: []const u8,
     chain_id: u64,
-) error{SystemContractCallFailed}![]const u8 {
+) CheckedCallError![]const u8 {
     return runSystemCallImpl(true, ctx, instructions, precompiles, target, calldata, chain_id, alloc);
 }

@@ -127,6 +127,7 @@ pub fn mapBlockError(err: anyerror) ?[]const u8 {
         error.InvalidRequests => E.INVALID_REQUESTS.name(),
         error.InvalidLogsBloom => E.INVALID_LOG_BLOOM.name(),
         error.InvalidBlockNumber => E.INVALID_BLOCK_NUMBER.name(),
+        error.SystemContractEmpty => E.SYSTEM_CONTRACT_EMPTY.name(),
         else => null,
     };
 }

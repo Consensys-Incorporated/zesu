@@ -7,7 +7,8 @@
 /// For each post[fork][i]:
 ///   - indexes.{data, gas, value} select from transaction.{data[], gasLimit[], value[]}
 ///   - transaction.sender is used directly as the caller (no ECDSA needed)
-///   - We call transition() and compare computed stateRoot + logsHash to expected hash / logs
+///   - We call transitionStateTest() (no system operations, as the reference t8n) and compare
+///     computed stateRoot + logsHash to expected hash / logs
 const std = @import("std");
 
 const input_mod = @import("t8n_input");
@@ -501,14 +502,13 @@ pub fn runFixture(
                 const pre_clone = try cloneAllocMap(ca, pre_alloc_base);
 
                 var txs = [1]input_mod.TxInput{tx};
-                const result = transition_mod.transition(
+                const result = transition_mod.transitionStateTest(
                     ca,
                     pre_clone,
                     env,
                     txs[0..],
                     spec,
                     chain_id,
-                    -1, // no mining reward in state tests (avoids spurious coinbase touch)
                 ) catch |err| {
                     if (expect_exception) {
                         stats.passed += 1;
