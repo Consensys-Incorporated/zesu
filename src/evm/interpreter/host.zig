@@ -124,6 +124,7 @@ pub const JournalVTable = struct {
     isAddressCold: *const fn (*anyopaque, primitives.Address) bool,
     isStorageCold: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) bool,
     sloadProbe: *const fn (*anyopaque, primitives.Address, primitives.StorageKey) context_mod.SloadProbe,
+    codeProbe: *const fn (*anyopaque, primitives.Address) context_mod.CodeProbe,
     isAddressLoaded: *const fn (*anyopaque, primitives.Address) bool,
     accountInfo: *const fn (*anyopaque, primitives.Address) anyerror!context_mod.AccountInfoLoad,
     selfBalance: *const fn (*anyopaque, primitives.Address) anyerror!primitives.U256,
@@ -150,6 +151,7 @@ pub const JournalVTable = struct {
                 .isAddressCold = isAddressColdFn,
                 .isStorageCold = isStorageColdFn,
                 .sloadProbe = sloadProbeFn,
+                .codeProbe = codeProbeFn,
                 .isAddressLoaded = isAddressLoadedFn,
                 .accountInfo = accountInfoFn,
                 .selfBalance = selfBalanceFn,
@@ -180,6 +182,9 @@ pub const JournalVTable = struct {
             }
             fn sloadProbeFn(ptr: *anyopaque, addr: primitives.Address, key: primitives.StorageKey) context_mod.SloadProbe {
                 return j(ptr).sloadProbe(addr, key);
+            }
+            fn codeProbeFn(ptr: *anyopaque, addr: primitives.Address) context_mod.CodeProbe {
+                return j(ptr).codeProbe(addr);
             }
             fn isAddressLoadedFn(ptr: *anyopaque, addr: primitives.Address) bool {
                 return j(ptr).isAddressLoaded(addr);
@@ -375,6 +380,13 @@ pub const Host = struct {
     /// SLOAD's pre-charge probe: the value of a warm loaded slot, or the slot's coldness.
     pub fn sloadProbe(self: *Host, addr: primitives.Address, key: primitives.StorageKey) context_mod.SloadProbe {
         return self.js_vtable.sloadProbe(self.js, addr, key);
+    }
+
+    /// EXTCODECOPY's pre-charge probe: the code bytes of a warm loaded account, or the
+    /// account's coldness. A null `code` means the caller must still load it, after charging.
+    /// The bytes are borrowed from the journal; use them before any further host call.
+    pub fn codeProbe(self: *Host, addr: primitives.Address) context_mod.CodeProbe {
+        return self.js_vtable.codeProbe(self.js, addr);
     }
 
     /// Check whether a storage slot is cold WITHOUT loading it from the database.

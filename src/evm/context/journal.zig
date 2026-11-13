@@ -381,6 +381,13 @@ pub const JournaledAccount = struct {
 /// Result of `JournalInner.sloadProbe`.
 pub const SloadProbe = struct { value: ?primitives.StorageValue, is_cold: bool };
 
+/// Result of `JournalInner.codeProbe`. `code` is the account's `Bytecode.bytes()`, borrowed from
+/// the journal: valid until the next journal call that can load or change an account (an
+/// EIP-7702 designator's bytes live inline in the account, so a rehash of `evm_state` moves them).
+/// A slice rather than a `Bytecode` copy: the probe crosses the host vtable, and copying the
+/// ~90-byte union on that path cost as much as the lookup it saves.
+pub const CodeProbe = struct { code: ?[]const u8, is_cold: bool };
+
 /// Inner journal evm_state that contains journal and evm_state changes.
 ///
 /// Spec Id is a essential information for the Journal.
@@ -1061,6 +1068,21 @@ pub const JournalInner = struct {
         return self.warm_addresses.isCold(address);
     }
 
+    /// EXTCODECOPY's pre-charge probe: one `evm_state` lookup answering both the warm/cold
+    /// charge and, when it can, the code read that follows. An account loaded and warm in this
+    /// transaction returns its code (null if not yet loaded); re-loading it would have no side
+    /// effects, so the caller skips `loadAccountWithCode`. Otherwise `code` is null and `is_cold`
+    /// is what `isAddressCold` would return. Reads only: nothing is warmed, journaled or
+    /// recorded in the BAL.
+    pub fn codeProbe(self: *const JournalInner, address: primitives.Address) CodeProbe {
+        if (self.evm_state.getPtr(address)) |acct| {
+            if (!acct.isColdTransactionId(self.transaction_id)) {
+                return .{ .code = if (acct.info.code) |*c| c.bytes() else null, .is_cold = false };
+            }
+        }
+        return .{ .code = null, .is_cold = self.warm_addresses.isCold(address) };
+    }
+
     pub fn loadAccountOptional(self: *JournalInner, db: anytype, address: primitives.Address, load_code: bool, skip_cold_load: bool) !StateLoad(*const state.Account) {
         const load = try self.loadAccountMutOptionalCode(db, address, load_code, skip_cold_load);
         return StateLoad(*const state.Account).new(load.data.account, load.is_cold);
@@ -1366,6 +1388,10 @@ pub fn Journal(comptime DB: type) type {
 
         pub fn sloadProbe(self: *const @This(), address: primitives.Address, key: primitives.StorageKey) SloadProbe {
             return self.inner.sloadProbe(address, key);
+        }
+
+        pub fn codeProbe(self: *const @This(), address: primitives.Address) CodeProbe {
+            return self.inner.codeProbe(address);
         }
 
         pub fn sload(self: *@This(), address: primitives.Address, key: primitives.StorageKey) !StateLoad(primitives.StorageValue) {
