@@ -369,7 +369,7 @@ pub const MainnetHandler = struct {
             .Create => {
                 // Top-level CREATE: tx validation already bumped caller nonce (skip_nonce_bump=true).
                 // Intrinsic state gas (new account + auths) already charged via balance deduction.
-                const setup = host.setupCreate(tx.caller, tx.value, calldata, tx_regular_exec_gas, false, 0, true, 0, false);
+                const setup = host.setupCreate(tx.caller, tx.value, calldata, tx_regular_exec_gas, false, 0, true, 0, false, null);
                 switch (setup) {
                     .failed => |r| {
                         const status: main.ExecutionStatus = if (r.is_revert) .Revert else .Halt;

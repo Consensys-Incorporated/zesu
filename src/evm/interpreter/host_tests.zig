@@ -65,6 +65,7 @@ test "setupCreateCore marks ctx_error when the CREATE target cannot be loaded" {
         false,
         0,
         true,
+        null,
     );
 
     switch (setup) {

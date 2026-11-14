@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const primitives = @import("primitives");
 const accel = @import("accelerators");
 const bytecode_mod = @import("bytecode");
@@ -139,9 +140,9 @@ pub const JournalVTable = struct {
     // Complex entries — receive *Host so they can access block/cfg/precompiles in addition to journal.
     setupCall: *const fn (*Host, CallInputs, usize) Host.CallSetupResult,
     finalizeCall: *const fn (*Host, JournalCheckpoint, InstructionResult, u64, u64, i64, []const u8) CallResult,
-    setupCreate: *const fn (*Host, primitives.Address, primitives.U256, []const u8, u64, bool, primitives.U256, bool, usize, bool) Host.CreateSetupResult,
+    setupCreate: *const fn (*Host, primitives.Address, primitives.U256, []const u8, u64, bool, primitives.U256, bool, usize, bool, ?primitives.Address) Host.CreateSetupResult,
     finalizeCreate: *const fn (*Host, JournalCheckpoint, primitives.Address, InstructionResult, u64, i64, []const u8, primitives.SpecId, bool, u64) CreateResult,
-    recordCreateTarget: *const fn (*Host, primitives.Address, primitives.U256, []const u8, bool, primitives.U256, usize) ?bool,
+    recordCreateTarget: *const fn (*Host, primitives.Address, primitives.U256, []const u8, bool, primitives.U256, usize) ?Host.CreateTarget,
 
     /// Return a comptime-constant vtable for the given DB type.
     pub fn forDb(comptime DB: type) *const JournalVTable {
@@ -220,13 +221,13 @@ pub const JournalVTable = struct {
             fn finalizeCallFn(host: *Host, checkpoint: JournalCheckpoint, result: InstructionResult, gas_limit: u64, gas_remaining: u64, gas_refunded: i64, return_data: []const u8) CallResult {
                 return finalizeCallCore(j(host.js), checkpoint, result, gas_limit, gas_remaining, gas_refunded, return_data);
             }
-            fn setupCreateFn(host: *Host, caller: primitives.Address, value: primitives.U256, init_code: []const u8, gas_limit: u64, is_create2: bool, salt: primitives.U256, skip_nonce_bump: bool, frame_depth: usize, is_opcode_create: bool) Host.CreateSetupResult {
-                return setupCreateCore(j(host.js), host, caller, value, init_code, gas_limit, is_create2, salt, skip_nonce_bump, frame_depth, is_opcode_create);
+            fn setupCreateFn(host: *Host, caller: primitives.Address, value: primitives.U256, init_code: []const u8, gas_limit: u64, is_create2: bool, salt: primitives.U256, skip_nonce_bump: bool, frame_depth: usize, is_opcode_create: bool, known_addr: ?primitives.Address) Host.CreateSetupResult {
+                return setupCreateCore(j(host.js), host, caller, value, init_code, gas_limit, is_create2, salt, skip_nonce_bump, frame_depth, is_opcode_create, known_addr);
             }
             fn finalizeCreateFn(host: *Host, checkpoint: JournalCheckpoint, new_addr: primitives.Address, result: InstructionResult, gas_remaining: u64, gas_refunded: i64, return_data: []const u8, spec_id: primitives.SpecId, is_opcode_create: bool, gas_reservoir: u64) CreateResult {
                 return finalizeCreateCore(j(host.js), host, checkpoint, new_addr, result, gas_remaining, gas_refunded, return_data, spec_id, is_opcode_create, gas_reservoir);
             }
-            fn recordCreateTargetFn(host: *Host, caller: primitives.Address, value: primitives.U256, init_code: []const u8, is_create2: bool, salt: primitives.U256, frame_depth: usize) ?bool {
+            fn recordCreateTargetFn(host: *Host, caller: primitives.Address, value: primitives.U256, init_code: []const u8, is_create2: bool, salt: primitives.U256, frame_depth: usize) ?Host.CreateTarget {
                 return recordCreateTargetCore(j(host.js), host, caller, value, init_code, is_create2, salt, frame_depth);
             }
         };
@@ -570,9 +571,15 @@ pub const Host = struct {
         skip_nonce_bump: bool,
         frame_depth: usize,
         is_opcode_create: bool,
+        /// The target `recordCreateTarget` already derived, if it ran: the nonce cannot move
+        /// in between, so it is the address this would compute.
+        known_addr: ?primitives.Address,
     ) CreateSetupResult {
-        return self.js_vtable.setupCreate(self, caller, value, init_code, gas_limit, is_create2, salt, skip_nonce_bump, frame_depth, is_opcode_create);
+        return self.js_vtable.setupCreate(self, caller, value, init_code, gas_limit, is_create2, salt, skip_nonce_bump, frame_depth, is_opcode_create, known_addr);
     }
+
+    /// What `recordCreateTarget` found: whether the target is alive, and its address.
+    pub const CreateTarget = struct { alive: bool, addr: primitives.Address };
 
     /// EIP-7928 (Amsterdam+): record the create target address in the block access list
     /// BEFORE the NEW_ACCOUNT state-gas charge (reference generic_create:
@@ -582,7 +589,8 @@ pub const Host = struct {
     /// setupCreate return without accessing the address (depth, initcode size, balance,
     /// nonce overflow), so no phantom entries are created.
     /// Returns whether the create target account is already alive (has balance, nonce, or
-    /// code), so the caller can skip the NEW_ACCOUNT charge (reference is_account_alive gate).
+    /// code), so the caller can skip the NEW_ACCOUNT charge (reference is_account_alive gate),
+    /// and the target address, which the caller hands on to setupCreate.
     pub fn recordCreateTarget(
         self: *Host,
         caller: primitives.Address,
@@ -591,7 +599,7 @@ pub const Host = struct {
         is_create2: bool,
         salt: primitives.U256,
         frame_depth: usize,
-    ) ?bool {
+    ) ?CreateTarget {
         return self.js_vtable.recordCreateTarget(self, caller, value, init_code, is_create2, salt, frame_depth);
     }
 
@@ -672,7 +680,7 @@ pub const Host = struct {
         salt: primitives.U256,
         skip_nonce_bump: bool,
     ) CreateResult {
-        const setup = self.setupCreate(caller, value, init_code, gas_limit, is_create2, salt, skip_nonce_bump, 0, true);
+        const setup = self.setupCreate(caller, value, init_code, gas_limit, is_create2, salt, skip_nonce_bump, 0, true, null);
         switch (setup) {
             .failed => |r| return r,
             .ready => |s| {
@@ -870,6 +878,24 @@ fn finalizeCallCore(js: anytype, checkpoint: JournalCheckpoint, result: Instruct
     };
 }
 
+/// The CREATE target, keccak(rlp(caller, nonce))[12..], or for CREATE2
+/// keccak(0xff ++ caller ++ salt ++ keccak(init_code))[12..]. The one derivation
+/// recordCreateTargetCore and setupCreateCore share, so they cannot disagree.
+inline fn deriveCreateAddress(
+    caller: primitives.Address,
+    nonce: u64,
+    init_code: []const u8,
+    is_create2: bool,
+    salt: primitives.U256,
+) primitives.Address {
+    if (is_create2) {
+        var init_hash: [32]u8 = undefined;
+        accel.keccak256(init_code, &init_hash);
+        return create2Address(caller, salt, init_hash);
+    }
+    return createAddress(caller, nonce);
+}
+
 /// Core logic for setupCreate.
 /// EIP-7928 (Amsterdam+): record the create target address (read-only) before the
 /// NEW_ACCOUNT charge. Mirrors setupCreateCore's pre-checks so it only records when
@@ -883,7 +909,7 @@ fn recordCreateTargetCore(
     is_create2: bool,
     salt: primitives.U256,
     frame_depth: usize,
-) ?bool {
+) ?Host.CreateTarget {
     const spec_id = host.cfg.spec;
     if (!primitives.isEnabledIn(spec_id, .amsterdam)) return null; // BAL is Amsterdam+ only
     // Reference generic_create returns 0 BEFORE accessing the address or charging NEW_ACCOUNT
@@ -897,11 +923,7 @@ fn recordCreateTargetCore(
     if (value > 0 and caller_acc.info.balance < value) return null;
     const nonce = caller_acc.info.nonce;
     if (nonce == std.math.maxInt(u64)) return null;
-    const new_addr: primitives.Address = if (is_create2) blk: {
-        var init_hash: [32]u8 = undefined;
-        accel.keccak256(init_code, &init_hash);
-        break :blk create2Address(caller, salt, init_hash);
-    } else createAddress(caller, nonce);
+    const new_addr = deriveCreateAddress(caller, nonce, init_code, is_create2, salt);
     const load = js.loadAccount(new_addr) catch {
         host.ctx_error.* = context_mod.ContextError.database_error;
         return null;
@@ -909,8 +931,11 @@ fn recordCreateTargetCore(
     // is_account_alive: reference generic_create charges NEW_ACCOUNT only when the target
     // leaf does not already exist (balance/nonce/code present).
     const info = load.data.info;
-    return info.balance > 0 or info.nonce > 0 or
-        !std.mem.eql(u8, &info.code_hash, &primitives.KECCAK_EMPTY);
+    return .{
+        .alive = info.balance > 0 or info.nonce > 0 or
+            !std.mem.eql(u8, &info.code_hash, &primitives.KECCAK_EMPTY),
+        .addr = new_addr,
+    };
 }
 
 fn setupCreateCore(
@@ -925,6 +950,7 @@ fn setupCreateCore(
     skip_nonce_bump: bool,
     frame_depth: usize,
     is_opcode_create: bool,
+    known_addr: ?primitives.Address,
 ) Host.CreateSetupResult {
     const MAX_CALL_DEPTH = 1024;
     const spec_id = host.cfg.spec;
@@ -962,11 +988,19 @@ fn setupCreateCore(
         break :blk n;
     };
 
-    const new_addr: primitives.Address = if (is_create2) blk: {
-        var init_hash: [32]u8 = undefined;
-        accel.keccak256(init_code, &init_hash);
-        break :blk create2Address(caller, salt, init_hash);
-    } else createAddress(caller, caller_nonce);
+    const new_addr: primitives.Address = known_addr orelse
+        deriveCreateAddress(caller, caller_nonce, init_code, is_create2, salt);
+
+    // `known_addr` is trusted on the strength of "nothing between recordCreateTarget and
+    // setupCreate can move the nonce or init code". Check that in Debug builds, so a
+    // future change that breaks it fails tests instead of silently creating at the wrong address.
+    // Debug only: the comptime-false branch is not compiled into any release build.
+    if (comptime builtin.mode == .Debug) {
+        if (known_addr) |k| {
+            const derived = deriveCreateAddress(caller, caller_nonce, init_code, is_create2, salt);
+            std.debug.assert(std.mem.eql(u8, &k, &derived));
+        }
+    }
 
     // Balance check BEFORE loading new_addr to avoid phantom BAL entries.
     // Pre-Amsterdam already checked balance before the nonce bump (above); this handles
