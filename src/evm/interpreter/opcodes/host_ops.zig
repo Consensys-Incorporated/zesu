@@ -5,6 +5,7 @@ const InstructionContext = instruction_context.InstructionContext;
 const expandMemory = instruction_context.expandMemory;
 const gas_costs = @import("../gas_costs.zig");
 const host_module = @import("../host.zig");
+const bytecode_mod = @import("bytecode");
 const alloc_mod = @import("zesu_allocator");
 
 // ---------------------------------------------------------------------------
@@ -130,10 +131,13 @@ pub fn opExtcodecopy(ctx: *InstructionContext) void {
 
     // Charge all gas (warm/cold + copy + memory expansion) BEFORE loading the code.
     // This eliminates phantom BAL entries: the account is only loaded if gas succeeds.
+    // One read-only probe answers the warm/cold charge and, for a warm account whose code is
+    // already loaded, the code read too.
+    const probe = h.codeProbe(addr);
 
     // Post-Berlin: charge dynamic warm/cold cost.
     if (primitives.isEnabledIn(ctx.interpreter.runtime_flags.spec_id, .berlin)) {
-        var dyn_gas: u64 = if (h.isAddressCold(addr)) gas_costs.coldAccountAccess(ctx.interpreter.runtime_flags.spec_id) else gas_costs.WARM_ACCOUNT_ACCESS;
+        var dyn_gas: u64 = if (probe.is_cold) gas_costs.coldAccountAccess(ctx.interpreter.runtime_flags.spec_id) else gas_costs.WARM_ACCOUNT_ACCESS;
         // EIP-8038 (Amsterdam+): EXTCODECOPY is charged an additional WARM_ACCESS
         // on top of the cold/warm access cost (unlike BALANCE / EXTCODEHASH).
         if (primitives.isEnabledIn(ctx.interpreter.runtime_flags.spec_id, .amsterdam)) dyn_gas += gas_costs.WARM_ACCOUNT_ACCESS;
@@ -169,12 +173,19 @@ pub fn opExtcodecopy(ctx: *InstructionContext) void {
         break :blk mo;
     };
 
-    const info = h.codeInfo(addr) orelse {
-        // Address doesn't exist: gas and memory already handled above.
-        if (size == 0) return;
-        const size_u: usize = @intCast(size);
-        @memset(ctx.interpreter.memory.buffer.items[mem_off_u .. mem_off_u + size_u], 0);
-        return;
+    // Holds the fallback load's Bytecode: `code` may slice into it (an EIP-7702 designator's
+    // bytes are inline), so it must outlive the block below.
+    var loaded: bytecode_mod.Bytecode = undefined;
+    const code: []const u8 = probe.code orelse blk: {
+        const info = h.codeInfo(addr) orelse {
+            // Database error (ctx_error is set): gas and memory already handled above.
+            if (size == 0) return;
+            const size_u: usize = @intCast(size);
+            @memset(ctx.interpreter.memory.buffer.items[mem_off_u .. mem_off_u + size_u], 0);
+            return;
+        };
+        loaded = info.bytecode;
+        break :blk loaded.bytes();
     };
 
     if (size == 0) return;
@@ -182,7 +193,6 @@ pub fn opExtcodecopy(ctx: *InstructionContext) void {
     const size_u: usize = @intCast(size);
     const new_size = mem_off_u + size_u; // valid: overflow already checked above
 
-    const code = info.bytecode.bytes();
     const dest = ctx.interpreter.memory.buffer.items[mem_off_u..new_size];
 
     if (code_off > std.math.maxInt(usize)) {
