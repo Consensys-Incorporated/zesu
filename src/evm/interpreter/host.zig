@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const primitives = @import("primitives");
 const accel = @import("accelerators");
 const bytecode_mod = @import("bytecode");
@@ -877,6 +878,24 @@ fn finalizeCallCore(js: anytype, checkpoint: JournalCheckpoint, result: Instruct
     };
 }
 
+/// The CREATE target, keccak(rlp(caller, nonce))[12..], or for CREATE2
+/// keccak(0xff ++ caller ++ salt ++ keccak(init_code))[12..]. The one derivation
+/// recordCreateTargetCore and setupCreateCore share, so they cannot disagree.
+inline fn deriveCreateAddress(
+    caller: primitives.Address,
+    nonce: u64,
+    init_code: []const u8,
+    is_create2: bool,
+    salt: primitives.U256,
+) primitives.Address {
+    if (is_create2) {
+        var init_hash: [32]u8 = undefined;
+        accel.keccak256(init_code, &init_hash);
+        return create2Address(caller, salt, init_hash);
+    }
+    return createAddress(caller, nonce);
+}
+
 /// Core logic for setupCreate.
 /// EIP-7928 (Amsterdam+): record the create target address (read-only) before the
 /// NEW_ACCOUNT charge. Mirrors setupCreateCore's pre-checks so it only records when
@@ -904,11 +923,7 @@ fn recordCreateTargetCore(
     if (value > 0 and caller_acc.info.balance < value) return null;
     const nonce = caller_acc.info.nonce;
     if (nonce == std.math.maxInt(u64)) return null;
-    const new_addr: primitives.Address = if (is_create2) blk: {
-        var init_hash: [32]u8 = undefined;
-        accel.keccak256(init_code, &init_hash);
-        break :blk create2Address(caller, salt, init_hash);
-    } else createAddress(caller, nonce);
+    const new_addr = deriveCreateAddress(caller, nonce, init_code, is_create2, salt);
     const load = js.loadAccount(new_addr) catch {
         host.ctx_error.* = context_mod.ContextError.database_error;
         return null;
@@ -973,11 +988,19 @@ fn setupCreateCore(
         break :blk n;
     };
 
-    const new_addr: primitives.Address = known_addr orelse if (is_create2) blk: {
-        var init_hash: [32]u8 = undefined;
-        accel.keccak256(init_code, &init_hash);
-        break :blk create2Address(caller, salt, init_hash);
-    } else createAddress(caller, caller_nonce);
+    const new_addr: primitives.Address = known_addr orelse
+        deriveCreateAddress(caller, caller_nonce, init_code, is_create2, salt);
+
+    // `known_addr` is trusted on the strength of "nothing between recordCreateTarget and
+    // setupCreate can move the nonce or init code". Check that in Debug builds, so a
+    // future change that breaks it fails tests instead of silently creating at the wrong address.
+    // Debug only: the comptime-false branch is not compiled into any release build.
+    if (comptime builtin.mode == .Debug) {
+        if (known_addr) |k| {
+            const derived = deriveCreateAddress(caller, caller_nonce, init_code, is_create2, salt);
+            std.debug.assert(std.mem.eql(u8, &k, &derived));
+        }
+    }
 
     // Balance check BEFORE loading new_addr to avoid phantom BAL entries.
     // Pre-Amsterdam already checked balance before the nonce bump (above); this handles

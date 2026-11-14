@@ -329,3 +329,55 @@ test "opCreate: collision at derived address returns 0" {
         try expectEqual(@as(U, 0), second_result);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Amsterdam: recordCreateTarget derives the target and hands it to setupCreate
+// (known_addr). These drive that path, where setupCreateCore's safety-checked
+// build re-derives the address and asserts it matches.
+// ---------------------------------------------------------------------------
+
+fn amsterdamCreateAt(comptime is_create2: bool, salt: U) !U {
+    const INIT_CODE = [_]u8{0x00}; // STOP
+
+    var db = database_mod.InMemoryDB.init(ALLOC);
+    try db.insertAccount(CALLER, state_mod.AccountInfo.new(1_000_000, 1, primitives.KECCAK_EMPTY, bytecode_mod.Bytecode.new()));
+    var ctx = context_mod.DefaultContext.new(db, .amsterdam);
+    _ = try ctx.journaled_state.loadAccount(CALLER);
+
+    const gas_limit: u64 = 10_000_000;
+    var interp = Interpreter.new(
+        Memory.new(),
+        ExtBytecode.default(),
+        InputsImpl.new(CALLER, CALLER, 0, @as(primitives.Bytes, @constCast(&[_]u8{})), gas_limit, .call, false, 0),
+        false,
+        .amsterdam,
+        gas_limit,
+    );
+    defer interp.deinit();
+    interp.memory.buffer.resize(std.heap.c_allocator, INIT_CODE.len) catch unreachable;
+    @memcpy(interp.memory.buffer.items[0..INIT_CODE.len], &INIT_CODE);
+
+    if (is_create2) interp.stack.pushUnsafe(salt);
+    interp.stack.pushUnsafe(INIT_CODE.len); // size
+    interp.stack.pushUnsafe(0); // offset
+    interp.stack.pushUnsafe(0); // value (top)
+
+    var host = Host.fromCtx(&ctx, null);
+    var ic = InstructionContext{ .interpreter = &interp, .host = &host };
+    if (is_create2) call_ops.opCreate2(&ic) else call_ops.opCreate(&ic);
+    runPendingCreate(&host, &interp, .amsterdam);
+    return interp.stack.popUnsafe();
+}
+
+test "opCreate (Amsterdam): deploys at keccak(rlp(caller, nonce))" {
+    const pushed = try amsterdamCreateAt(false, 0);
+    try expectEqual(host_module.addressToU256(host_module.createAddress(CALLER, 1)), pushed);
+}
+
+test "opCreate2 (Amsterdam): deploys at the CREATE2 address" {
+    const INIT_CODE = [_]u8{0x00};
+    var init_hash: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(&INIT_CODE, &init_hash, .{});
+    const pushed = try amsterdamCreateAt(true, 42);
+    try expectEqual(host_module.addressToU256(host_module.create2Address(CALLER, 42, init_hash)), pushed);
+}
