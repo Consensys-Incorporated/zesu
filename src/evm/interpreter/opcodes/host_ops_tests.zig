@@ -534,6 +534,15 @@ test "EXTCODECOPY: warm account without code loaded still copies it and charges 
     try expectExtcodecopy32(&ctx, gas_costs.WARM_ACCOUNT_ACCESS);
 }
 
+test "EXTCODECOPY: address warm but not loaded (coinbase) charges warm access" {
+    var ctx = makeCtx(try extCodeDb(true));
+    ctx.journaled_state.warmCoinbaseAccount(OTHER);
+    const probe = ctx.journaled_state.codeProbe(OTHER);
+    try expect(!probe.is_cold);
+    try expect(probe.code == null);
+    try expectExtcodecopy32(&ctx, gas_costs.WARM_ACCOUNT_ACCESS);
+}
+
 test "EXTCODECOPY: account warmed in a reverted call is charged cold access again" {
     var ctx = makeCtx(try extCodeDb(true));
     const checkpoint = ctx.journaled_state.getCheckpoint();
