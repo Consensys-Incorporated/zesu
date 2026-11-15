@@ -612,7 +612,21 @@ pub const Bytecode = union(enum) {
         return Self.newLegacy(raw);
     }
 
-    /// Free any heap memory owned by this Bytecode (the jump table bit vector for legacy analyzed).
+    /// A copy that shares this bytecode's analysis without owning it: its `deinit` frees nothing.
+    /// For a database that keeps analysed code (by code hash) for its lifetime and returns it from
+    /// `codeByHash`: the journal frees the code it owns (CREATE results, superseded code,
+    /// self-destructed accounts) and leaves borrowed code to its owner.
+    pub fn borrowed(self: *const Self) Self {
+        var out = self.*;
+        switch (out) {
+            .legacy_analyzed => |*a| a.original_len |= LegacyAnalyzedBytecode.borrowed_bit,
+            .eip7702 => {}, // inline bytes, nothing to own
+        }
+        return out;
+    }
+
+    /// Free any heap memory owned by this Bytecode (the jump table bit vector for legacy
+    /// analyzed); nothing for a borrowed copy.
     pub fn deinit(self: *Self) void {
         switch (self.*) {
             .legacy_analyzed => |*bc| bc.deinit(),
@@ -645,6 +659,15 @@ pub const LegacyAnalyzedBytecode = struct {
 
     const Self = @This();
 
+    /// Set in `original_len` when the analysis belongs to someone else (a database that keeps
+    /// it for its lifetime): `deinit` leaves it alone. See `Bytecode.borrowed`. Kept in a spare
+    /// bit rather than a field, so the struct (in every account and journal entry) stays 64 bytes.
+    pub const borrowed_bit: usize = 1 << (@bitSizeOf(usize) - 1);
+
+    comptime {
+        if (@bitSizeOf(usize) == 64) std.debug.assert(@sizeOf(Self) == 64);
+    }
+
     pub fn default() Self {
         return Self{
             .bytecode = &[_]u8{STOP},
@@ -659,10 +682,11 @@ pub const LegacyAnalyzedBytecode = struct {
     }
 
     pub fn originalBytes(self: Self) []const u8 {
-        return self.bytecode[0..self.original_len];
+        return self.bytecode[0 .. self.original_len & ~borrowed_bit];
     }
 
     pub fn deinit(self: *LegacyAnalyzedBytecode) void {
+        if (self.original_len & borrowed_bit != 0) return;
         // The bit vector is heap-allocated via c_allocator only when original_len > 0
         // (non-empty bytecode) AND the allocation succeeded (data.len > 0).
         // Cases that must NOT be freed:

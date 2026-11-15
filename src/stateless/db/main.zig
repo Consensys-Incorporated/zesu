@@ -247,7 +247,8 @@ pub const WitnessDatabase = struct {
             }
             return bytecode.Bytecode.newLegacy(code_bytes);
         }
-        if (self.deployed_codes.get(code_hash)) |code| return code;
+        // Deployed code stays owned by this database (freed in deinit): hand out a borrow.
+        if (self.deployed_codes.getPtr(code_hash)) |code| return code.borrowed();
         return DbError.InvalidWitness;
     }
 

@@ -204,8 +204,10 @@ pub const InMemoryDB = struct {
         return self.accounts.get(address);
     }
 
+    /// The stored analysis, borrowed: this database owns it for its lifetime.
     pub fn codeByHash(self: *Self, code_hash: primitives.Hash) !bytecode.Bytecode {
-        return self.code.get(code_hash) orelse bytecode.Bytecode.new();
+        const code = self.code.getPtr(code_hash) orelse return bytecode.Bytecode.new();
+        return code.borrowed();
     }
 
     pub fn storage(self: *Self, address: primitives.Address, index: primitives.StorageKey) !primitives.StorageValue {
@@ -231,7 +233,8 @@ pub const InMemoryDB = struct {
     }
 
     pub fn codeByHashRef(self: Self, code_hash: primitives.Hash) !bytecode.Bytecode {
-        return self.code.get(code_hash) orelse bytecode.Bytecode.new();
+        const code = self.code.getPtr(code_hash) orelse return bytecode.Bytecode.new();
+        return code.borrowed();
     }
 
     pub fn storageRef(self: Self, address: primitives.Address, index: primitives.StorageKey) !primitives.StorageValue {
