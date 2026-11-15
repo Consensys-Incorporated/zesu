@@ -1563,6 +1563,12 @@ pub fn Journal(comptime DB: type) type {
         /// Check whether an address is already in the EVM state cache (was loaded before
         /// this call). Used to avoid un-tracking addresses that were legitimately accessed
         /// earlier in the same transaction.
+        /// The account if loaded and warm in the current transaction, else null.
+        pub fn warmAccount(self: *@This(), address: primitives.Address) ?*const state.Account {
+            const a = self.inner.evm_state.getPtr(address) orelse return null;
+            return if (a.isColdTransactionId(self.inner.transaction_id)) null else a;
+        }
+
         pub fn isAddressLoaded(self: *const @This(), address: primitives.Address) bool {
             return self.inner.evm_state.contains(address);
         }
