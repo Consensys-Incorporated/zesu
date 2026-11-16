@@ -56,6 +56,98 @@ pub const AddressContext = struct {
     }
 };
 
+/// An address as a hash-map key: 8-byte aligned and zero-padded to 24 bytes, so hashing
+/// and comparing it are three aligned 8-byte loads.
+pub const AddrKey = extern struct {
+    bytes: Address align(8),
+    pad: [4]u8 = .{ 0, 0, 0, 0 },
+
+    pub inline fn of(a: Address) AddrKey {
+        return .{ .bytes = a };
+    }
+
+    inline fn words(k: *const AddrKey) *const [3]u64 {
+        return @ptrCast(k);
+    }
+};
+
+/// `AddressContext`'s hash (the padding is zero), over aligned words.
+pub const AddrKeyContext = struct {
+    pub fn hash(_: @This(), k: AddrKey) u64 {
+        const w = k.words();
+        return mix64(std.mem.littleToNative(u64, w[0]) ^
+            std.math.rotl(u64, std.mem.littleToNative(u64, w[1]), 27) ^
+            std.math.rotl(u64, std.mem.littleToNative(u64, w[2]), 13));
+    }
+    pub fn eql(_: @This(), a: AddrKey, b: AddrKey) bool {
+        const x = a.words();
+        const y = b.words();
+        return x[0] == y[0] and x[1] == y[1] and x[2] == y[2];
+    }
+};
+
+/// An address-keyed `std.HashMap` storing `AddrKey`s, with the subset of its API zesu uses.
+/// Keys are handed out as the address, the key's first 20 bytes.
+pub fn AddrMap(comptime V: type) type {
+    return struct {
+        inner: Inner,
+
+        const Self = @This();
+        const Inner = std.HashMap(AddrKey, V, AddrKeyContext, 80);
+        pub const Size = Inner.Size;
+        pub const Entry = struct { key_ptr: *Address, value_ptr: *V };
+        pub const KV = struct { key: Address, value: V };
+        pub const GetOrPutResult = struct { key_ptr: *Address, value_ptr: *V, found_existing: bool };
+
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{ .inner = Inner.init(allocator) };
+        }
+        pub fn deinit(self: *Self) void {
+            self.inner.deinit();
+        }
+        pub fn count(self: Self) Size {
+            return self.inner.count();
+        }
+        pub fn ensureTotalCapacity(self: *Self, n: Size) std.mem.Allocator.Error!void {
+            return self.inner.ensureTotalCapacity(n);
+        }
+        pub fn getPtr(self: Self, a: Address) ?*V {
+            return self.inner.getPtr(AddrKey.of(a));
+        }
+        pub fn get(self: Self, a: Address) ?V {
+            return self.inner.get(AddrKey.of(a));
+        }
+        pub fn contains(self: Self, a: Address) bool {
+            return self.inner.contains(AddrKey.of(a));
+        }
+        pub fn getOrPut(self: *Self, a: Address) std.mem.Allocator.Error!GetOrPutResult {
+            const r = try self.inner.getOrPut(AddrKey.of(a));
+            return .{ .key_ptr = &r.key_ptr.bytes, .value_ptr = r.value_ptr, .found_existing = r.found_existing };
+        }
+        pub fn put(self: *Self, a: Address, v: V) std.mem.Allocator.Error!void {
+            return self.inner.put(AddrKey.of(a), v);
+        }
+        pub fn fetchRemove(self: *Self, a: Address) ?KV {
+            const r = self.inner.fetchRemove(AddrKey.of(a)) orelse return null;
+            return .{ .key = r.key.bytes, .value = r.value };
+        }
+        pub fn remove(self: *Self, a: Address) bool {
+            return self.inner.remove(AddrKey.of(a));
+        }
+
+        pub const Iterator = struct {
+            it: Inner.Iterator,
+            pub fn next(self: *Iterator) ?Entry {
+                const e = self.it.next() orelse return null;
+                return .{ .key_ptr = &e.key_ptr.bytes, .value_ptr = e.value_ptr };
+            }
+        };
+        pub fn iterator(self: *const Self) Iterator {
+            return .{ .it = self.inner.iterator() };
+        }
+    };
+}
+
 /// Hash context for HashMap keyed on a storage slot (u256).
 ///
 /// Slot keys are either small sequential integers (plain fields) or keccak-derived
