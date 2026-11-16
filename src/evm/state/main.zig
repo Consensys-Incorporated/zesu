@@ -565,7 +565,7 @@ pub const Account = struct {
 };
 
 /// EVM State is a mapping from addresses to accounts.
-pub const EvmState = std.HashMap(primitives.Address, Account, primitives.AddressContext, 80);
+pub const EvmState = primitives.AddrMap(Account);
 
 /// EIP-1153 transient storage key.
 pub const TransientKey = struct { primitives.Address, primitives.StorageKey };
