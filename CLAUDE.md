@@ -24,9 +24,11 @@ contain compile errors that never surface — don't assume an unused helper is c
 
 ## Test placement
 
-Put tests in a sidecar `<name>_tests.zig` file next to the code under test (e.g.
+Put new tests in a sidecar `<name>_tests.zig` file next to the code under test (e.g.
 `journal.zig` → `journal_tests.zig`), not in inline `test` blocks in the implementation
-file, and wire the sidecar into the module's `test {}` block as described above.
+file, and wire the sidecar into the module's `test {}` block as described above. Some
+older files still have inline tests (e.g. `interpreter/stack.zig`, `mpt/rlp.zig`,
+`mpt/nibbles.zig`); don't move them unless asked or already reworking that file's tests.
 
 ## Interpreter dispatch invariant
 
@@ -46,17 +48,23 @@ stay on the instruction-table (cold) path. See the INVARIANT comment there.
 
 ## Design principles
 
-- **Single-threaded.** Don't add atomics, locks, or "parallel test" guards; there is no
-  concurrent execution to protect against.
+- **Single-threaded.** Don't add new atomics, locks, or "parallel test" guards; there is
+  no concurrent execution to protect against. The existing `std.atomic.Value` init flags
+  (`mcl_wrapper.zig`, `secp256k1_wrapper.zig`, `io/interface.zig`) are native-only; leave
+  them alone unless asked.
 - **Fail fast on terminal errors.** OOM panics — never map it to another error such as
   OOG. A database/witness failure means the witness is invalid: stop and report it rather
   than tracking the failure and continuing to execute the block.
 - **zkVM-neutral by default.** The accelerator ABI is the eth-act zkvm-standards C
-  interface; describe it in those terms, not as ZisK's API. ZisK-specific code (Zbb/Zbs,
-  DMA, `jump_dest`, `arith256_mod`) is opt-in via `GuestFeatures`/`zisk-object` and never
-  enabled on the portable `rv64im-object`.
-- **No caching behind external interfaces.** Don't memoize in the accelerator layer; the
-  zkVM may already cache, and caching a cache just adds cost.
+  interface; describe it in those terms, not as ZisK's API. ZisK-specific code is opt-in
+  and never enabled on the portable `rv64im-object`. `zig build zisk-object` enables only
+  Zbb/Zbs and `GuestFeatures.dma`; `jump_dest` and `arith256_mod` are enabled only by
+  `addGuestObject` callers that pass them (e.g. zesu-zkvm), so `zisk-object` does not
+  exercise those paths.
+- **keccak256 memo.** The key-hash memo in `src/crypto/accelerators.zig` stays: ZisK does
+  not cache keccak256, and removing the memo measured +0.57% to +1.09% on mainnet. The
+  agreed (deferred) plan is to move it up into `src/stateless/mpt/main.zig`, where the
+  trie keys are hashed; don't add other caching to the accelerator interface.
 - **Remove dead code** rather than keeping unreachable branches, duplicated `else` arms, or
   "future-proofing" fields that are always zero.
 
