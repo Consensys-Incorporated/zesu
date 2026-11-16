@@ -43,6 +43,14 @@ const ModuleSet = struct {
 /// What the zkVM a guest object is built for provides beyond the rv64im baseline. Every field
 /// defaults to false: the portable guest, and every native build. Each one only selects code at
 /// comptime; the zkVM project that links the object must provide what it enables.
+///
+/// Deliberate exception to "zkVM-specific code lives in the zkVM build": these paths are
+/// compiled into zesu because they must be inlined into zesu's own hot code. `dma` replaces
+/// 32-byte stack copies with a two-instruction asm pair; behind an extern call the call
+/// overhead would cost more than it saves. `jump_dest` and `arith256_mod` would tolerate a
+/// call, but neither is in the zkvm-standards accelerator interface yet, so they sit here
+/// too. Move them to the accelerator interface once standardized (arith256_mod: eth-act
+/// zkvm-standards PR #22).
 pub const GuestFeatures = struct {
     /// Fixed-size copy accelerator, used by `primitives.dma`
     /// (currently: the ZisK DMA chip).
@@ -502,8 +510,7 @@ pub fn addGuestObject(
 
 /// Build a relocatable rv64im ELF guest object on the freestanding riscv64 baseline plus
 /// `extra_features`, and wire an install step named `step_name` that publishes it to
-/// `install_name` under zig-out. Backs the published `rv64im-object` (and, for now,
-/// `zisk-object`) release artifacts.
+/// `install_name` under zig-out. Backs the published `rv64im-object` release artifact.
 fn addRv64imObjectStep(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
@@ -773,13 +780,12 @@ pub fn build(b: *std.Build) void {
     // alt_fl_alloc.zig free-list allocator (over ZKVM_HEAP_POS/TOP), so it needs no set() call.
     //
     // `rv64im-object` targets the zkvm-standards baseline (M + Zicclsm + unaligned scalar
-    // mem) shared across zkVM backends. `zisk-object` adds Zbb/Zbs (single ops on ZisK, but
-    // not on every zkVM, so kept off the shared baseline) and the ZisK DMA feature.
+    // mem) shared across zkVM backends. zkVM-specific ISA extensions and GuestFeatures are
+    // left to each zkVM's own build, which calls addGuestObject with its own target.
     //
-    // Build with: zig build rv64im-object | zig build zisk-object
+    // Build with: zig build rv64im-object
     // Verify undefined refs: llvm-nm zig-out/lib/<name> | grep ' U '
     addRv64imObjectStep(b, optimize, &.{ .m, .zicclsm, .unaligned_scalar_mem }, "rv64im-object", "Build relocatable rv64im ELF object (zesu.o)", "lib/zesu.o", .{});
-    addRv64imObjectStep(b, optimize, &.{ .m, .zicclsm, .unaligned_scalar_mem, .zbb, .zbs }, "zisk-object", "Build relocatable rv64im+Zbb+Zbs ELF object for the ZisK guest (zesu-zisk.o)", "lib/zesu-zisk.o", .{ .dma = true });
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
     const spec_test_version = "tests@v21.0.1";
