@@ -1,8 +1,8 @@
 # On-demand guest benchmark. Comment `/benchmark` on a PR (optionally
 # `/benchmark 20` for a block count) and this builds the guest ELF at the PR
 # head and at its merge-base for each guest object variant (the zkvm-standards
-# rv64im baseline, and the ZisK-specific rv64im+Zbb+Zbs build — see
-# build.zig's `rv64im-object` / `zisk-object` steps), runs both over the same
+# rv64im baseline, and the ZisK-specific rv64im+Zbb+Zbs build — zesu-zkvm's
+# -Disa=rv64im / -Disa=zisk, via addGuestObject), runs both over the same
 # Sepolia blocks, and posts a separate per-chip cost delta comment for each
 # variant. Each comment also carries a per-suite table for the 30M gas tier of
 # tests-zkevm-benchmark, sampled to one measured block per fixture file.
@@ -385,7 +385,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: elf-base
-          # Keyed by matrix.key too: rv64im-object and zisk-object are different
+          # Keyed by matrix.key too: the rv64im and zisk builds are different
           # ELFs for the same base sha and must never share a cache entry.
           key: >-
             benchelf-${{ matrix.key }}-${{ needs.prepare.outputs.base }}-${{ needs.prepare.outputs.zisk }}-${{

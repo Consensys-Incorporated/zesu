@@ -1,14 +1,6 @@
-/// zesu_allocator module for the relocatable rv64im object.
-///
-/// Bump allocator backed by ZKVM_HEAP_POS / ZKVM_HEAP_TOP extern vars.
-/// Each zkVM host object (zisk-host.o, openvm-host.o, linea-host.o) exports
-/// these vars and initializes them before calling main(). For ZisK, the vars
-/// are aliased onto libziskos.a's ZISK_BUMP_HEAP_POS/TOP via zisk.ld.
-///
-/// free/resize/remap are no-ops (bump allocator semantics).
-///
-/// This module satisfies the `@import("zesu_allocator")` interface expected
-/// by all EVM modules: pub fn get() std.mem.Allocator.
+/// Bump allocator backed by ZKVM_HEAP_POS / ZKVM_HEAP_TOP extern vars; free/resize/remap
+/// are no-ops. Not wired into any build: the rv64im object uses alt_fl_alloc.zig.
+/// Kept as a drop-in `zesu_allocator` alternative (same `pub fn get()` interface).
 const std = @import("std");
 
 extern var ZKVM_HEAP_POS: usize;

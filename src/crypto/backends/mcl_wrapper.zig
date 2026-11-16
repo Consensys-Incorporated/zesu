@@ -1,7 +1,5 @@
-//! mcl wrapper for BN254 (alt_bn128) operations
-//! Requires mcl library to be installed and linked with C bindings
-//!
-//! mcl is required by default. Install mcl: https://github.com/herumi/mcl
+//! mcl wrapper for BN254 (alt_bn128) operations (EIP-196/197).
+//! mcl (https://github.com/herumi/mcl) is linked by build.zig for the default crypto backend.
 const std = @import("std");
 
 // The Homebrew mcl package is compiled as bn_c384_256 (FP=384-bit, FR=256-bit)
@@ -16,7 +14,6 @@ const c = @cImport({
 
 var mcl_init_done: std.atomic.Value(bool) = .init(false);
 
-/// Initialize mcl library (call once before using)
 fn initMcl() void {
     if (mcl_init_done.load(.acquire)) return;
     // MCL_BN_SNARK1=4; MCLBN_COMPILED_TIME_VAR=46 for bn_c384_256 (FP=384, FR=256).

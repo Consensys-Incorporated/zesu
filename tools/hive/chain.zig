@@ -1,8 +1,9 @@
 /// In-memory chain state for Hive consume-rlp.
 ///
-/// Imports RLP-encoded blocks sequentially from genesis, executes them,
-/// commits valid blocks (state root + receipts root match header), and
-/// provides block lookup by number.
+/// Imports RLP-encoded blocks sequentially from genesis, executes them, and
+/// commits a block only if it executes and its withdrawals root, state root,
+/// receipts root, BAL hash and requests hash all match the header. Invalid
+/// blocks are dropped silently. Provides block lookup by number.
 const std = @import("std");
 const primitives = @import("primitives");
 const executor = @import("executor");
@@ -91,7 +92,6 @@ pub const Chain = struct {
         // Block hash = keccak256 of the raw header RLP (including its prefix)
         const block_hash = keccak256(block_payload[0..hdr_r.consumed]);
 
-        // Decode header fields
         const hdr = try decodeHeader(hdr_payload);
 
         // ── Transactions ──────────────────────────────────────────────────────

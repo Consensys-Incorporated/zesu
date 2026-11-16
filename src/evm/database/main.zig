@@ -3,23 +3,15 @@ const primitives = @import("primitives");
 const state = @import("state");
 const bytecode = @import("bytecode");
 
-/// Database interface and implementations for the EVM.
-/// Address with all 0xff..ff in it. Used for testing.
+// Fixed addresses and balances for tests and benchmarks.
 pub const FFADDRESS: primitives.Address = [_]u8{0xff} ** 20;
-/// BENCH_TARGET address
 pub const BENCH_TARGET: primitives.Address = FFADDRESS;
-/// Common test balance used for benchmark addresses
 pub const TEST_BALANCE: primitives.U256 = primitives.U256{10_000_000_000_000_000};
-/// BENCH_TARGET_BALANCE balance
 pub const BENCH_TARGET_BALANCE: primitives.U256 = TEST_BALANCE;
-/// Address with all 0xee..ee in it. Used for testing.
 pub const EEADDRESS: primitives.Address = [_]u8{0xee} ** 20;
-/// BENCH_CALLER address
 pub const BENCH_CALLER: primitives.Address = EEADDRESS;
-/// BENCH_CALLER_BALANCE balance
 pub const BENCH_CALLER_BALANCE: primitives.U256 = TEST_BALANCE;
 
-/// Database error marker
 pub fn DBErrorMarker(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -29,11 +21,9 @@ pub fn DBErrorMarker(comptime T: type) type {
     };
 }
 
-/// Wraps a type satisfying the DatabaseRef interface (basicRef, codeByHashRef,
-/// storageRef, blockHashRef) to provide a Database implementation (basic,
-/// codeByHash, storage, blockHash). Any DB type satisfying the 4-method
-/// interface can be used directly with `Context(DB)` without wrapping;
-/// this wrapper is only needed to adapt an immutable-receiver DB.
+/// Adapts an immutable-receiver DB (basicRef, codeByHashRef, storageRef, blockHashRef)
+/// to the mutable Database interface (basic, codeByHash, storage, blockHash) that
+/// `Context(DB)` expects. Used by `Context.withRefDb`.
 pub fn WrapDatabaseRef(comptime T: type) type {
     return struct {
         inner: T,
@@ -133,7 +123,6 @@ pub const EmptyDB = struct {
     }
 };
 
-/// Storage key context for HashMap
 const StorageKeyContext = struct {
     pub fn hash(ctx: @This(), key: struct { primitives.Address, primitives.StorageKey }) u64 {
         _ = ctx;
@@ -151,17 +140,17 @@ const StorageKeyContext = struct {
 /// In-memory database implementation.
 ///
 /// Pre-populate with `insertAccount`, `insertCode`, `insertStorage`, `insertBlockHash`
-/// before execution. Any DB type satisfying the 4-method interface (basic, codeByHash,
-/// storage, blockHash) can be used in place of this via `Context(DB)`. Tracking methods
-/// (snapshotFrame, commitFrame, etc.) are opt-in: implement them on your DB type and
-/// they will be activated automatically via @hasDecl in the Journal wrappers.
+/// before execution. Any DB type with the 4-method interface (basic, codeByHash,
+/// storage, blockHash) can replace this via `Context(DB)`. Optional hooks
+/// (`notifyCodeDeployed`, `hasNonZeroStorageForAddress`) are detected by the Journal
+/// via @hasDecl.
 pub const InMemoryDB = struct {
     accounts: std.HashMap(primitives.Address, state.AccountInfo, primitives.AddressContext, 80),
     code: std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80),
     storage_map: std.HashMap(struct { primitives.Address, primitives.StorageKey }, primitives.StorageValue, StorageKeyContext, std.hash_map.default_max_load_percentage),
     block_hashes: std.AutoHashMap(u64, primitives.Hash),
-    /// Count of non-zero storage entries per address.
-    /// Maintained by putStorage for O(1) hasNonZeroStorageForAddress lookups.
+    /// Non-zero storage entries per address, maintained by putStorage so
+    /// hasNonZeroStorageForAddress is O(1).
     nonzero_storage_count: std.HashMap(primitives.Address, u32, primitives.AddressContext, 80),
 
     const Self = @This();
@@ -248,10 +237,8 @@ pub const InMemoryDB = struct {
             const address = entry.key_ptr.*;
             const account = entry.value_ptr.*;
 
-            // Update account info
             self.accounts.put(address, account.info) catch return;
 
-            // Update storage
             var storage_iterator = account.storage.iterator();
             while (storage_iterator.next()) |storage_entry| {
                 const key = storage_entry.key_ptr.*;
@@ -261,28 +248,24 @@ pub const InMemoryDB = struct {
         }
     }
 
-    /// Insert an account into the database
     pub fn insertAccount(self: *Self, address: primitives.Address, account_info: state.AccountInfo) !void {
         try self.accounts.put(address, account_info);
     }
 
-    /// Insert code into the database
     pub fn insertCode(self: *Self, code_hash: primitives.Hash, code: bytecode.Bytecode) !void {
         try self.code.put(code_hash, code);
     }
 
-    /// Insert storage value into the database
     pub fn insertStorage(self: *Self, address: primitives.Address, key: primitives.StorageKey, value: primitives.StorageValue) !void {
         try self.putStorage(address, key, value);
     }
 
-    /// Insert block hash into the database
     pub fn insertBlockHash(self: *Self, number: u64, hash: primitives.Hash) !void {
         try self.block_hashes.put(number, hash);
     }
 };
 
-/// State management and tracking structures
+/// Address -> Account map (accounts own their storage maps; freed in deinit).
 pub const State = struct {
     accounts: std.HashMap(primitives.Address, state.Account, primitives.AddressContext, 80),
     allocator: std.mem.Allocator,
@@ -304,17 +287,14 @@ pub const State = struct {
         self.accounts.deinit();
     }
 
-    /// Get account from state
     pub fn getAccount(self: *Self, address: primitives.Address) ?*state.Account {
         return self.accounts.getPtr(address);
     }
 
-    /// Insert or update account in state
     pub fn insertAccount(self: *Self, address: primitives.Address, account: state.Account) !void {
         try self.accounts.put(address, account);
     }
 
-    /// Remove account from state
     pub fn removeAccount(self: *Self, address: primitives.Address) ?state.Account {
         if (self.accounts.fetchRemove(address)) |kv| {
             return kv.value;
@@ -322,7 +302,6 @@ pub const State = struct {
         return null;
     }
 
-    /// Get all accounts
     pub fn getAccounts(self: Self) std.HashMap(primitives.Address, state.Account, primitives.AddressContext, 80) {
         return self.accounts;
     }

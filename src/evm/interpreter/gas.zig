@@ -51,12 +51,10 @@ pub const Gas = struct {
         };
     }
 
-    /// Returns the gas limit.
     pub fn getLimit(self: Gas) u64 {
         return self.limit;
     }
 
-    /// Returns the total amount of gas that was refunded.
     pub fn getRefunded(self: Gas) i64 {
         return self.refunded;
     }
@@ -73,12 +71,11 @@ pub const Gas = struct {
         return if (used > refund_amount) used - refund_amount else 0;
     }
 
-    /// Returns the remaining gas.
     pub fn getRemaining(self: Gas) u64 {
         return self.remaining;
     }
 
-    /// Spend gas
+    /// Returns false, leaving `remaining` unchanged, if there is not enough gas.
     pub fn spend(self: *Gas, amount: u64) bool {
         if (self.remaining < amount) {
             return false;
@@ -141,50 +138,41 @@ pub const Gas = struct {
         self.state_gas_spilled -= repayment;
     }
 
-    /// Spend all remaining gas
     pub fn spendAll(self: *Gas) void {
         self.remaining = 0;
     }
 
-    /// Refund gas
     pub fn refund(self: *Gas, amount: u64) void {
         self.refunded += @as(i64, @intCast(amount));
     }
 
-    /// Record gas refund
     pub fn recordRefund(self: *Gas, amount: u64) void {
         self.refunded += @as(i64, @intCast(amount));
     }
 
-    /// Erase gas refund
     pub fn eraseRefund(self: *Gas) void {
         self.refunded = 0;
     }
 
-    /// Load gas
     pub fn loadGas(self: *Gas, amount: u64) void {
         self.remaining = amount;
     }
 
-    /// Load gas with limit
     pub fn loadGasWithLimit(self: *Gas, amount: u64, limit: u64) void {
         self.remaining = @min(amount, limit);
     }
 
-    /// Load gas with limit and refund
     pub fn loadGasWithLimitAndRefund(self: *Gas, amount: u64, limit: u64, refund_amount: i64) void {
         self.remaining = @min(amount, limit);
         self.refunded = refund_amount;
     }
 
-    /// Load gas with refund
     pub fn loadGasWithRefund(self: *Gas, amount: u64, refund_amount: i64) void {
         self.remaining = amount;
         self.refunded = refund_amount;
     }
 
-    /// Apply EIP-3529 refund cap in-place.
-    /// Pre-London: cap at gas_spent / 2. London+: cap at gas_spent / 5.
+    /// Cap the refund in place: gas_spent / 2, or gas_spent / 5 from London (EIP-3529).
     pub fn setFinalRefund(self: *Gas, is_london: bool) void {
         const quotient: u64 = if (is_london) 5 else 2;
         const spent = self.getSpent();
@@ -192,7 +180,7 @@ pub const Gas = struct {
         self.refunded = @as(i64, @intCast(@min(raw, spent / quotient)));
     }
 
-    /// Returns gas_spent − capped_refund (never negative). Used by EIP-7623 check.
+    /// gas_spent - refund (saturating at 0). Used by the EIP-7623 floor check.
     pub fn spentSubRefunded(self: Gas) u64 {
         const spent = self.getSpent();
         const ref = @as(u64, @intCast(@max(0, self.refunded)));

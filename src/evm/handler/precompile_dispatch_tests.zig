@@ -1,5 +1,4 @@
-/// Phase 4 tests: precompile dispatch through Host.call() and top-level CREATE transactions.
-/// Imported from mainnet_builder.zig.
+//! Tests for precompile dispatch through Host.call() and top-level CREATE transactions.
 const std = @import("std");
 const primitives = @import("primitives");
 const context = @import("context");

@@ -292,17 +292,16 @@ jobs:
 
       # Executes a real mainnet block inside the emulator. This is the only
       # coverage for guest-only failures: code can compile, pass every native
-      # suite, and still abort here (see #97). ZESU_SOURCE builds this checkout
-      # (zig build --fork) for riscv64-freestanding with no atomics, no libc and
-      # a bump allocator — a target no other job in this workflow exercises.
+      # suite, and still abort here. ZESU_SOURCE builds this checkout (via
+      # addGuestObject) for riscv64-freestanding with no atomics, no libc and
+      # the alt_fl_alloc free-list heap — a target no other job exercises.
       - name: Run guest vectors (rv64im)
         working-directory: zesu-zkvm/zisk
         run: make test ZESU_SOURCE=$GITHUB_WORKSPACE/zesu ISA=rv64im
 
-      # Same guest logic, plus the Zbb/Zbs bitmanip extensions ZisK's
-      # transpiler and cost model support natively (see PRs #117, #119).
-      # Exercised separately from rv64im above so a Zbb/Zbs-specific
-      # correctness regression can't hide behind the baseline build's pass.
+      # Same guest logic plus the Zbb/Zbs bitmanip extensions ZisK supports
+      # natively, run separately so a Zbb/Zbs-specific regression can't hide
+      # behind the baseline build's pass.
       - name: Run guest vectors (rv64im + Zbb + Zbs)
         working-directory: zesu-zkvm/zisk
         run: make test ZESU_SOURCE=$GITHUB_WORKSPACE/zesu ISA=zisk

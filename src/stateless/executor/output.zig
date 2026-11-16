@@ -1,8 +1,5 @@
-/// Trie root computations for EVM state transition output.
-///
-/// Provides computeStateRootDelta() (stateless delta mode), computeStateRoot()
-/// (full-state scratch mode), computeReceiptsRoot(), computeLogsHash(),
-/// and computeTxRoot() for post-execution state and receipt verification.
+//! Post-execution commitments: state root (witness delta via computeStateRootDelta, or
+//! from scratch via computeStateRoot), receipts/transactions roots and the logs hash.
 const std = @import("std");
 
 const types = @import("executor_types");
@@ -91,8 +88,8 @@ pub fn computeReceiptsRoot(
 /// stateRoot for stateless execution: batch-applies all account changes in one sorted pass,
 /// visiting each shared branch node exactly once instead of once per account update.
 ///
-/// `pre_storage_roots` is the WitnessDatabase, used to look up pre-state storage roots
-/// for accounts that had storage before this block (avoids redundant trie walks).
+/// `pre_storage_roots` is the WitnessDatabase: it supplies pre-state storage roots and the
+/// witness-proven original accounts, so accounts the block left unchanged are skipped.
 pub fn computeStateRootDelta(
     alloc: std.mem.Allocator,
     pre_state_root: [32]u8,
@@ -104,11 +101,8 @@ pub fn computeStateRootDelta(
     const total = alloc_map.count() + deleted_accounts.len;
     if (total == 0) return pre_state_root;
 
-    // Every RLP encoding and intermediate trie-node byte string produced while
-    // batch-applying these changes is scratch: only the returned root hash
-    // outlives this call, and batchUpdateIndexed never writes to `index`. Scope
-    // them to an arena so the whole batch is reclaimed in one free instead of
-    // leaking one allocation per touched trie node into the caller's allocator.
+    // Every encoding and trie node built here is scratch: only the root hash outlives this
+    // call, and batchUpdateIndexed never writes to `index`. One arena reclaims them all.
     var scratch_arena = ScratchArena.init(alloc);
     defer scratch_arena.deinit();
     const scratch = scratch_arena.allocator();
@@ -234,7 +228,6 @@ pub fn computeStateRoot(
 }
 
 /// Batch storage root update: sorts all slot changes and applies them in one pass.
-/// Replaces the old two-pass (inserts-then-deletes) sequential approach.
 /// `alloc` must be an arena-like scratch allocator (see sortChanges): nothing allocated here is freed.
 fn computeStorageRootBatch(
     alloc: std.mem.Allocator,
@@ -286,7 +279,8 @@ fn computeStorageRootScratch(alloc: std.mem.Allocator, account: types.AllocAccou
     return mpt_builder.trieRoot(alloc, items[0..i]);
 }
 
-/// Pool-based storage root: delta-updates via witness node pool (for legacy callers).
+/// Storage root for computeStateRoot: delta-updates `pre_storage_root` through the
+/// witness node pool when set, else builds from scratch.
 fn computeStorageRoot(
     alloc: std.mem.Allocator,
     account: types.AllocAccount,
@@ -408,7 +402,7 @@ fn rlpIndex(alloc: std.mem.Allocator, i: usize) ![]u8 {
 }
 
 /// Encode a signed transaction to its wire bytes (type_byte ++ rlp for typed).
-/// Falls back to empty on error.
+/// Types 0-2 only; computeTxRoot substitutes empty bytes on error.
 fn encodeTxBytes(
     alloc: std.mem.Allocator,
     tx: *const types.TxInput,

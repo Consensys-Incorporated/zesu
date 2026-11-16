@@ -6,7 +6,6 @@ const precompile = @import("precompile");
 const database = @import("database");
 const alloc_mod = @import("zesu_allocator");
 
-// Import handler modules
 const mainnet_builder = @import("mainnet_builder.zig");
 const validation = @import("validation.zig");
 
@@ -162,9 +161,8 @@ pub const FrameResult = struct {
     }
 };
 
-/// Generic EVM parametrised over a DB type.
-/// `Evm = EvmFor(database.InMemoryDB)` is the default used throughout zevm.
-/// External users (zevm-stateless) can instantiate EvmFor(their_db) directly.
+/// EVM handle parametrised over the DB type; the stateless executor uses
+/// `EvmFor(@TypeOf(ctx.*).DatabaseType)`.
 pub fn EvmFor(comptime DB: type) type {
     return struct {
         ctx: *context.Context(DB),
@@ -192,7 +190,7 @@ pub fn EvmFor(comptime DB: type) type {
     };
 }
 
-/// Default EVM for InMemoryDB — drop-in for all existing zevm code.
+/// EVM over `InMemoryDB` (MainBuilder and tests).
 pub const Evm = EvmFor(database.InMemoryDB);
 
 /// Instructions provider for EVM execution
@@ -244,7 +242,7 @@ pub const Precompiles = struct {
     }
 };
 
-/// Inspector for execution monitoring
+/// No-op inspector stub; the hooks are never called.
 pub const Inspector = struct {
     /// Inspect before execution
     pub fn inspectBefore(self: *Inspector, evm: *Evm) !void {

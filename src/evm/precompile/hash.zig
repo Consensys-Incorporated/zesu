@@ -35,9 +35,7 @@ pub fn ripemd160Run(input: []const u8, gas_limit: u64) main.PrecompileResult {
     if (gas_used > gas_limit)
         return .{ .err = main.PrecompileError.OutOfGas };
 
-    // accel.ripemd160 writes the EVM output layout directly (12 zero bytes +
-    // 20-byte digest), so the host result lands straight in the heap buffer —
-    // no intermediate copy or re-pad needed.
+    // accel.ripemd160 writes the 32-byte EVM layout (12 zero bytes + digest).
     const heap_out = alloc_mod.get().alloc(u8, 32) catch @panic("out of memory");
     accel.ripemd160(input, heap_out[0..32]);
     return .{ .success = main.PrecompileOutput.new(gas_used, heap_out) };

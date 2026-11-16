@@ -1,6 +1,5 @@
 const std = @import("std");
 
-// Import secp256k1 C API
 const c = @cImport({
     @cInclude("secp256k1.h");
     @cInclude("secp256k1_recovery.h");
@@ -10,14 +9,12 @@ const c = @cImport({
 pub const Secp256k1 = struct {
     ctx: *c.secp256k1_context,
 
-    /// Initialize a new secp256k1 context
     pub fn init() Secp256k1 {
         const ctx = c.secp256k1_context_create(c.SECP256K1_CONTEXT_VERIFY | c.SECP256K1_CONTEXT_SIGN);
         std.debug.assert(ctx != null);
         return Secp256k1{ .ctx = ctx.? };
     }
 
-    /// Clean up the secp256k1 context
     pub fn deinit(self: *Secp256k1) void {
         c.secp256k1_context_destroy(self.ctx);
         self.ctx = undefined;
@@ -43,20 +40,17 @@ pub const Secp256k1 = struct {
         return .{ .sig = sig_bytes, .recid = @intCast(recid) };
     }
 
-    /// Recover public key from signature and message
-    /// Returns the Ethereum address (last 20 bytes of Keccak256 hash of public key)
-    /// Returns null if recovery fails
+    /// Recover the signer's Ethereum address (last 20 bytes of keccak256(pubkey)),
+    /// or null if recovery fails.
     pub fn ecrecover(
         self: Secp256k1,
         msg: [32]u8,
         sig: [64]u8,
         recid: u8,
     ) ?[20]u8 {
-        // Create recoverable signature
         var recoverable_sig: c.secp256k1_ecdsa_recoverable_signature = undefined;
         const mut_recid: c_int = @intCast(recid);
 
-        // Parse the compact signature with recovery ID
         if (c.secp256k1_ecdsa_recoverable_signature_parse_compact(
             self.ctx,
             &recoverable_sig,
@@ -66,7 +60,6 @@ pub const Secp256k1 = struct {
             return null;
         }
 
-        // Recover the public key
         var pubkey: c.secp256k1_pubkey = undefined;
         if (c.secp256k1_ecdsa_recover(
             self.ctx,
@@ -77,7 +70,7 @@ pub const Secp256k1 = struct {
             return null;
         }
 
-        // Serialize public key (uncompressed, 65 bytes: 0x04 + 64 bytes)
+        // Uncompressed form: 0x04 || x || y.
         var pubkey_serialized: [65]u8 = undefined;
         var output_len: usize = 65;
         if (c.secp256k1_ec_pubkey_serialize(
@@ -90,12 +83,10 @@ pub const Secp256k1 = struct {
             return null;
         }
 
-        // Hash the public key (skip first byte which is 0x04)
-        // Ethereum uses Keccak-256, not SHA-3
+        // Address = keccak256(x || y)[12..32].
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha3.Keccak256.hash(pubkey_serialized[1..], &hash, .{});
 
-        // Return last 20 bytes as Ethereum address
         var address: [20]u8 = undefined;
         @memcpy(&address, hash[12..32]);
         return address;
@@ -115,7 +106,7 @@ pub fn getContext() ?Secp256k1 {
 
 /// Recover raw uncompressed public key bytes from a recoverable signature.
 /// Returns 64 bytes (x||y, no 0x04 prefix), or null on failure.
-/// Use this for the accelerators interface — the caller hashes the pubkey to get the address.
+/// Used by the accelerators interface; the caller derives the address.
 pub fn ecrecoverPubkey(msg: [32]u8, sig: [64]u8, recid: u8) ?[64]u8 {
     const ctx = getContext() orelse return null;
 

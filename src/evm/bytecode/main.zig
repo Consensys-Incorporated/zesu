@@ -3,16 +3,13 @@ const primitives = @import("primitives");
 const alloc_mod = @import("zesu_allocator");
 const accel = @import("accelerators");
 
-/// EVM opcode definitions and utilities. It contains opcode information and utilities to work with opcodes.
-/// An EVM opcode
-/// This is always a valid opcode, as declared in the opcode module or the OPCODE_INFO constant.
+/// An EVM opcode. Always one with an OPCODE_INFO entry, unless built via `newUnchecked`.
 pub const OpCode = struct {
     value: u8,
 
     const Self = @This();
 
-    /// Instantiates a new opcode from a u8.
-    /// Returns null if the opcode is not valid.
+    /// Returns null if `opcode` is not a defined opcode.
     pub fn new(opcode: u8) ?Self {
         if (OPCODE_INFO[opcode]) |_| {
             return Self{ .value = opcode };
@@ -59,9 +56,8 @@ pub const OpCode = struct {
         return false;
     }
 
-    /// Instantiates a new opcode from a u8 without checking if it is valid.
-    /// Safety: All code using Opcode values assume that they are valid opcodes, so providing an invalid
-    /// opcode may cause undefined behavior.
+    /// Safety: `opcode` must be defined in OPCODE_INFO; `info()` and friends hit
+    /// `unreachable` otherwise.
     pub fn newUnchecked(opcode: u8) Self {
         return Self{ .value = opcode };
     }
@@ -102,12 +98,10 @@ pub const OpCode = struct {
         return null;
     }
 
-    /// Returns the opcode as a usize.
     pub fn asUsize(self: Self) usize {
         return self.value;
     }
 
-    /// Returns the opcode information.
     pub fn info(self: Self) OpCodeInfo {
         return OPCODE_INFO[self.value] orelse unreachable;
     }
@@ -118,7 +112,6 @@ pub const OpCode = struct {
         return .{ opcode_info.inputs, opcode_info.outputs };
     }
 
-    /// Returns the opcode as a u8.
     pub fn get(self: Self) u8 {
         return self.value;
     }
@@ -131,12 +124,10 @@ pub const OpCode = struct {
         };
     }
 
-    /// Returns true if the opcode is valid
     pub fn isValid(self: Self) bool {
         return OPCODE_INFO[self.value] != null;
     }
 
-    /// Format opcode for display
     pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         if (OPCODE_INFO[self.value]) |opcode_info| {
             try writer.writeAll(opcode_info.name);
@@ -514,7 +505,7 @@ pub const Bytecode = union(enum) {
 
     const Self = @This();
 
-    /// Creates a new legacy analyzed Bytecode with exactly one STOP opcode.
+    /// Empty legacy bytecode (length 0; executes as a single STOP).
     pub fn new() Self {
         return Self{ .legacy_analyzed = LegacyAnalyzedBytecode.default() };
     }
@@ -531,9 +522,8 @@ pub const Bytecode = union(enum) {
     pub fn hashSlow(self: Self) primitives.Hash {
         switch (self) {
             .eip7702 => |eip7702| {
-                // Hash the 23-byte delegation pointer directly from the switch-arm copy.
-                // Avoids the dangling-pointer that arises when routing through raw() which
-                // takes Self by value and returns &self.raw_bytes into its own stack frame.
+                // Hash the switch-arm copy directly: raw() via the by-value `self`
+                // would return a pointer into this stack frame's copy.
                 var hash: primitives.Hash = undefined;
                 accel.keccak256(&eip7702.raw_bytes, &hash);
                 return hash;
@@ -663,11 +653,8 @@ pub const LegacyAnalyzedBytecode = struct {
     }
 
     pub fn deinit(self: *LegacyAnalyzedBytecode) void {
-        // The bit vector is heap-allocated via c_allocator only when original_len > 0
-        // (non-empty bytecode) AND the allocation succeeded (data.len > 0).
-        // Cases that must NOT be freed:
-        //   - default() / empty input: original_len == 0, data is a static &[_]u8{0}
-        //   - alloc-failure fallback: jump_table.data.len == 0, data is static &[_]u8{}
+        // Only non-empty code owns heap buffers (from zesu_allocator); default() and
+        // empty input point at static data.
         if (self.original_len > 0 and self.jump_table.data.len > 0) {
             alloc_mod.get().free(@as([]align(bitmap_align.toByteUnits()) const u8, @alignCast(self.jump_table.data)));
         }
@@ -717,13 +704,10 @@ pub const Eip7702Bytecode = struct {
     }
 };
 
-/// Jump table for bytecode analysis
-/// A table of valid `jump` destinations.
-/// It is immutable, cheap to clone and memory efficient, with one bit per byte in the bytecode.
+/// Valid JUMP destinations: one bit per code byte, LSB-first within each byte.
 pub const JumpTable = struct {
-    /// Bit vector data (one bit per bytecode position)
     data: []const u8,
-    /// Number of bits in the table
+    /// Code length (number of meaningful bits).
     bit_len: usize,
 
     const Self = @This();
@@ -732,13 +716,10 @@ pub const JumpTable = struct {
         return Self{ .data = &[_]u8{}, .bit_len = 0 };
     }
 
-    /// Create new JumpTable from raw bytes and bit length
     pub fn fromBytes(data: []const u8, bit_len: usize) Self {
         return Self{ .data = data, .bit_len = bit_len };
     }
 
-    /// Checks if `pc` is a valid jump destination.
-    /// Uses bit operations for faster access
     pub fn isValid(self: Self, pc: usize) bool {
         if (pc >= self.bit_len) return false;
         const byte_idx = pc >> 3;
@@ -747,12 +728,10 @@ pub const JumpTable = struct {
         return (self.data[byte_idx] & (@as(u8, 1) << @intCast(bit_idx))) != 0;
     }
 
-    /// Gets the length of the jump map in bits
     pub fn len(self: Self) usize {
         return self.bit_len;
     }
 
-    /// Returns true if the jump map is empty
     pub fn isEmpty(self: Self) bool {
         return self.bit_len == 0;
     }
@@ -765,8 +744,8 @@ const legacy_step: [256]u8 = blk: {
     break :blk t;
 };
 
-/// Analyzes the bytecode for use in LegacyAnalyzedBytecode.
-/// The jump table bit vector is heap-allocated to avoid dangling stack pointers.
+/// Builds the JUMPDEST bitmap and the padded `exec` copy. Both are heap-allocated;
+/// `bytecode` itself is borrowed, not copied.
 fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
     if (bytecode.len == 0) {
         return LegacyAnalyzedBytecode{
@@ -777,8 +756,8 @@ fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
         };
     }
 
-    // Allocate bit vector on heap (one bit per bytecode position) to avoid dangling pointer.
-    // Whole, 8-byte aligned 64-bit words: the ZisK jump_dest precompile writes them in full.
+    // Bitmap size in bytes. With the jump_dest precompile it is whole, 8-byte aligned
+    // 64-bit words, since the precompile writes them in full.
     const bit_len = if (jump_dest_precompile) (bytecode.len + 63) / 64 * 8 else (bytecode.len + 7) / 8;
     const bit_vec = alloc_mod.get().alignedAlloc(u8, bitmap_align, bit_len) catch @panic("out of memory");
 
@@ -798,14 +777,10 @@ fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
     }
     @memset(bit_vec, 0);
 
-    // Analyze bytecode to find JUMPDEST positions.
-    //
-    // Byte-serial by necessity: a PUSH carries immediates, so the next opcode's
-    // position depends on this one. Anecdotally a SWAR fast path that skipped
-    // whole words cost 9.4% on a real block because PUSH is roughly a quarter
-    // of contract bytes, so an eight-byte window is clean only ~10% of the time
-    // and the probe is pure overhead on the rest. The step table replaces the
-    // PUSH range test with one load, and the pointer walk drops the index add.
+    // Byte-serial by necessity: a PUSH's immediates decide where the next opcode
+    // starts. A SWAR word-skipping fast path was slower on real blocks (PUSH bytes
+    // are too common for clean 8-byte windows). The step table replaces the PUSH
+    // range test with one load.
     const base = bytecode.ptr;
     const end = @intFromPtr(base) + bytecode.len;
     var p = base;
@@ -846,14 +821,12 @@ inline fn zkvmJumpDest(bitmap: [*]align(8) u8, code: [*]align(8) const u8, count
         : .{ .memory = true });
 }
 
-/// Error type for bytecode decoding
 pub const BytecodeDecodeError = error{
     InvalidFormat,
     InvalidMagicBytes,
     InvalidLength,
 };
 
-/// Test module for bytecode
 pub const testing = struct {
     pub fn testOpcode() !void {
         const opcode = OpCode.new(STOP) orelse return error.TestFailed;

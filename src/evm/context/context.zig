@@ -125,11 +125,9 @@ pub const ContextError = enum {
 
 /// EVM context parameterised over the database type.
 ///
-/// Use `DefaultContext` for the standard in-memory database. Pass any type that
-/// implements `basic`, `codeByHash`, `storage`, and `blockHash` to get a
-/// fully-typed context with zero overhead. Tracking methods (`snapshotFrame`,
-/// `commitTracking`, etc.) are detected at compile time via `@hasDecl` in the
-/// Journal wrappers and become no-ops for database types that do not implement them.
+/// DB must implement `basic`, `codeByHash`, `storage` and `blockHash`. Optional
+/// hooks (`notifyCodeDeployed`, `hasNonZeroStorageForAddress`) are detected with
+/// `@hasDecl` in the Journal wrappers and skipped when absent.
 pub fn Context(comptime DB: type) type {
     return struct {
         /// Exposes the DB type so callers can extract it via @TypeOf(ctx.*).DatabaseType.
@@ -142,7 +140,7 @@ pub fn Context(comptime DB: type) type {
         cfg: CfgEnv,
         /// EVM State with journaling support and database.
         journaled_state: Journal(DB),
-        /// Inner context.
+        /// Unused chain-specific slot.
         chain: void,
         /// Local context that is filled by execution.
         local: LocalContext,
@@ -212,7 +210,7 @@ pub fn Context(comptime DB: type) type {
             };
         }
 
-        /// Creates a new context with a new block type.
+        /// Returns a copy with `block` replaced.
         pub fn withBlock(self: @This(), block: BlockEnv) @This() {
             return .{
                 .tx = self.tx,
@@ -225,7 +223,7 @@ pub fn Context(comptime DB: type) type {
             };
         }
 
-        /// Creates a new context with a new transaction type.
+        /// Returns a copy with `tx` replaced.
         pub fn withTx(self: @This(), tx: TxEnv) @This() {
             return .{
                 .tx = tx,
@@ -238,7 +236,7 @@ pub fn Context(comptime DB: type) type {
             };
         }
 
-        /// Creates a new context with a new chain type.
+        /// Returns a copy with `chain` replaced.
         pub fn withChain(self: @This(), chain: anytype) @This() {
             return .{
                 .tx = self.tx,
@@ -265,7 +263,7 @@ pub fn Context(comptime DB: type) type {
             return result;
         }
 
-        /// Creates a new context with a new local context type.
+        /// Returns a copy with `local` replaced.
         pub fn withLocal(self: @This(), local: LocalContext) @This() {
             return .{
                 .tx = self.tx,
@@ -633,6 +631,6 @@ pub fn Context(comptime DB: type) type {
     };
 }
 
-/// Default context backed by `InMemoryDB`. Used throughout zevm internals.
-/// External consumers that need tracking (e.g. zevm-stateless) use `Context(TheirDB)`.
+/// Context over `InMemoryDB`, used by tests and the `Evm` alias. The stateless
+/// executor uses `Context(WitnessDatabase)`.
 pub const DefaultContext = Context(database.InMemoryDB);

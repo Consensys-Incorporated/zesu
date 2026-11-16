@@ -39,7 +39,6 @@ fn callImpl(
         return;
     }
 
-    // Pop stack items
     const gas_val = stack.peekUnsafe(0);
     const addr_val = stack.peekUnsafe(1);
     const value: primitives.U256 = if (has_value) stack.peekUnsafe(2) else 0;
@@ -118,8 +117,7 @@ fn callImpl(
         return;
     }
 
-    // Load target account info (warm/cold, emptiness) and code (for EIP-7702) in one shot.
-    // This replaces the former separate accountInfo + codeInfo calls (two journal lookups).
+    // Load target account info (warm/cold, emptiness) and code (for EIP-7702) in one lookup.
     const callee_info = h.accountInfoWithCode(target_addr);
     const is_cold = if (callee_info) |info| info.is_cold else pre_is_cold;
     // G_NEWACCOUNT applies to the ETH *recipient*, not the code source.
@@ -264,7 +262,7 @@ fn callImpl(
     };
     const call_is_static = is_static or (scheme == .staticcall);
 
-    // Gather call data from memory
+    // Borrows this frame's memory; valid while the frame is suspended on the sub-call.
     const call_data: []const u8 = if (args_size_u > 0)
         ctx.interpreter.memory.buffer.items[args_off_u .. args_off_u + args_size_u]
     else
@@ -317,8 +315,6 @@ fn callImpl(
     }
 }
 
-/// Resume a suspended CALL frame after the sub-frame has completed.
-/// Called by the frame runner (or synchronous helper) with the final CallResult.
 /// EIP-8037 credit_state_gas_refund for a NEW_ACCOUNT pre-charge that was not consumed
 /// (failed value-CALL / CREATE): refund in LIFO order — to regular gas first if the charge
 /// spilled out of the reservoir, else the reservoir — and unwind it from the frame's totals.
@@ -330,6 +326,8 @@ pub fn refundNewAccountLifo(interp: *Interpreter, amount: u64) void {
     interp.gas.state_gas_spent -|= amount;
 }
 
+/// Resume a suspended CALL frame after the sub-frame has completed.
+/// Called by the frame runner (or synchronous helper) with the final CallResult.
 pub fn resumeCall(interp: *Interpreter, result: host_module.CallResult, ret_off: usize, ret_size: usize, new_account_state_gas: u64) void {
     interp.gas.remaining +|= result.gas_remaining;
     interp.gas.refunded += result.gas_refunded;

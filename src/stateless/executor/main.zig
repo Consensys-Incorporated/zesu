@@ -1,14 +1,7 @@
-//! BlockExecutor: stateless EVM block execution using zevm.
-//!
-//! Caller is responsible for:
-//!   - Building the NodeIndex from witness nodes (mpt.buildNodeIndex)
-//!   - Decoding block_hashes from witness headers
-//!
-//! This module handles:
-//!   1. Fork detection and Env construction.
-//!   2. Transaction decoding and execution via transition().
-//!   3. Post-state root and receipts root computation.
-//!   4. Returning a ProofOutput for the guest to commit.
+//! Block executor entry points. `executeStatelessInput` runs a full StatelessInput
+//! (header/witness checks, then execution) and returns the ProofOutput the guest commits;
+//! `executeBlockStateless` takes an already-built NodeIndex and block-hash table;
+//! `executeBlockFromAlloc` executes over an in-memory pre-state (t8n, test runners).
 
 const std = @import("std");
 const primitives = @import("primitives");
@@ -51,8 +44,7 @@ test {
     // every declaration through semantic analysis, so a signature change that
     // misses a call site fails `zig build test`.
     std.testing.refAllDecls(@This());
-    // transition_tests.zig is a leaf test file nothing else imports, so it must be
-    // referenced explicitly to be pulled into the test graph.
+    // The *_tests.zig files are leaves nothing else imports, so reference them here.
     _ = @import("./transition_tests.zig");
     _ = @import("./block_validation_tests.zig");
     _ = @import("./main_tests.zig");
@@ -212,12 +204,9 @@ pub fn executeBlockStateless(
         try db_mod.WitnessDatabase.init(alloc, node_index, pre_state_root, witness_codes, block_hashes),
         spec,
     );
-    // Both the journal (evm_state, BAL maps, logs, etc.) and the WitnessDatabase
-    // (witness_codes, deployed_codes, original_accounts) must be freed explicitly.
-    // Both defers are declared before the defers below so they run last — after
-    // finalizeOutput and validatePostExecution have consumed all journal- and
-    // database-owned memory. Database is declared first so it runs after the journal
-    // (LIFO): evm_state code references into the database are freed before the database itself.
+    // The journal and the WitnessDatabase must be freed explicitly, after finalizeOutput
+    // has consumed them. The database defer is declared first so it runs last: the
+    // journal's evm_state holds code references into the database.
     defer ctx.journaled_state.database.deinit();
     defer ctx.journaled_state.deinit();
     // The reference decodes, and so checks, the whole witness state trie for every block.
@@ -242,9 +231,8 @@ pub fn executeBlockStateless(
     // withdrawals, post-block system calls) -- transitionWithContext only bails
     // out early on ctx_error while looping over transactions.
     if (ctx.ctx_error != .ok) return error.InvalidWitness;
-    // Compute the commitments first so validatePostExecution can validate them
-    // against the payload alongside its gas/blob/BAL checks — giving every caller
-    // one authoritative verdict instead of re-comparing the roots itself.
+    // Compute the commitments first so validatePostExecution checks them against the
+    // payload alongside its gas/blob/BAL checks, giving callers one verdict.
     const proof = try finalizeOutput(alloc, pre_state_root, result, node_index, spec, ctx.getDb());
     try block_validation.validatePostExecution(env, spec, result.cumulative_gas, result.blob_gas_used, if (result.bal_hash) |h| .{ .computed = h, .expected = block_access_list_hash } else null, .{
         .computed_state_root = proof.post_state_root,
@@ -273,10 +261,9 @@ fn resolveSpec(ep: *const input.ExecutionPayload, fork_name: ?[]const u8) primit
     return fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
 }
 
-/// High-level stateless execution from a fully-decoded StatelessInput.
-/// Derives pre_state_root, builds the node index and block-hash table
-/// internally — callers only need to supply the input and an optional
-/// fork override.
+/// Stateless execution of a decoded StatelessInput: checks the block hash and versioned
+/// hashes, decodes the transactions, validates the witness headers (which supply the
+/// pre-state root and block-hash table), builds the node index, then executes.
 pub fn executeStatelessInput(
     alloc: std.mem.Allocator,
     si_in: input.StatelessInput,

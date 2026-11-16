@@ -431,7 +431,7 @@ test "SELFBALANCE: no host halts with invalid_opcode" {
 // ---------------------------------------------------------------------------
 
 test "EXTCODESIZE: EOA with empty code returns 0" {
-    // Bytecode.new() has original_len=1 (STOP padding); use newLegacy("") for truly empty code.
+    // Bytecode.new()'s bytes() is a lone STOP pad; newLegacy("") is genuinely empty code.
     var db = database_mod.InMemoryDB.init(ALLOC);
     try db.insertAccount(OTHER, state_mod.AccountInfo.new(0, 0, primitives.KECCAK_EMPTY, bytecode_mod.Bytecode.newLegacy(&[_]u8{})));
     var ctx = makeCtx(db);

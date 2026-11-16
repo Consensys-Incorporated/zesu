@@ -1,25 +1,17 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// zesu_allocator — the allocator used for zesu's internal allocations.
-///
-/// Runtime-injectable singleton. The 268 internal `get()` call sites across the EVM
-/// and stateless modules all read this one global, so a consumer installs its
-/// allocator once at startup with `set()` and every downstream allocation observes it.
-///
-/// If never set:
-///   - native targets default to std.heap.c_allocator (zesu's own apps/tools/tests),
-///   - freestanding targets panic — a zkVM guest MUST install an allocator before use.
-///
-/// Injection happens at runtime, not build time, so the single exposed `zesu_allocator`
-/// module works for every target without rewiring the build graph. Examples:
+/// zesu_allocator for the exposed module graph: a runtime-settable singleton read by
+/// every internal `get()` call in the EVM and stateless modules. A consumer installs its
+/// allocator once at startup with `set()`, e.g.
 ///   zesu_allocator.set(fixed_buffer.allocator());   // zkVM guest heap region
-///   zesu_allocator.set(arena.allocator());          // native tests
 ///
-/// Lifetime: the backing allocator state (FixedBufferAllocator/arena/…) must outlive every
-///   `get()` call — in practice for the whole program/guest lifetime.
-/// Concurrency: not thread-safe. Call `set()` once at startup before spawning any threads.
-///   zkVM guests are single-threaded, so this is a non-issue there.
+/// If never set, native targets fall back to std.heap.c_allocator and freestanding
+/// targets panic, so a module-consuming zkVM guest MUST call `set()` first. (The turnkey
+/// rv64im object roots zesu_allocator on src/zkvm/alt_fl_alloc.zig instead.)
+///
+/// Lifetime: the backing allocator must outlive every `get()` call.
+/// Concurrency: not thread-safe; call `set()` before spawning threads.
 var current: ?std.mem.Allocator = null;
 
 /// Install the allocator returned by subsequent `get()` calls.

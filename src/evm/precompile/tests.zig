@@ -173,7 +173,6 @@ test "ECRECOVER precompile - valid format but invalid signature" {
     try testing.expect(result == .success);
     const output = result.success;
     try testing.expect(output.gas_used == 3000);
-    // May return empty if secp256k1 library not available or signature invalid
 }
 
 test "ECRECOVER precompile - out of gas" {
@@ -196,25 +195,19 @@ test "ECRECOVER precompile - short input" {
     try testing.expect(result == .success);
     const output = result.success;
     try testing.expect(output.gas_used == 3000);
-    // Should handle short input gracefully (right-padded)
 }
 
 test "ECRECOVER precompile - known test vector" {
     const impls = @import("default_impls.zig");
-    // Test with a known signature recovery case
-    // This is a simplified test - in production you'd use a real signature
+    // Arbitrary (unrecoverable) signature: checks gas and that it doesn't fail.
     var input: [128]u8 = undefined;
     @memset(&input, 0);
 
-    // Set a valid message hash (32 bytes)
     input[0] = 0x01;
     input[31] = 0xFF;
 
-    // Set valid v value (27)
     input[63] = 27;
 
-    // Set signature (64 bytes) - this is a placeholder, not a real signature
-    // In a real test, you'd use an actual signature that can be recovered
     input[64] = 0x01;
     input[127] = 0xFF;
 
@@ -223,8 +216,6 @@ test "ECRECOVER precompile - known test vector" {
     try testing.expect(result == .success);
     const output = result.success;
     try testing.expect(output.gas_used == 3000);
-    // Result may be empty if signature is invalid (which this placeholder is)
-    // But the precompile should handle it gracefully
 }
 
 test "ModExp precompile - empty input" {
@@ -498,15 +489,12 @@ test "KZG Point Evaluation - input validation" {
     var input: [192]u8 = undefined;
     @memset(&input, 0);
 
-    // Set versioned hash (first 32 bytes)
-    input[0] = 0x01; // Version
-    // Rest will be SHA-256 hash of commitment
+    input[0] = 0x01; // version byte; the rest doesn't match SHA-256(commitment)
 
     const impls = @import("default_impls.zig");
     const result = impls.kzg_point_evaluation(&input, 100000);
 
-    // Will fail on version mismatch or proof verification, but should handle input correctly
-    // For now, just check it doesn't crash on invalid input
+    // Only checks it doesn't crash (expected: BlobMismatchedVersion).
     _ = result;
 }
 
@@ -685,7 +673,7 @@ test "P256Verify - wrong input length" {
     const result = impls.p256verify(input, 10000);
 
     try testing.expect(result == .success);
-    // Should handle gracefully, verifyImpl returns false for wrong length
+    // Wrong length is an invalid signature: success with empty output.
     const output = result.success;
     try testing.expect(output.bytes.len == 0);
 }
@@ -838,8 +826,7 @@ test "BLS12-381 G1 MSM - invalid input length" {
     const impls = @import("default_impls.zig");
     const result = impls.bls12_g1_msm(&input, 100000);
 
-    // Should still succeed (will calculate k based on available input)
-    // But may have issues with parsing
+    // Not a multiple of 160 → Bls12381G1MsmInputLength (result not asserted).
     _ = result;
 }
 
@@ -1063,14 +1050,14 @@ test "BLS12-381 G1 MSM - invalid input length (too short)" {
 }
 
 test "BLS12-381 G1 MSM - invalid input length (not multiple)" {
-    // 192 bytes is valid, but 193 bytes is not a multiple
+    // Not a multiple of 160 bytes.
     var input: [193]u8 = undefined;
     @memset(&input, 0);
 
     const impls = @import("default_impls.zig");
     const result = impls.bls12_g1_msm(&input, 100000);
 
-    // Should still succeed but use truncated input
+    // Expected Bls12381G1MsmInputLength (result not asserted).
     _ = result;
 }
 
@@ -1164,8 +1151,7 @@ test "BLS12-381 Pairing - single pair (identity check)" {
     // Gas = 1 * 32600 + 37700 = 70300
     try testing.expect(output.gas_used == 70300);
     try testing.expect(output.bytes.len == 32);
-    // Result should be 1 if pairing is identity (all zeros)
-    // or 0 if not (implementation dependent)
+    // e(O, O) = 1, so the output should be 1 (not asserted).
 }
 
 test "BLS12-381 Pairing - multiple pairs" {
@@ -1315,13 +1301,12 @@ test "BN254 Add - generator point addition" {
 
 test "BN254 Add - invalid point (not on curve)" {
     var input: [128]u8 = undefined;
-    @memset(&input, 0xFF); // All 0xFF is likely not a valid point
+    @memset(&input, 0xFF); // coordinates exceed the field prime
 
     const impls = @import("default_impls.zig");
     const result = impls.bn254_add_istanbul(&input, 1000);
 
-    // Should return error for invalid point
-    // Note: Current implementation may return success with zero output
+    // Expected Bn254FieldPointNotAMember (result not asserted).
     _ = result;
 }
 
@@ -1458,9 +1443,7 @@ test "BN254 Add - real test vector: generator + generator" {
     const output = result.success;
     try testing.expect(output.gas_used == 150);
     try testing.expect(output.bytes.len == 64);
-    // Result should be 2*G (generator doubled)
-    // Output should not be all zeros (unless point at infinity)
-    // Verify result is deterministic (same input produces same output)
+    // G + G = 2G, which is not the point at infinity (not asserted).
     var all_zero = true;
     for (output.bytes) |b| {
         if (b != 0) {
@@ -1468,9 +1451,7 @@ test "BN254 Add - real test vector: generator + generator" {
             break;
         }
     }
-    // Result may be point at infinity (all zeros) or a valid point
-    // Either way, it should be deterministic
-    try testing.expect(all_zero or !all_zero); // Always true, but ensures all_zero is used
+    try testing.expect(all_zero or !all_zero); // always true; keeps all_zero used
 }
 
 test "BN254 Add - commutativity: P1 + P2 == P2 + P1" {
@@ -1554,8 +1535,7 @@ test "BN254 Mul - scalar zero: P * 0 == identity" {
 
     try testing.expect(result == .success);
     const output = result.success;
-    // Result should be identity (point at infinity)
-    // Identity is typically (0, 0) or encoded as all zeros
+    // 0·G is the point at infinity, encoded as all zeros.
     var all_zero = true;
     for (output.bytes) |b| {
         if (b != 0) {
@@ -1604,23 +1584,16 @@ test "BN254 Mul - large scalar multiplication" {
     const output = result.success;
     try testing.expect(output.gas_used == 6000);
     try testing.expect(output.bytes.len == 64);
-    // Result should be valid point (not all zeros unless scalar wraps to 0)
 }
 
 test "BN254 Pairing - real test vector: e(G1, G2) == 1" {
-    // Pairing of generator points should equal 1 (identity in GT)
+    // G2 is left as the point at infinity, so this checks e(G1, O) == 1.
     var input: [192]u8 = undefined;
     @memset(&input, 0);
 
     // G1: generator (1, 2) - 64 bytes
     input[31] = 0x01;
     input[63] = 0x02;
-
-    // G2: generator - 128 bytes
-    // G2 generator coordinates are more complex, use a known valid point
-    // For now, test with identity pairing which should be 1
-    // Identity pairing: e(0, 0) = 1
-    // (Already zeros from memset)
 
     const impls = @import("default_impls.zig");
     const result = impls.bn254_pairing_istanbul(&input, 100000);
@@ -1630,36 +1603,26 @@ test "BN254 Pairing - real test vector: e(G1, G2) == 1" {
     const expected_gas = 34000 + 45000;
     try testing.expect(output.gas_used == expected_gas);
     try testing.expect(output.bytes.len == 32);
-    // Identity pairing should return 1
     try testing.expect(output.bytes[31] == 1);
 }
 
 test "BN254 Pairing - bilinearity: e(a*G1, b*G2) == e(G1, G2)^(a*b)" {
-    // This test verifies bilinearity property
-    // For simplicity, test with identity points
+    // Only exercises e(O, O) == 1; bilinearity itself is not tested.
     var input: [192]u8 = undefined;
     @memset(&input, 0);
-
-    // Both points are identity
-    // e(0, 0) = 1
 
     const impls = @import("default_impls.zig");
     const result = impls.bn254_pairing_istanbul(&input, 100000);
 
     try testing.expect(result == .success);
     const output = result.success;
-    // Identity pairing should be 1
     try testing.expect(output.bytes[31] == 1);
 }
 
 test "BN254 Pairing - multiple pairs: product of pairings" {
-    // Test with 2 pairs
+    // Two all-infinity pairs: product is 1.
     var input: [384]u8 = undefined;
     @memset(&input, 0);
-
-    // First pair: both identity
-    // Second pair: both identity
-    // Product: 1 * 1 = 1
 
     const impls = @import("default_impls.zig");
     const result = impls.bn254_pairing_istanbul(&input, 200000);
@@ -1669,45 +1632,36 @@ test "BN254 Pairing - multiple pairs: product of pairings" {
     const expected_gas = 2 * 34000 + 45000;
     try testing.expect(output.gas_used == expected_gas);
     try testing.expect(output.bytes.len == 32);
-    // Product of identity pairings should be 1
     try testing.expect(output.bytes[31] == 1);
 }
 
 test "BN254 Pairing - invalid G1 point" {
-    // Test with invalid G1 point (not on curve)
     var input: [192]u8 = undefined;
-    @memset(&input, 0xFF); // All 0xFF is likely invalid
+    @memset(&input, 0xFF); // G1 coordinates exceed the field prime
 
-    // Set G2 to identity
     @memset(input[64..192], 0);
 
     const impls = @import("default_impls.zig");
     const result = impls.bn254_pairing_istanbul(&input, 100000);
 
-    // Should return error for invalid point
-    // Note: Current implementation may return success with result 0
-    // Test that it doesn't crash
+    // Expected Bn254FieldPointNotAMember; only checks it doesn't crash.
     _ = result;
-    try testing.expect(true); // Test passes if no crash
+    try testing.expect(true);
 }
 
 test "BN254 Pairing - invalid G2 point" {
-    // Test with invalid G2 point (not on curve)
     var input: [192]u8 = undefined;
     @memset(&input, 0);
 
-    // G1 is identity
-    // G2 is invalid (all 0xFF)
+    // G1 = O, G2 = all 0xFF (invalid)
     @memset(input[64..192], 0xFF);
 
     const impls = @import("default_impls.zig");
     const result = impls.bn254_pairing_istanbul(&input, 100000);
 
-    // Should return error for invalid point
-    // Note: Current implementation may return success with result 0
-    // Test that it doesn't crash
+    // Only checks it doesn't crash; the result is not asserted.
     _ = result;
-    try testing.expect(true); // Test passes if no crash
+    try testing.expect(true);
 }
 
 test "BN254 Add - Byzantium vs Istanbul gas costs" {
@@ -1841,12 +1795,10 @@ test "KZG Point Evaluation - invalid input length (too long)" {
 }
 
 test "KZG Point Evaluation - return value format" {
-    // Test that successful evaluation returns correct format
-    // Note: This will fail without valid proof, but we can check the return value structure
+    // Valid versioned hash, invalid (zero) proof → verification fails.
     var input: [192]u8 = undefined;
     @memset(&input, 0);
 
-    // Set up valid versioned hash
     var commitment: [48]u8 = undefined;
     @memset(&commitment, 0x01);
     var versioned_hash: [32]u8 = undefined;
@@ -1855,14 +1807,10 @@ test "KZG Point Evaluation - return value format" {
     @memcpy(input[0..32], &versioned_hash);
     @memcpy(input[96..144], &commitment);
 
-    // With invalid proof, should fail verification
     const impls = @import("default_impls.zig");
     const result = impls.kzg_point_evaluation(&input, 100000);
 
-    // Should fail on proof verification
     try testing.expect(result == .err);
-    // But if it succeeded, return value should be RETURN_VALUE constant
-    // (This test documents expected behavior)
 }
 
 test "KZG Point Evaluation - gas cost verification" {
@@ -1872,12 +1820,10 @@ test "KZG Point Evaluation - gas cost verification" {
     const impls = @import("default_impls.zig");
     const result = impls.kzg_point_evaluation(&input, 100000);
 
-    // Even if it fails, should check gas first
+    // Enough gas, so it fails on the version/proof check.
     if (result == .err and result.err == main.PrecompileError.OutOfGas) {
-        // This would happen if gas_limit < GAS_COST
         try testing.expect(true);
     } else {
-        // Otherwise should fail on version or proof
         try testing.expect(result == .err);
     }
 }
