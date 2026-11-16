@@ -13,7 +13,7 @@ const primitives = @import("primitives");
 // Secure-trie keys are keccak256 of a raw 20-byte address / 32-byte slot, and the
 // same address/slot is hashed repeatedly across a block (pre-state proof read and
 // state-root rebuild; slot numbers recur across contracts). Memoized here, at the
-// single chokepoint, for 20/32-byte inputs only (node hashes are larger and unique).
+// single chokepoint, for 20/32/64-byte inputs only (node hashes are larger and unique).
 //
 // Static direct-mapped cache: no allocator, and under a sparse zkVM memory cost
 // model only touched buckets count, so generous capacity is free. A collision
@@ -24,6 +24,13 @@ const KMEMO_LEN = 1 << 14; // 16384 buckets
 var kmemo_len = [_]u8{0} ** KMEMO_LEN;
 var kmemo_key: [KMEMO_LEN][32]u8 = undefined;
 var kmemo_val: [KMEMO_LEN][32]u8 = undefined;
+
+// Same scheme for 64-byte inputs: Solidity mapping slots keccak256(key ++ slot),
+// which contracts recompute on every access to the same entry.
+const KMEMO64_LEN = 1 << 13;
+var kmemo64_used = [_]bool{false} ** KMEMO64_LEN;
+var kmemo64_key: [KMEMO64_LEN][64]u8 = undefined;
+var kmemo64_val: [KMEMO64_LEN][32]u8 = undefined;
 
 // ── Type aliases ──────────────────────────────────────────────────────────────
 
@@ -78,6 +85,14 @@ inline fn kmemoIndex(data: []const u8) usize {
     return @intCast(primitives.mix64(head ^ std.math.rotl(u64, tail, 27)) & (KMEMO_LEN - 1));
 }
 
+/// Bucket index for 64-byte memo keys: the low half of each 32-byte word, where a
+/// mapping key (address or integer) and a slot number carry their entropy.
+inline fn kmemo64Index(data: *const [64]u8) usize {
+    const a = std.mem.readInt(u64, data[16..24], .little) ^ std.mem.readInt(u64, data[24..32], .little);
+    const b = std.mem.readInt(u64, data[48..56], .little) ^ std.mem.readInt(u64, data[56..64], .little);
+    return @intCast(primitives.mix64(a ^ std.math.rotl(u64, b, 27)) & (KMEMO64_LEN - 1));
+}
+
 pub inline fn keccak256(data: []const u8, output: *Hash32) void {
     if (data.len == 0) {
         output.* = primitives.KECCAK_EMPTY;
@@ -93,6 +108,19 @@ pub inline fn keccak256(data: []const u8, output: *Hash32) void {
         kmemo_len[idx] = @intCast(data.len);
         @memcpy(kmemo_key[idx][0..data.len], data);
         kmemo_val[idx] = output.*;
+        return;
+    }
+    if (data.len == 64) {
+        const key = data[0..64];
+        const idx = kmemo64Index(key);
+        if (kmemo64_used[idx] and std.mem.eql(u8, &kmemo64_key[idx], key)) {
+            output.* = kmemo64_val[idx];
+            return;
+        }
+        impl.keccak256(data, output);
+        kmemo64_used[idx] = true;
+        kmemo64_key[idx] = key.*;
+        kmemo64_val[idx] = output.*;
         return;
     }
     impl.keccak256(data, output);
