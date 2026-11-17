@@ -49,7 +49,8 @@ pub fn decodeItem(input: []const u8) error{InvalidRlp}!DecodeResult {
         const len_len: usize = first - 0xb7;
         if (1 + len_len > input.len) return error.InvalidRlp;
         const len = readBigEndian(input[1 .. 1 + len_len]) catch return error.InvalidRlp;
-        if (1 + len_len + len > input.len) return error.InvalidRlp;
+        // Against the bytes left, so a huge claimed length cannot overflow the sum.
+        if (len > input.len - 1 - len_len) return error.InvalidRlp;
         return .{
             .item = .{ .bytes = input[1 + len_len .. 1 + len_len + len] },
             .consumed = 1 + len_len + len,
@@ -64,12 +65,18 @@ pub fn decodeItem(input: []const u8) error{InvalidRlp}!DecodeResult {
         const len_len: usize = first - 0xf7;
         if (1 + len_len > input.len) return error.InvalidRlp;
         const payload_len = readBigEndian(input[1 .. 1 + len_len]) catch return error.InvalidRlp;
-        if (1 + len_len + payload_len > input.len) return error.InvalidRlp;
+        // Against the bytes left, so a huge claimed length cannot overflow the sum.
+        if (payload_len > input.len - 1 - len_len) return error.InvalidRlp;
         return .{
             .item = .{ .list = input[1 + len_len .. 1 + len_len + payload_len] },
             .consumed = 1 + len_len + payload_len,
         };
     }
+}
+
+test "decodeItem: a claimed length past the input is rejected, not overflowed" {
+    try std.testing.expectError(error.InvalidRlp, decodeItem(&([_]u8{0xff} ** 40)));
+    try std.testing.expectError(error.InvalidRlp, decodeItem(&([_]u8{0xbf} ** 40)));
 }
 
 // First-byte boundaries of the RLP encodings, and the longest payload the short form holds.
