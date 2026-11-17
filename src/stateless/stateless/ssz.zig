@@ -49,6 +49,7 @@ pub const SCHEMA_REVISION: u8 = 0x01;
 // SSZ limits of the Amsterdam StatelessInput schema (stateless.py, execution_engine/types.py).
 const MAX_EXTRA_DATA_BYTES: usize = 32;
 const MAX_WITNESS_HEADERS: usize = 256;
+const MAX_BLOB_COMMITMENTS_PER_BLOCK: usize = 4096;
 const MAX_BYTES_PER_CODE: usize = 1 << 16;
 const MAX_BYTES_PER_HEADER: usize = 1 << 10;
 const MAX_BYTES_PER_WITNESS_NODE: usize = 1 << 10;
@@ -189,10 +190,11 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
 
     const ep_data = npr_data[off_ep..off_vh];
 
-    // versioned_hashes: ProgressiveList[Bytes32] — packed 32-byte elements (no offset table)
+    // versioned_hashes: List[Bytes32, MAX_BLOB_COMMITMENTS_PER_BLOCK] — packed 32-byte elements
     const vh_bytes = npr_data[off_vh..off_er];
     if (vh_bytes.len % 32 != 0) return error.InvalidSsz;
     const vh_count = vh_bytes.len / 32;
+    if (vh_count > MAX_BLOB_COMMITMENTS_PER_BLOCK) return error.InvalidSsz;
     const versioned_hashes = try alloc.alloc([32]u8, vh_count);
     for (0..vh_count) |i| @memcpy(&versioned_hashes[i], vh_bytes[i * 32 ..][0..32]);
 
