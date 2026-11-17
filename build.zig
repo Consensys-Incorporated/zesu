@@ -432,7 +432,7 @@ fn addRunStep(
 /// tests-zkevm-benchmark ships one tarball per gas value, so fetch and run one tier at a time:
 ///   zig build zkevm-benchmark -Dbench-gas=60M
 fn addZkevmBenchmarkSteps(b: *std.Build, runner: *std.Build.Step.Compile) void {
-    const version = "tests-zkevm-benchmark@v21.0.5";
+    const version = "tests-zkevm-benchmark@v21.0.7";
     const gas = b.option([]const u8, "bench-gas", "zkevm benchmark gas tier: 30M, 60M, 100M, 150M or 200M (default 30M)") orelse "30M";
     const fetch = b.step("fetch-zkevm-benchmark-fixtures", "Download one " ++ version ++ " gas tier (-Dbench-gas)");
     const run = b.step("zkevm-benchmark", "Run one " ++ version ++ " gas tier (-Dbench-gas)");
@@ -458,7 +458,7 @@ fn addZkevmBenchmarkSteps(b: *std.Build, runner: *std.Build.Step.Compile) void {
             "touch \"$marker\"", .{
             .dir = dir,
             .version = version,
-            .encoded = "tests-zkevm-benchmark%40v21.0.5",
+            .encoded = "tests-zkevm-benchmark%40v21.0.7",
             .tier = tier,
         }),
     });
@@ -782,7 +782,7 @@ pub fn build(b: *std.Build) void {
     addRv64imObjectStep(b, optimize, &.{ .m, .zicclsm, .unaligned_scalar_mem, .zbb, .zbs }, "zisk-object", "Build relocatable rv64im+Zbb+Zbs ELF object for the ZisK guest (zesu-zisk.o)", "lib/zesu-zisk.o", .{ .dma = true });
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
-    const spec_test_version = "tests@v21.0.1";
+    const spec_test_version = "tests@v21.0.2";
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-specs " ++ spec_test_version ++ " fixtures");
     fetch_fixtures_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
@@ -797,7 +797,7 @@ pub fn build(b: *std.Build) void {
             "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
     }).step);
 
-    const zkevm_version = "tests-zkevm@v21.0.6";
+    const zkevm_version = "tests-zkevm@v21.0.7";
     const fetch_zkevm_step = b.step("fetch-zkevm-fixtures", "Download " ++ zkevm_version ++ " execution-specs fixtures");
     fetch_zkevm_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
