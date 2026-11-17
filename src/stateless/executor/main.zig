@@ -209,8 +209,6 @@ pub fn executeBlockStateless(
     // journal's evm_state holds code references into the database.
     defer ctx.journaled_state.database.deinit();
     defer ctx.journaled_state.deinit();
-    // The reference decodes, and so checks, the whole witness state trie for every block.
-    try ctx.journaled_state.database.checkTriePaths(pre_state_root);
     ctx.block = transition_mod.buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
     ctx.cfg.disable_base_fee = (env.base_fee == null);

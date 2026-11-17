@@ -679,17 +679,24 @@ fn buildPathTestTrie(alloc: std.mem.Allocator, index: *NodeIndex, len_1: usize, 
     return keccak256(root);
 }
 
-test "validateSecuredTriePaths: leaves ending at the key length pass" {
+/// The key whose path runs through child `nib` of the root and then all zero nibbles.
+fn pathTestKey(nib: u8) [32]u8 {
+    var key: [32]u8 = @splat(0);
+    key[0] = nib << 4;
+    return key;
+}
+
+test "verifyProofIndexed: leaves ending at the key length pass" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var index = NodeIndex.init(arena.allocator());
     const root = try buildPathTestTrie(arena.allocator(), &index, 63, 63);
-    try mpt.validateSecuredTriePaths(root, &index, &try mpt.PathCheck.init(arena.allocator(), &index));
+    try std.testing.expectEqualStrings("value", (try mpt.verifyProofIndexed(root, pathTestKey(1), &index)).?);
+    try std.testing.expectEqualStrings("value", (try mpt.verifyProofIndexed(root, pathTestKey(2), &index)).?);
 }
 
-// The reference checks only that a branch has key nibbles left, not its value slot: a
-// 64-nibble lookup always descends into a child, so the value is never read.
-test "validateSecuredTriePaths: a branch value is not checked" {
+// No secured key ends at a branch, so a branch value is malformed.
+test "verifyProofIndexed: a branch value is rejected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -703,20 +710,51 @@ test "validateSecuredTriePaths: a branch value is not checked" {
     }
     const root = try updEncodeBranch(alloc, &enc, "branch-value");
     try index.put(keccak256(root), root);
-    try mpt.validateSecuredTriePaths(keccak256(root), &index, &try mpt.PathCheck.init(arena.allocator(), &index));
+    try std.testing.expectError(error.InvalidProof, mpt.verifyProofIndexed(keccak256(root), pathTestKey(1), &index));
 }
 
-test "validateSecuredTriePaths: a leaf past or short of the key length is rejected" {
+test "verifyProofIndexed: an extension whose child is a leaf is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const leaf = try updMakeLeaf(alloc, &(@as([63]u8, @splat(0))), "value");
+    try index.put(keccak256(leaf), leaf);
+    const ext = try updMakeExtension(alloc, &[_]u8{0}, try updRlpBytes(alloc, &keccak256(leaf)));
+    try index.put(keccak256(ext), ext);
+    try std.testing.expectError(error.InvalidNode, mpt.verifyProofIndexed(keccak256(ext), pathTestKey(0), &index));
+}
+
+// The reference decodes every child reference of a node it reaches, so the rule holds for
+// a slot the lookup does not follow too.
+test "verifyProofIndexed: an embedded child as long as a hash is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const path: [63]u8 = @splat(0);
+    const leaf = try updMakeLeaf(alloc, &path, "value");
+    try index.put(keccak256(leaf), leaf);
+    try std.testing.expect(leaf.len >= 32);
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    enc[0] = leaf;
+    enc[1] = try updHashOrEmbed(alloc, leaf);
+    const root = try updEncodeBranch(alloc, &enc, "");
+    try index.put(keccak256(root), root);
+    try std.testing.expectError(error.InvalidNode, mpt.verifyProofIndexed(keccak256(root), pathTestKey(1), &index));
+}
+
+test "verifyProofIndexed: a leaf past or short of the key length is rejected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     for ([_]usize{ 64, 66, 62 }) |len| {
         var index = NodeIndex.init(arena.allocator());
         const root = try buildPathTestTrie(arena.allocator(), &index, 63, len);
-        try std.testing.expectError(error.InvalidProof, mpt.validateSecuredTriePaths(root, &index, &try mpt.PathCheck.init(arena.allocator(), &index)));
+        try std.testing.expectError(error.InvalidProof, mpt.verifyProofIndexed(root, pathTestKey(2), &index));
     }
 }
 
-test "validateSecuredTriePaths: an extension reaching the key length is rejected" {
+test "verifyProofIndexed: an extension reaching the key length is rejected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -725,22 +763,31 @@ test "validateSecuredTriePaths: an extension reaching the key length is rejected
     const path: [64]u8 = @splat(0);
     const ext = try updMakeExtension(alloc, &path, try updRlpBytes(alloc, &branch_hash));
     try index.put(keccak256(ext), ext);
-    try std.testing.expectError(error.InvalidProof, mpt.validateSecuredTriePaths(keccak256(ext), &index, &try mpt.PathCheck.init(arena.allocator(), &index)));
+    try std.testing.expectError(error.InvalidProof, mpt.verifyProofIndexed(keccak256(ext), pathTestKey(0), &index));
 }
 
-test "validateSecuredTriePaths: nodes absent from the witness are not walked" {
+// The reference checks a witness node only when a trie operation reaches it.
+test "verifyProofIndexed: a malformed node no lookup reaches is not checked" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var index = NodeIndex.init(arena.allocator());
+    const root = try buildPathTestTrie(arena.allocator(), &index, 63, 66);
+    try std.testing.expectEqualStrings("value", (try mpt.verifyProofIndexed(root, pathTestKey(1), &index)).?);
+}
+
+// A deletion that collapses a branch resolves the sole remaining child, which no read reached.
+test "batchUpdateIndexed: a collapse onto a malformed sibling is rejected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     var index = NodeIndex.init(alloc);
-    const root = try buildPathTestTrie(alloc, &index, 63, 66);
-    // Drop the over-length leaf: only its hash remains, in the root.
-    const leaf = try updMakeLeaf(alloc, &(@as([66]u8, @splat(0))), "value");
-    try std.testing.expect(index.remove(keccak256(leaf)));
-    try mpt.validateSecuredTriePaths(root, &index, &try mpt.PathCheck.init(arena.allocator(), &index));
-    // An empty root, or a root absent from the witness, has nothing to walk.
-    try mpt.validateSecuredTriePaths(EMPTY_TRIE_HASH, &index, &try mpt.PathCheck.init(arena.allocator(), &index));
-    try mpt.validateSecuredTriePaths(@splat(0x11), &index, &try mpt.PathCheck.init(arena.allocator(), &index));
+    const root = try buildPathTestTrie(alloc, &index, 63, 62);
+    const changes = [_]mpt.BatchChange{.{ .key = pathTestKey(1), .value = null }};
+    try std.testing.expectError(error.InvalidProof, mpt.batchUpdateIndexed(alloc, root, &changes, &index));
+    // A well-formed sibling collapses into a leaf.
+    var ok_index = NodeIndex.init(alloc);
+    const ok_root = try buildPathTestTrie(alloc, &ok_index, 63, 63);
+    _ = try mpt.batchUpdateIndexed(alloc, ok_root, &changes, &ok_index);
 }
 
 test "batchUpdateIndexed: random inserts and updates match a rebuilt trie" {
