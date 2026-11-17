@@ -1308,6 +1308,10 @@ pub fn transitionWithContext(
             if (e.value_ptr.*.status.self_destructed) {
                 if (amsterdam_no_burn and e.value_ptr.*.info.balance != 0) continue;
                 try deleted.append(arena, e.key_ptr.*);
+            } else if (!e.value_ptr.*.status.loaded_as_not_existing and !post_alloc.contains(e.key_ptr.*)) {
+                // An account that existed and ends the block empty (EIP-161), such as one
+                // self-destructed and then touched again by a zero-amount withdrawal.
+                try deleted.append(arena, e.key_ptr.*);
             }
         }
     }
