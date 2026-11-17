@@ -807,9 +807,6 @@ pub fn transitionWithContext(
             }
         }
 
-        // 2. Compute tx hash
-        const tx_hash_val = tx_signing.txHash(arena, tx, chain_id) catch [_]u8{0} ** 32;
-
         // 3. Set up TxEnv
         ctx.tx.caller = sender;
         ctx.tx.nonce = tx.nonce orelse 0;
@@ -1181,7 +1178,6 @@ pub fn transitionWithContext(
                 .topics = topics,
                 .data = try arena.dupe(u8, log.data),
                 .block_number = env.number,
-                .tx_hash = tx_hash_val,
                 .tx_index = tx_idx,
                 .block_hash = DUMMY_BLOCK_HASH,
                 .log_index = log_index_global,
@@ -1199,7 +1195,6 @@ pub fn transitionWithContext(
 
         try receipts.append(arena, Receipt{
             .type = tx.type,
-            .tx_hash = tx_hash_val,
             .tx_index = tx_idx,
             .block_hash = DUMMY_BLOCK_HASH,
             .block_number = env.number,
