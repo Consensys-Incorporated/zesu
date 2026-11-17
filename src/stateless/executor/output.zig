@@ -363,37 +363,96 @@ fn writeUintRlp(out: []u8, n: u256) usize {
     return 1 + len;
 }
 
-fn encodeReceiptRlp(alloc: std.mem.Allocator, receipt: types.Receipt) ![]u8 {
-    // Encode logs
-    var log_items = std.ArrayListUnmanaged([]const u8).empty;
-    for (receipt.logs) |log| {
-        var topic_items = std.ArrayListUnmanaged([]const u8).empty;
-        for (log.topics) |t| try topic_items.append(alloc, try rlp.encodeBytes(alloc, &t));
-        const log_parts = [_][]const u8{
-            try rlp.encodeBytes(alloc, &log.address),
-            try rlp.encodeList(alloc, topic_items.items),
-            try rlp.encodeBytes(alloc, log.data),
-        };
-        try log_items.append(alloc, try rlp.encodeList(alloc, &log_parts));
+/// Typed receipt RLP (`type ++ rlp(body)` for typed, `rlp(body)` for legacy), sized up
+/// front and written in one pass, as the generic rlp helpers would encode it.
+pub fn encodeReceiptRlp(alloc: std.mem.Allocator, receipt: types.Receipt) ![]u8 {
+    var logs_payload: usize = 0;
+    for (receipt.logs) |log| logs_payload += rlpItemLen(logPayloadLen(log));
+    // Pre-Byzantium (EIP-658): first field is the 32-byte stateRoot. Post-Byzantium: the
+    // status byte, 0x01 for success and the empty string for failure; both are 1 byte.
+    const first_len: usize = if (receipt.state_root != null) hash_rlp_len else 1;
+    const payload = first_len + uintRlpLen(receipt.cumulative_gas_used) + bloom_rlp_len + rlpItemLen(logs_payload);
+    const type_len: usize = @intFromBool(receipt.type != 0);
+    const out = try alloc.alloc(u8, type_len + rlpItemLen(payload));
+
+    var pos: usize = 0;
+    if (type_len != 0) {
+        out[0] = receipt.type;
+        pos = 1;
     }
-    const bloom_bytes: []const u8 = &receipt.logs_bloom;
-    // Pre-Byzantium (EIP-658): first field is 32-byte stateRoot.
-    // Post-Byzantium: first field is 1-byte status (0x01 = success, 0x00 = failure).
-    const first_field = if (receipt.state_root) |sr|
-        try rlp.encodeBytes(alloc, &sr)
-    else
-        try rlp.encodeBytes(alloc, if (receipt.status == 1) &.{0x01} else &.{});
-    const parts = [_][]const u8{
-        first_field,
-        try rlp.encodeU64(alloc, receipt.cumulative_gas_used),
-        try rlp.encodeBytes(alloc, bloom_bytes),
-        try rlp.encodeList(alloc, log_items.items),
-    };
-    const body = try rlp.encodeList(alloc, &parts);
-    return if (receipt.type == 0)
-        body
-    else
-        rlp.concat(alloc, &.{ &.{receipt.type}, body });
+    pos += writeRlpHeader(out[pos..], 0xc0, payload);
+    if (receipt.state_root) |sr| {
+        out[pos] = hash_prefix;
+        @memcpy(out[pos + 1 ..][0..32], &sr);
+        pos += hash_rlp_len;
+    } else {
+        out[pos] = if (receipt.status == 1) 0x01 else 0x80;
+        pos += 1;
+    }
+    pos += writeUintRlp(out[pos..], receipt.cumulative_gas_used);
+    out[pos..][0..3].* = .{ 0xb9, 0x01, 0x00 };
+    @memcpy(out[pos + 3 ..][0..256], &receipt.logs_bloom);
+    pos += bloom_rlp_len;
+    pos += writeRlpHeader(out[pos..], 0xc0, logs_payload);
+    for (receipt.logs) |log| {
+        // [address, [topic, ...], data]
+        pos += writeRlpHeader(out[pos..], 0xc0, logPayloadLen(log));
+        out[pos] = 0x80 + 20;
+        @memcpy(out[pos + 1 ..][0..20], &log.address);
+        pos += 21;
+        pos += writeRlpHeader(out[pos..], 0xc0, log.topics.len * hash_rlp_len);
+        for (log.topics) |t| {
+            out[pos] = hash_prefix;
+            @memcpy(out[pos + 1 ..][0..32], &t);
+            pos += hash_rlp_len;
+        }
+        if (log.data.len == 1 and log.data[0] < 0x80) {
+            out[pos] = log.data[0];
+            pos += 1;
+        } else {
+            pos += writeRlpHeader(out[pos..], 0x80, log.data.len);
+            @memcpy(out[pos..][0..log.data.len], log.data);
+            pos += log.data.len;
+        }
+    }
+    std.debug.assert(pos == out.len);
+    return out;
+}
+
+const bloom_rlp_len = 3 + 256;
+
+fn logPayloadLen(log: types.Log) usize {
+    const data_len = if (log.data.len == 1 and log.data[0] < 0x80) 1 else rlpItemLen(log.data.len);
+    return 21 + rlpItemLen(log.topics.len * hash_rlp_len) + data_len;
+}
+
+/// Length of an RLP string or list with a `len`-byte payload, header included.
+fn rlpItemLen(len: usize) usize {
+    if (len <= 55) return 1 + len;
+    return 1 + beLen(len) + len;
+}
+
+/// Bytes in the minimal big-endian form of a nonzero `n`.
+fn beLen(n: usize) usize {
+    return (64 - @as(usize, @clz(n)) + 7) / 8;
+}
+
+/// Writes the header of an RLP string (`base` 0x80) or list (`base` 0xc0) with a
+/// `len`-byte payload and returns its length.
+fn writeRlpHeader(out: []u8, base: u8, len: usize) usize {
+    if (len <= 55) {
+        out[0] = base + @as(u8, @intCast(len));
+        return 1;
+    }
+    const n = beLen(len);
+    out[0] = base + 55 + @as(u8, @intCast(n));
+    var v = len;
+    var i = n;
+    while (i > 0) : (i -= 1) {
+        out[i] = @truncate(v);
+        v >>= 8;
+    }
+    return 1 + n;
 }
 
 /// RLP-encode a transaction index as the trie key.
