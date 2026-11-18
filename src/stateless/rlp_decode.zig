@@ -460,17 +460,13 @@ fn txNonce(rest: *[]const u8) error{InvalidBlock}!u64 {
 fn txU128(rest: *[]const u8) error{InvalidBlock}!u128 {
     const b = try txUintBytes(rest);
     if (b.len > 16) return std.math.maxInt(u128);
-    var v: u128 = 0;
-    for (b) |byte| v = (v << 8) | byte;
-    return v;
+    return mpt.rlp.beUint(u128, b);
 }
 
 fn txU256(rest: *[]const u8) error{InvalidBlock}!u256 {
     const b = try txUintBytes(rest);
     if (b.len > 32) return error.InvalidBlock;
-    var v: u256 = 0;
-    for (b) |byte| v = (v << 8) | byte;
-    return v;
+    return mpt.rlp.beUint(u256, b);
 }
 
 fn txAddr(rest: *[]const u8) error{InvalidBlock}!?primitives.Address {
@@ -653,10 +649,8 @@ fn nextUint256(rest: *[]const u8) error{InvalidBlock}!u256 {
         .list => return error.InvalidBlock,
     };
     if (b.len > 32) return error.InvalidBlock;
-    var v: u256 = 0;
-    for (b) |byte| v = (v << 8) | byte;
     rest.* = rest.*[r.consumed..];
-    return v;
+    return mpt.rlp.beUint(u256, b);
 }
 
 // ─── Unit tests ────────────────────────────────────────────────────────────────
