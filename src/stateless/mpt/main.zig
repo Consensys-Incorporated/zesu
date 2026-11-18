@@ -879,7 +879,7 @@ const BranchSlots = struct {
         // Sixteen hash children and no value: a fixed 532-byte layout, so the slots are a
         // constant and only the 17 item prefixes need checking. One load covers the list
         // header 0xf9 0x02 0x11 and the first child's 0xa0.
-        if (node_rlp.len >= full_len and std.mem.readInt(u32, node_rlp[0..4], .little) == 0xa01102f9 and
+        if (node_rlp.len == full_len and std.mem.readInt(u32, node_rlp[0..4], .little) == 0xa01102f9 and
             node_rlp[full_len - 1] == 0x80)
         {
             const all_hashes = inline for (1..16) |i| {
@@ -912,8 +912,10 @@ const BranchSlots = struct {
             else => return null,
         }
         const end = pos + payload;
-        if (end > node_rlp.len) return null;
+        if (end != node_rlp.len) return null;
         var slots: BranchSlots = undefined;
+        // A branch needs two children: its value slot is always empty here.
+        var occupied: usize = 0;
         for (0..17) |i| {
             if (pos >= end) return null;
             slots.at[i] = @intCast(pos);
@@ -927,9 +929,10 @@ const BranchSlots = struct {
             };
             if (i == 16 and b != 0x80) return null;
             if (n > end - pos) return null;
+            occupied += @intFromBool(b != 0x80);
             pos += n;
         }
-        if (pos != end) return null;
+        if (pos != end or occupied < 2) return null;
         slots.at[17] = @intCast(end);
         return slots;
     }
@@ -1079,15 +1082,19 @@ fn updNodeExImpl(
                     if (cd) |decoded_child| {
                         var cpb: [128]u8 = undefined;
                         var merged: [64]u8 = undefined;
+                        // No secured path is longer than a key.
+                        if (prefix.len > merged.len) return error.InvalidProof;
                         @memcpy(merged[0..prefix.len], prefix);
                         switch (decoded_child) {
                             .leaf => |lf| {
                                 const chp = nibbles.hpDecode(lf.key_end, &cpb) catch return error.InvalidHp;
+                                if (prefix.len + chp.len > merged.len) return error.InvalidProof;
                                 @memcpy(merged[prefix.len .. prefix.len + chp.len], cpb[0..chp.len]);
                                 return updMakeLeaf(alloc, merged[0 .. prefix.len + chp.len], lf.value);
                             },
                             .extension => |ee| {
                                 const chp = nibbles.hpDecode(ee.prefix, &cpb) catch return error.InvalidHp;
+                                if (prefix.len + chp.len > merged.len) return error.InvalidProof;
                                 @memcpy(merged[prefix.len .. prefix.len + chp.len], cpb[0..chp.len]);
                                 const child_ref = try updRefEnc(alloc, ee.child);
                                 return updMakeExtension(alloc, merged[0 .. prefix.len + chp.len], child_ref);
@@ -1277,15 +1284,19 @@ fn updNode(
                     if (cd) |decoded_child| {
                         var cpb: [128]u8 = undefined;
                         var merged: [64]u8 = undefined;
+                        // No secured path is longer than a key.
+                        if (prefix.len > merged.len) return error.InvalidProof;
                         @memcpy(merged[0..prefix.len], prefix);
                         switch (decoded_child) {
                             .leaf => |lf| {
                                 const chp = nibbles.hpDecode(lf.key_end, &cpb) catch return error.InvalidHp;
+                                if (prefix.len + chp.len > merged.len) return error.InvalidProof;
                                 @memcpy(merged[prefix.len .. prefix.len + chp.len], cpb[0..chp.len]);
                                 return updMakeLeaf(alloc, merged[0 .. prefix.len + chp.len], lf.value);
                             },
                             .extension => |ee| {
                                 const chp = nibbles.hpDecode(ee.prefix, &cpb) catch return error.InvalidHp;
+                                if (prefix.len + chp.len > merged.len) return error.InvalidProof;
                                 @memcpy(merged[prefix.len .. prefix.len + chp.len], cpb[0..chp.len]);
                                 const child_ref = try updRefEnc(alloc, ee.child);
                                 return updMakeExtension(alloc, merged[0 .. prefix.len + chp.len], child_ref);
@@ -1452,15 +1463,19 @@ fn updNodeEx(
                     if (cd) |decoded_child| {
                         var cpb: [128]u8 = undefined;
                         var merged: [64]u8 = undefined;
+                        // No secured path is longer than a key.
+                        if (prefix.len > merged.len) return error.InvalidProof;
                         @memcpy(merged[0..prefix.len], prefix);
                         switch (decoded_child) {
                             .leaf => |lf| {
                                 const chp = nibbles.hpDecode(lf.key_end, &cpb) catch return error.InvalidHp;
+                                if (prefix.len + chp.len > merged.len) return error.InvalidProof;
                                 @memcpy(merged[prefix.len .. prefix.len + chp.len], cpb[0..chp.len]);
                                 return updMakeLeaf(alloc, merged[0 .. prefix.len + chp.len], lf.value);
                             },
                             .extension => |ee| {
                                 const chp = nibbles.hpDecode(ee.prefix, &cpb) catch return error.InvalidHp;
+                                if (prefix.len + chp.len > merged.len) return error.InvalidProof;
                                 @memcpy(merged[prefix.len .. prefix.len + chp.len], cpb[0..chp.len]);
                                 const child_ref = try updRefEnc(alloc, ee.child);
                                 return updMakeExtension(alloc, merged[0 .. prefix.len + chp.len], child_ref);
@@ -1677,19 +1692,17 @@ fn collapseNode(
         error.InvalidNode => return error.InvalidNode,
     };
 
-    var path_buf: [128]u8 = undefined;
+    // The child's path is decoded after its nibble; hpDecode rejects one that overflows.
     var merged: [64]u8 = undefined;
     merged[0] = sole_nib;
 
     switch (decoded) {
         .leaf => |lf| {
-            const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
-            @memcpy(merged[1 .. 1 + hp.len], path_buf[0..hp.len]);
+            const hp = nibbles.hpDecode(lf.key_end, merged[1..]) catch return error.InvalidHp;
             return updMakeLeaf(alloc, merged[0 .. 1 + hp.len], lf.value);
         },
         .extension => |e| {
-            const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
-            @memcpy(merged[1 .. 1 + hp.len], path_buf[0..hp.len]);
+            const hp = nibbles.hpDecode(e.prefix, merged[1..]) catch return error.InvalidHp;
             const child_ref = try updRefEnc(alloc, e.child);
             return updMakeExtension(alloc, merged[0 .. 1 + hp.len], child_ref);
         },
@@ -1721,19 +1734,17 @@ fn collapseNodeEx(
         error.InvalidNode => return error.InvalidNode,
     };
 
-    var path_buf: [128]u8 = undefined;
+    // The child's path is decoded after its nibble; hpDecode rejects one that overflows.
     var merged: [64]u8 = undefined;
     merged[0] = sole_nib;
 
     switch (decoded) {
         .leaf => |lf| {
-            const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
-            @memcpy(merged[1 .. 1 + hp.len], path_buf[0..hp.len]);
+            const hp = nibbles.hpDecode(lf.key_end, merged[1..]) catch return error.InvalidHp;
             return updMakeLeaf(alloc, merged[0 .. 1 + hp.len], lf.value);
         },
         .extension => |e| {
-            const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
-            @memcpy(merged[1 .. 1 + hp.len], path_buf[0..hp.len]);
+            const hp = nibbles.hpDecode(e.prefix, merged[1..]) catch return error.InvalidHp;
             const child_ref = try updRefEnc(alloc, e.child);
             return updMakeExtension(alloc, merged[0 .. 1 + hp.len], child_ref);
         },

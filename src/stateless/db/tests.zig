@@ -130,10 +130,28 @@ fn buildLeafNode(buf: []u8, key_hash: primitives.Hash, value: []const u8) usize 
     return encList(buf, 0, payload[0..pl]);
 }
 
-fn buildEmptyBranchNode(buf: []u8) usize {
-    buf[0] = 0xd1;
-    @memset(buf[1..18], 0x80);
-    return 18;
+/// A branch whose two children (hashes absent from the witness) sit on nibbles other than
+/// `key_hash`'s first, so a lookup of that key ends at an empty slot: a non-inclusion proof.
+/// A branch needs two children, so an all-empty one is not a valid witness node.
+fn buildBranchMissingKey(buf: *[83]u8, key_hash: [32]u8) usize {
+    buf[0] = 0xf8;
+    buf[1] = 2 * 33 + 15;
+    const first = key_hash[0] >> 4;
+    const a: usize = (first + 1) % 16;
+    const b: usize = (first + 2) % 16;
+    var pos: usize = 2;
+    for (0..16) |i| {
+        if (i == a or i == b) {
+            buf[pos] = 0xa0;
+            @memset(buf[pos + 1 ..][0..32], @intCast(0x11 + i));
+            pos += 33;
+        } else {
+            buf[pos] = 0x80;
+            pos += 1;
+        }
+    }
+    buf[pos] = 0x80;
+    return pos + 1;
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -180,14 +198,14 @@ test "basic returns verified AccountInfo" {
     try std.testing.expectEqualSlices(u8, &KECCAK_EMPTY, &info.?.code_hash);
 }
 
-// ─── Test 2: basic — non-inclusion via empty branch root ──────────────────────
+// ─── Test 2: basic — non-inclusion via empty branch slot ──────────────────────
 
 test "basic returns null for valid non-inclusion proof (empty trie)" {
     var address: primitives.Address = @splat(0x00);
     address[19] = 0x22;
 
-    var branch: [18]u8 = undefined;
-    const branch_len = buildEmptyBranchNode(&branch);
+    var branch: [83]u8 = undefined;
+    const branch_len = buildBranchMissingKey(&branch, mpt.keccak256(&address));
     const state_root = mpt.keccak256(branch[0..branch_len]);
 
     const w = input.StateWitness{
@@ -579,10 +597,10 @@ test "hasNonZeroStorageForAddress reports false for a provably absent account" {
     var address: primitives.Address = @splat(0x00);
     address[19] = 0x99;
 
-    // An empty branch root proves non-inclusion for every address, so the answer
-    // is knowable and must be `false`, not an error.
-    var branch: [18]u8 = undefined;
-    const branch_len = buildEmptyBranchNode(&branch);
+    // The branch root proves the address absent, so the answer is knowable and must
+    // be `false`, not an error.
+    var branch: [83]u8 = undefined;
+    const branch_len = buildBranchMissingKey(&branch, mpt.keccak256(&address));
     const branch_bytes = branch[0..branch_len];
     const state_root = mpt.keccak256(branch_bytes);
 

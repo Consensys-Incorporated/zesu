@@ -47,6 +47,8 @@ pub const DecodedNode = union(enum) {
 ///   other   → error.InvalidNode
 pub fn decodeNode(bytes: []const u8) error{ InvalidRlp, InvalidNode }!DecodedNode {
     const outer = try rlp.decodeItem(bytes);
+    // A node is one RLP item: trailing bytes would change its hash, not its meaning.
+    if (outer.consumed != bytes.len) return error.InvalidNode;
     const payload = switch (outer.item) {
         .list => |p| p,
         .bytes => return error.InvalidNode,
@@ -61,6 +63,7 @@ pub fn decodeNode(bytes: []const u8) error{ InvalidRlp, InvalidNode }!DecodedNod
     var second_raw: []const u8 = undefined;
     var count: usize = 0;
     var bad_child = false;
+    var occupied: usize = 0;
     var rest = payload;
     while (rest.len > 0) : (count += 1) {
         if (count >= 17) return error.InvalidNode;
@@ -73,9 +76,10 @@ pub fn decodeNode(bytes: []const u8) error{ InvalidRlp, InvalidNode }!DecodedNod
         if (count < 16) {
             children[count] = try decodeNodeRef(item, raw);
             bad_child = bad_child or !isChildRef(item, raw);
+            occupied += @intFromBool(children[count] != .empty);
         } else value = switch (item) {
             .bytes => |b| b,
-            .list => &.{},
+            .list => return error.InvalidNode,
         };
         rest = rest[consumed..];
     }
@@ -95,11 +99,15 @@ pub fn decodeNode(bytes: []const u8) error{ InvalidRlp, InvalidNode }!DecodedNod
             if (is_leaf) {
                 const val_bytes: []const u8 = switch (first[1]) {
                     .bytes => |b| b,
-                    .list => |l| l,
+                    .list => return error.InvalidNode,
                 };
                 return .{ .leaf = .{ .key_end = key_bytes, .value = val_bytes } };
             } else {
+                // An extension has a non-empty path and a child (a branch, which the
+                // caller checks when it resolves it).
+                if (key_bytes.len == 1 and (key_bytes[0] & 0x10) == 0) return error.InvalidNode;
                 if (!isChildRef(first[1], second_raw)) return error.InvalidNode;
+                if (first[1] == .bytes and first[1].bytes.len == 0) return error.InvalidNode;
                 return .{ .extension = .{
                     .prefix = key_bytes,
                     .child = try decodeNodeRef(first[1], second_raw),
@@ -108,6 +116,8 @@ pub fn decodeNode(bytes: []const u8) error{ InvalidRlp, InvalidNode }!DecodedNod
         },
         17 => {
             if (bad_child) return error.InvalidNode;
+            // A branch with fewer than two entries would be a leaf or an extension.
+            if (occupied + @intFromBool(value.len != 0) < 2) return error.InvalidNode;
             return .{ .branch = .{ .children = children, .value = value } };
         },
         else => return error.InvalidNode,
@@ -217,11 +227,11 @@ test "decodeNode leaf" {
 
 test "decodeNode extension with hash child" {
     // Extension node: [HP_key, child_hash]
-    // HP key = 0x00 (extension, even, empty path) → RLP 0x81 0x00
+    // HP key = 0x11 (extension, odd, path [1]) → RLP 0x81 0x11
     // child  = 32-byte hash (all 0xaa) → RLP 0xa0 followed by 32 bytes
     var buf: [37]u8 = undefined;
     buf[0] = 0x81; // short string, len=1
-    buf[1] = 0x00; // HP: extension, even
+    buf[1] = 0x11; // HP: extension, odd, nibble 1
     buf[2] = 0xa0; // short string, len=32
     @memset(buf[3..35], 0xaa);
     // payload = 35 bytes → list: 0xf8 0x23 + 35 bytes = 37 bytes total
@@ -231,38 +241,40 @@ test "decodeNode extension with hash child" {
     @memcpy(node_buf[2..37], buf[0..35]);
     const node = try decodeNode(&node_buf);
     try std.testing.expect(node == .extension);
-    try std.testing.expectEqualSlices(u8, &.{0x00}, node.extension.prefix);
+    try std.testing.expectEqualSlices(u8, &.{0x11}, node.extension.prefix);
     try std.testing.expect(node.extension.child == .hash);
     var expected_hash: [32]u8 = undefined;
     @memset(&expected_hash, 0xaa);
     try std.testing.expectEqualSlices(u8, &expected_hash, node.extension.child.hash);
 }
 
-test "decodeNode branch all empty" {
+test "decodeNode invalid: a branch with fewer than two entries" {
     // Branch: 17 × 0x80 (empty string) = 17 bytes payload
     // list: 0xd1 (0xc0 + 17) + 17 bytes
     var buf: [18]u8 = undefined;
     buf[0] = 0xd1;
     @memset(buf[1..18], 0x80);
-    const node = try decodeNode(&buf);
-    try std.testing.expect(node == .branch);
-    for (node.branch.children) |child| {
-        try std.testing.expect(child == .empty);
-    }
-    try std.testing.expectEqualSlices(u8, &.{}, node.branch.value);
+    try std.testing.expectError(error.InvalidNode, decodeNode(&buf));
+    // One child is still too few; a child and a value are enough.
+    buf[1] = 0xc0;
+    try std.testing.expectError(error.InvalidNode, decodeNode(&buf));
+    buf[17] = 0x01;
+    try std.testing.expect(try decodeNode(&buf) == .branch);
 }
 
 test "decodeNode branch with hash child at slot 0" {
-    // 17-item branch: children[0] = 32-byte hash, children[1..15] = empty, value = empty.
+    // 17-item branch: children[0] = 32-byte hash, children[1..15] = empty, value = 0x01
+    // (a branch needs two entries).
     // Byte layout:
     //   children[0]:  0xa0 + 32 bytes = 33 bytes (1 RLP item)
     //   children[1..15]: 15 × 0x80    = 15 bytes (15 RLP items)
-    //   value (slot 16): 0x80          =  1 byte  (1 RLP item)
+    //   value (slot 16): 0x01          =  1 byte  (1 RLP item)
     //   Total payload: 49 bytes, 17 items; 49 < 56 → list prefix 0xc0 + 49 = 0xf1
     var payload: [49]u8 = undefined;
     payload[0] = 0xa0; // RLP prefix for 32-byte string
     @memset(payload[1..33], 0xbb); // hash bytes
-    @memset(payload[33..], 0x80); // remaining 16 slots: children[1..15] + value
+    @memset(payload[33..48], 0x80); // children[1..15]
+    payload[48] = 0x01; // value
     var buf: [50]u8 = undefined;
     buf[0] = 0xc0 + 49; // = 0xf1
     @memcpy(buf[1..50], &payload);
@@ -279,10 +291,10 @@ test "decodeNode branch with hash child at slot 0" {
 
 test "decodeNode inline child" {
     // Extension with a short (< 32 byte) embedded child.
-    // HP key = 0x00 → 0x81 0x00 (2 bytes)
+    // HP key = 0x11 (odd, path [1]) → 0x81 0x11 (2 bytes)
     // embedded child = leaf [0x20, 0x01] → 0xc2 0x20 0x01 (3 bytes)
     // payload = 5 bytes → list 0xc5 + 5 bytes = 6 bytes total
-    const bytes = &[_]u8{ 0xc5, 0x81, 0x00, 0xc2, 0x20, 0x01 };
+    const bytes = &[_]u8{ 0xc5, 0x81, 0x11, 0xc2, 0x20, 0x01 };
     const node = try decodeNode(bytes);
     try std.testing.expect(node == .extension);
     try std.testing.expect(node.extension.child == .inline_node);
@@ -291,7 +303,7 @@ test "decodeNode inline child" {
 
 test "decodeNode invalid: a child that is neither empty, a hash nor embedded" {
     // Extension whose child is a 4-byte string.
-    const bytes = &[_]u8{ 0xc7, 0x81, 0x00, 0x84, 0x01, 0x02, 0x03, 0x04 };
+    const bytes = &[_]u8{ 0xc7, 0x81, 0x11, 0x84, 0x01, 0x02, 0x03, 0x04 };
     try std.testing.expectError(error.InvalidNode, decodeNode(bytes));
 }
 
