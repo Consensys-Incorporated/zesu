@@ -63,6 +63,7 @@ test {
     _ = @import("opcodes/memory_tests.zig");
     _ = @import("opcodes/stack_tests.zig");
     _ = @import("dispatch_pc_tests.zig");
+    _ = @import("dispatch_env_tests.zig");
 }
 
 /// Debug-print smoke checks (not run by `zig build test`).
