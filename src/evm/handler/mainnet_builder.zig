@@ -870,18 +870,10 @@ const IterativeResult = struct {
     state_gas_spilled: u64 = 0,
 };
 
-/// One entry on the iterative call stack.
-const FrameEntry = struct {
-    interp: *interpreter_mod.Interpreter,
-    /// What created this sub-frame (null for root).
-    cause: ?union(enum) {
-        call: interpreter_mod.PendingCallData,
-        create: interpreter_mod.PendingCreateData,
-    },
-};
-
 /// Iterative EVM frame runner. Runs the root interpreter and handles CALL/CREATE
-/// sub-frames by pushing/popping FrameEntry items instead of recursing natively.
+/// sub-frames by pushing/popping interpreters instead of recursing natively.
+/// A suspended parent keeps its `pending` data until its child returns; it is read
+/// in place to finalize the call and cleared before the parent resumes.
 /// `return_data_buf` is owned by the caller and accumulates return data.
 fn executeIterative(
     root_interp: interpreter_mod.Interpreter,
@@ -890,36 +882,39 @@ fn executeIterative(
 ) !IterativeResult {
     const call_ops = interpreter_mod.opcodes.call_ops;
 
-    var frames = try std.ArrayList(FrameEntry).initCapacity(alloc_mod.get(), 16);
+    var frames = try std.ArrayList(*interpreter_mod.Interpreter).initCapacity(alloc_mod.get(), 16);
     defer {
         for (frames.items) |f| {
-            f.interp.deinit();
-            alloc_mod.get().destroy(f.interp);
+            f.deinit();
+            alloc_mod.get().destroy(f);
         }
         frames.deinit(alloc_mod.get());
     }
     const root_ptr = try alloc_mod.get().create(interpreter_mod.Interpreter);
     root_ptr.* = root_interp;
-    try frames.append(alloc_mod.get(), .{ .interp = root_ptr, .cause = null });
+    try frames.append(alloc_mod.get(), root_ptr);
 
     const schedule = interpreter_mod.protocol_schedule.instructionTable(root_interp.runtime_flags.spec_id);
 
     while (true) {
-        const frame = &frames.items[frames.items.len - 1];
-        const spec = frame.interp.runtime_flags.spec_id;
+        const interp = frames.items[frames.items.len - 1];
+        const spec = interp.runtime_flags.spec_id;
 
-        _ = frame.interp.runWithHost(schedule, host);
+        _ = interp.runWithHost(schedule, host);
 
-        if (frame.interp.pending != .none) {
+        if (interp.pending != .none) {
             // Sub-frame needed. The opcode already called setupCall/setupCreate and stored
             // checkpoint + new_addr in the pending data. Just build the sub-interpreter.
-            const pending = frame.interp.pending;
-            frame.interp.pending = .none;
             const sub_depth = frames.items.len; // 0-based: root=0, first sub=1, ...
+            const sub = try alloc_mod.get().create(interpreter_mod.Interpreter);
+            frames.append(alloc_mod.get(), sub) catch |err| {
+                alloc_mod.get().destroy(sub);
+                return err;
+            };
 
-            switch (pending) {
-                .call => |pc| {
-                    var sub_interp = interpreter_mod.Interpreter.new(
+            switch (interp.pending) {
+                .call => |*pc| {
+                    sub.* = interpreter_mod.Interpreter.new(
                         interpreter_mod.Memory.new(),
                         interpreter_mod.ExtBytecode.new(pc.code),
                         interpreter_mod.InputsImpl.new(
@@ -937,14 +932,11 @@ fn executeIterative(
                         pc.inputs.gas_limit,
                     );
                     // EIP-8037: forward the reservoir from parent to child.
-                    sub_interp.gas.reservoir = pc.inputs.reservoir;
-                    const call_ptr = try alloc_mod.get().create(interpreter_mod.Interpreter);
-                    call_ptr.* = sub_interp;
-                    try frames.append(alloc_mod.get(), .{ .interp = call_ptr, .cause = .{ .call = pc } });
+                    sub.gas.reservoir = pc.inputs.reservoir;
                 },
-                .create => |pc| {
+                .create => |*pc| {
                     const init_bytecode = bytecode.Bytecode.newRaw(pc.inputs.init_code);
-                    var sub_interp = interpreter_mod.Interpreter.new(
+                    sub.* = interpreter_mod.Interpreter.new(
                         interpreter_mod.Memory.new(),
                         interpreter_mod.ExtBytecode.newOwned(init_bytecode),
                         interpreter_mod.InputsImpl.new(
@@ -961,11 +953,7 @@ fn executeIterative(
                         spec,
                         pc.inputs.gas_limit,
                     );
-                    // EIP-8037: forward the reservoir from parent to child.
-                    sub_interp.gas.reservoir = pc.inputs.reservoir;
-                    const create_ptr = try alloc_mod.get().create(interpreter_mod.Interpreter);
-                    create_ptr.* = sub_interp;
-                    try frames.append(alloc_mod.get(), .{ .interp = create_ptr, .cause = .{ .create = pc } });
+                    sub.gas.reservoir = pc.inputs.reservoir;
                 },
                 .none => unreachable,
             }
@@ -973,13 +961,13 @@ fn executeIterative(
             // Frame completed normally (or halted).
             if (frames.items.len == 1) {
                 // Root frame done — extract result before deinit.
-                const raw = frame.interp.result;
-                const gas_rem = frame.interp.gas.remaining;
-                const gas_ref = frame.interp.gas.refunded;
-                const root_reservoir = frame.interp.gas.reservoir;
-                const root_state_gas_spilled = frame.interp.gas.state_gas_spilled;
+                const raw = interp.result;
+                const gas_rem = interp.gas.remaining;
+                const gas_ref = interp.gas.refunded;
+                const root_reservoir = interp.gas.reservoir;
+                const root_state_gas_spilled = interp.gas.state_gas_spilled;
                 const rd_raw: []const u8 = if (raw.isSuccess() or raw == .revert)
-                    frame.interp.return_data.data
+                    interp.return_data.data
                 else
                     &[_]u8{};
                 // rd_raw may already be return_data_buf.items (parent frame's return_data
@@ -1002,16 +990,16 @@ fn executeIterative(
             }
 
             // Sub-frame done — extract return data, deinit, pop, resume parent.
-            const sub_result = frame.interp.result;
-            const sub_gas_rem = frame.interp.gas.remaining;
-            const sub_gas_ref = frame.interp.gas.refunded;
-            const sub_reservoir = frame.interp.gas.reservoir;
-            const sub_state_spent = frame.interp.gas.state_gas_spent;
-            const sub_state_refunded = frame.interp.gas.state_gas_refunded;
+            const sub_result = interp.result;
+            const sub_gas_rem = interp.gas.remaining;
+            const sub_gas_ref = interp.gas.refunded;
+            const sub_reservoir = interp.gas.reservoir;
+            const sub_state_spent = interp.gas.state_gas_spent;
+            const sub_state_refunded = interp.gas.state_gas_refunded;
             // EIP-8037: state gas that spilled into the child's regular gas. On revert it is
             // returned to the parent's regular gas (LIFO); on halt it stays burned. The reservoir
             // contribution therefore excludes it in both cases.
-            const sub_spilled = frame.interp.gas.state_gas_spilled;
+            const sub_spilled = interp.gas.state_gas_spilled;
             // EIP-8037: on revert, parent's reservoir should be restored to call_reservoir
             // (the value passed to the child). Derived as:
             //   call_reservoir = sub_reservoir + sub_state_spent - sub_state_refunded
@@ -1020,7 +1008,7 @@ fn executeIterative(
             //   or same-subtree spends — the matching spend's own revert refunds it via spent).
             const sub_call_reservoir: u64 = (sub_reservoir +| sub_state_spent) -| sub_state_refunded;
             const rd_raw: []const u8 = if (sub_result.isSuccess() or sub_result == .revert)
-                frame.interp.return_data.data
+                interp.return_data.data
             else
                 &[_]u8{};
             if (rd_raw.len == 0 or rd_raw.ptr != return_data_buf.items.ptr) {
@@ -1030,16 +1018,14 @@ fn executeIterative(
                 return_data_buf.items.len = rd_raw.len;
             }
 
-            const cause = frame.cause orelse unreachable;
-            const sub_ptr = frame.interp;
-            sub_ptr.deinit();
+            interp.deinit();
             _ = frames.pop();
-            alloc_mod.get().destroy(sub_ptr);
-            const parent = &frames.items[frames.items.len - 1];
-            const parent_spec = parent.interp.runtime_flags.spec_id;
+            alloc_mod.get().destroy(interp);
+            const parent = frames.items[frames.items.len - 1];
+            const parent_spec = parent.runtime_flags.spec_id;
 
-            switch (cause) {
-                .call => |pc| {
+            switch (parent.pending) {
+                .call => |*pc| {
                     var r = host.finalizeCall(pc.checkpoint, sub_result, pc.inputs.gas_limit, sub_gas_rem, sub_gas_ref, return_data_buf.items);
                     // EIP-8037: on success, take the child's remaining reservoir.
                     // On any failure, state is rolled back so state gas returns to parent reservoir,
@@ -1049,11 +1035,11 @@ fn executeIterative(
                     // fires, so that state gas is forfeited even though no account was created.
                     if (r.success) {
                         r.state_gas_remaining = sub_reservoir;
-                        parent.interp.gas.state_gas_spent += sub_state_spent;
-                        parent.interp.gas.state_gas_refunded += sub_state_refunded;
+                        parent.gas.state_gas_spent += sub_state_spent;
+                        parent.gas.state_gas_refunded += sub_state_refunded;
                         // Propagate the child's spilled state gas so a later parent refund
                         // returns to regular gas in LIFO order (incorporate_child_on_success).
-                        parent.interp.gas.state_gas_spilled += sub_spilled;
+                        parent.gas.state_gas_spilled += sub_spilled;
                     } else if (sub_result == .invalid_static) {
                         // invalid_static: opCreate charged state gas before the static check
                         // fires. State gas is forfeited (account was being created in a static
@@ -1066,9 +1052,9 @@ fn executeIterative(
                         r.state_gas_remaining = sub_call_reservoir -| sub_spilled;
                         if (sub_result == .revert) r.gas_remaining += sub_spilled;
                     }
-                    call_ops.resumeCall(parent.interp, r, pc.ret_off, pc.ret_size, pc.new_account_state_gas);
+                    call_ops.resumeCall(parent, r, pc.ret_off, pc.ret_size, pc.new_account_state_gas);
                 },
-                .create => |pc| {
+                .create => |*pc| {
                     var r = host.finalizeCreate(pc.checkpoint, pc.new_addr, sub_result, sub_gas_rem, sub_gas_ref, return_data_buf.items, parent_spec, true, sub_reservoir);
                     // EIP-8037: on success, take the child's remaining reservoir.
                     // On failure, return all child state gas + the new_account_state_gas charged in opCreate
@@ -1080,14 +1066,14 @@ fn executeIterative(
                         // any later revert that would credit code_deposit back via the
                         // (sub_reservoir + sub_state_spent - sub_state_refunded) formula.
                         const code_deposit_state_gas = r.state_gas_used;
-                        parent.interp.gas.state_gas_spent += code_deposit_state_gas + sub_state_spent;
-                        parent.interp.gas.state_gas_refunded += sub_state_refunded;
-                        parent.interp.gas.state_gas_spilled += sub_spilled;
+                        parent.gas.state_gas_spent += code_deposit_state_gas + sub_state_spent;
+                        parent.gas.state_gas_refunded += sub_state_refunded;
+                        parent.gas.state_gas_spilled += sub_spilled;
                         // EIP-8037: CREATE onto an already-alive (pre-funded) address grows no
                         // new account, so refund the NEW_ACCOUNT state gas charged in opCreate
                         // (reference generic_create: credit_state_gas_refund when target_alive).
                         if (pc.target_alive and pc.new_account_state_gas > 0) {
-                            parent.interp.gas.refundStateGas(pc.new_account_state_gas);
+                            parent.gas.refundStateGas(pc.new_account_state_gas);
                         }
                     } else {
                         // finalizeCreate set state_gas_remaining = sub_reservoir; adjust to
@@ -1099,15 +1085,17 @@ fn executeIterative(
                         // LIFO-refund the parent's NEW_ACCOUNT pre-charge (credit_state_gas_refund):
                         // to regular gas first if that charge spilled, else the reservoir. Routing
                         // to regular gas matters — if the parent frame later halts it is burned.
-                        const na_from_gas_left = @min(pc.new_account_state_gas, parent.interp.gas.state_gas_spilled);
-                        parent.interp.gas.remaining += na_from_gas_left;
-                        parent.interp.gas.state_gas_spilled -= na_from_gas_left;
-                        parent.interp.gas.reservoir += pc.new_account_state_gas - na_from_gas_left;
-                        parent.interp.gas.state_gas_spent -|= pc.new_account_state_gas;
+                        const na_from_gas_left = @min(pc.new_account_state_gas, parent.gas.state_gas_spilled);
+                        parent.gas.remaining += na_from_gas_left;
+                        parent.gas.state_gas_spilled -= na_from_gas_left;
+                        parent.gas.reservoir += pc.new_account_state_gas - na_from_gas_left;
+                        parent.gas.state_gas_spent -|= pc.new_account_state_gas;
                     }
-                    call_ops.resumeCreate(parent.interp, r);
+                    call_ops.resumeCreate(parent, r);
                 },
+                .none => unreachable,
             }
+            parent.pending = .none;
         }
     }
 }
