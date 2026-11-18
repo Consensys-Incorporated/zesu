@@ -279,7 +279,8 @@ pub const AccountStatus = packed struct {
 
 /// A cached storage slot: original (tx-start), present, and block-start values.
 pub const EvmStorageSlot = struct {
-    /// Value at the start of the current transaction (EIP-2200 "original").
+    /// Value at the start of the current transaction (EIP-2200 "original"). Only valid
+    /// once the slot is touched in that transaction: the journal's sload refreshes it then.
     original_value: primitives.StorageValue,
     present_value: primitives.StorageValue,
     /// Value at first DB load this block; never reset by commitTx. Used by

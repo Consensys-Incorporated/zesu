@@ -446,27 +446,10 @@ pub const JournalInner = struct {
         return logs;
     }
 
-    /// Keeps the current transaction's changes: promotes storage present values to original
-    /// (EIP-2200), frees superseded code, clears the journal/transient storage/unclaimed logs
-    /// and increments transaction_id.
+    /// Keeps the current transaction's changes: frees superseded code, clears the
+    /// journal/transient storage/unclaimed logs and increments transaction_id. EIP-2200
+    /// original values are refreshed lazily, by sload, on a slot's next first touch.
     pub fn commitTx(self: *JournalInner) void {
-        // EIP-2200: find written slots via the journal rather than a full evm_state scan.
-        // Every slot whose present value changed this tx has a StorageChanged entry (reverted
-        // ones are already gone); repeat entries for a slot are idempotent. Accounts created
-        // AND selfdestructed in the same tx are skipped.
-        for (self.journal.items) |entry| {
-            const data = switch (entry) {
-                .StorageChanged => |d| d,
-                else => continue,
-            };
-            const acct = self.evm_state.getPtr(data.address) orelse continue;
-            if (acct.status.created and acct.status.self_destructed) continue;
-            const slot = acct.storage.getPtr(data.key) orelse continue;
-            if (slot.present_value == slot.original_value) continue;
-            // EIP-2200 (all forks): original_value becomes present_value at tx commit.
-            slot.original_value = slot.present_value;
-        }
-
         // Free superseded code from CodeChanged entries: it can no longer be restored and is
         // uniquely owned (see the CodeChanged revert case).
         for (self.journal.items) |entry| {
@@ -1070,6 +1053,10 @@ pub const JournalInner = struct {
             if (skip_cold_load and is_cold) {
                 return JournalLoadError.ColdLoadSkipped;
             }
+            // EIP-2200: on a slot's first touch in a transaction, nothing has written it yet,
+            // so its present value is the transaction-start ("original") value. Every write
+            // goes through here first, and a revert never lowers transaction_id.
+            if (slot.transaction_id != self.transaction_id) slot.original_value = slot.present_value;
             _ = slot.markWarmWithTransactionId(self.transaction_id);
             if (is_cold) {
                 self.journal.append(alloc_mod.get(), JournalEntryFactory.storageWarmed(address, key)) catch {};
