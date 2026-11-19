@@ -82,6 +82,7 @@ fn buildModules(
     crypto_backend: CryptoBackend,
     guest: bool,
     features: GuestFeatures,
+    keccak_memo: bool,
 ) ModuleSet {
     const use_extern = crypto_backend == .@"extern";
 
@@ -134,6 +135,9 @@ fn buildModules(
     // For primitives.mix64 — the keccak memo indexes on the same non-uniform key
     // material as the address maps and needs the identical mixer, so both share one.
     accelerators.addImport("primitives", primitives);
+    const accel_opts = b.addOptions();
+    accel_opts.addOption(bool, "keccak_memo", keccak_memo);
+    accelerators.addOptions("build_options", accel_opts);
 
     const precompile_types = mkmod(b, expose, "precompile_types", .{
         .root_source_file = b.path("src/evm/precompile/types.zig"),
@@ -497,7 +501,7 @@ pub fn addGuestObject(
     features: GuestFeatures,
 ) *std.Build.Step.Compile {
     // The extern crypto backend ignores crypto_prefix (it only locates native libraries).
-    const obj_mods = buildModules(b, target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), "", .@"extern", true, features);
+    const obj_mods = buildModules(b, target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), "", .@"extern", true, features, true);
 
     const obj = b.addObject(.{
         .name = "zesu",
@@ -566,9 +570,14 @@ pub fn build(b: *std.Build) void {
     // instead linked dynamically from /usr/local/lib and libmcl_path is unused.)
     const libblst_path = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
     const libmcl_path = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
+    const keccak_memo = b.option(
+        bool,
+        "keccak-memo",
+        "Memoize keccak256 of 20/32-byte inputs in an unsynchronized global; disable to hash from several threads (default: true)",
+    ) orelse true;
 
     // ── Module graph (exposed via addModule; backend selected by option) ──────
-    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend, false, .{});
+    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend, false, .{}, keccak_memo);
     const block_rlp_size_test_step = b.step("test-block-rlp-size", "Run block RLP size unit tests");
     const block_rlp_size_test = b.addTest(.{ .root_module = mods.block_rlp_size });
     const run_block_rlp_size_test = b.addRunArtifact(block_rlp_size_test);
@@ -751,6 +760,13 @@ pub fn build(b: *std.Build) void {
         // ── Tests ─────────────────────────────────────────────────────────────
         const test_step = b.step("test", "Run all unit tests");
         test_step.dependOn(&run_block_rlp_size_test.step);
+
+        // Standalone so CI can run them cheaply with -Dkeccak-memo=false.
+        const accel_test = b.addTest(.{ .root_module = mods.accelerators });
+        addCryptoLibraries(accel_test, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        const run_accel_test = b.addRunArtifact(accel_test);
+        b.step("test-accelerators", "Run crypto accelerator (keccak256) unit tests").dependOn(&run_accel_test.step);
+        test_step.dependOn(&run_accel_test.step);
 
         for ([_]struct { m: *std.Build.Module, name: []const u8 }{
             .{ .m = mods.precompile, .name = "precompile" },
