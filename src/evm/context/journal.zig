@@ -369,8 +369,13 @@ pub const SloadProbe = struct { value: ?primitives.StorageValue, is_cold: bool }
 ///
 /// Spec Id is a essential information for the Journal.
 pub const JournalInner = struct {
-    /// The current evm_state
+    /// The current evm_state. Entries move or go away only in `loadAccountMutOptionalCode`
+    /// (insert), `reserveAccounts`, `removeAccount` and `finalize`; each clears `storage_account`.
     evm_state: state.EvmState,
+    /// Account of the last storage access, so consecutive SLOAD/SSTOREs of one contract look
+    /// it up once. Points into `evm_state`; `storage_address` is its key.
+    storage_account: ?*state.Account = null,
+    storage_address: primitives.Address = undefined,
     /// Transient storage that is discarded after every transaction.
     ///
     /// See EIP-1153.
@@ -515,6 +520,7 @@ pub const JournalInner = struct {
 
         const evm_state = self.evm_state;
         self.evm_state = state.EvmState.init(alloc_mod.get());
+        self.storage_account = null;
         for (self.logs.items) |log| log.deinit(alloc_mod.get());
         self.logs.clearRetainingCapacity();
         self.pending_burns.clearRetainingCapacity();
@@ -524,6 +530,35 @@ pub const JournalInner = struct {
         self.transaction_id = 0;
 
         return evm_state;
+    }
+
+    /// Pre-sizes `evm_state` for `count` accounts.
+    pub fn reserveAccounts(self: *JournalInner, count: u32) !void {
+        self.storage_account = null;
+        try self.evm_state.ensureTotalCapacity(count);
+    }
+
+    /// Drops a loaded account and its storage map, so its next access loads it again.
+    pub fn removeAccount(self: *JournalInner, address: primitives.Address) void {
+        self.storage_account = null;
+        if (self.evm_state.fetchRemove(address)) |kv| {
+            var account = kv.value;
+            account.storage.deinit();
+        }
+    }
+
+    /// The loaded account at `address`, for the storage opcodes.
+    inline fn storageAccount(self: *JournalInner, address: primitives.Address) ?*state.Account {
+        if (self.storage_account) |account| {
+            if (std.mem.eql(u8, &self.storage_address, &address)) {
+                if (std.debug.runtime_safety) std.debug.assert(self.evm_state.getPtr(address) == account);
+                return account;
+            }
+        }
+        const account = self.evm_state.getPtr(address) orelse return null;
+        self.storage_account = account;
+        self.storage_address = address;
+        return account;
     }
 
     /// Return reference to state.
@@ -996,6 +1031,8 @@ pub const JournalInner = struct {
                 }
             else
                 state.Account.newNotExisting(self.transaction_id);
+            // The insert may grow the map.
+            self.storage_account = null;
             const gop = try self.evm_state.getOrPut(address);
             gop.value_ptr.* = new_account;
             // Inserted with transaction_id = current, so also a first touch.
@@ -1028,9 +1065,9 @@ pub const JournalInner = struct {
     }
 
     /// Check whether a storage slot is cold WITHOUT loading it from the database.
-    pub fn isStorageCold(self: *const JournalInner, address: primitives.Address, key: primitives.StorageKey) bool {
-        if (self.evm_state.get(address)) |acct| {
-            if (acct.storage.get(key)) |slot| {
+    pub fn isStorageCold(self: *JournalInner, address: primitives.Address, key: primitives.StorageKey) bool {
+        if (self.storageAccount(address)) |acct| {
+            if (acct.storage.getPtr(key)) |slot| {
                 var is_cold = slot.isColdTransactionId(self.transaction_id);
                 if (is_cold and self.warm_addresses.isStorageWarm(address, key)) {
                     is_cold = false;
@@ -1044,8 +1081,8 @@ pub const JournalInner = struct {
     /// SLOAD's pre-charge probe. A slot already loaded and warm in this transaction returns its
     /// value: reading it has no side effects, so the caller skips `sload`. Otherwise `value` is
     /// null and `is_cold` is what `isStorageCold` would return.
-    pub fn sloadProbe(self: *const JournalInner, address: primitives.Address, key: primitives.StorageKey) SloadProbe {
-        if (self.evm_state.getPtr(address)) |acct| {
+    pub fn sloadProbe(self: *JournalInner, address: primitives.Address, key: primitives.StorageKey) SloadProbe {
+        if (self.storageAccount(address)) |acct| {
             if (acct.storage.getPtr(key)) |slot| {
                 if (!slot.isColdTransactionId(self.transaction_id)) return .{ .value = slot.present_value, .is_cold = false };
             }
@@ -1055,7 +1092,7 @@ pub const JournalInner = struct {
 
     /// Loads a storage slot and marks it warm. The account must already be loaded.
     pub fn sload(self: *JournalInner, db: anytype, address: primitives.Address, key: primitives.StorageKey, skip_cold_load: bool) !StateLoad(primitives.StorageValue) {
-        const account = self.evm_state.getPtr(address).?;
+        const account = self.storageAccount(address).?;
         const is_newly_created = account.isCreated();
 
         // One probe for both outcomes: a miss leaves the entry reserved for the loaded value.
@@ -1099,7 +1136,7 @@ pub const JournalInner = struct {
     /// The account must already be loaded.
     pub fn sstore(self: *JournalInner, db: anytype, address: primitives.Address, key: primitives.StorageKey, new_value: primitives.StorageValue, skip_cold_load: bool) !StateLoad(SStoreResult) {
         const present = try self.sload(db, address, key, skip_cold_load);
-        const acc = self.evm_state.getPtr(address).?;
+        const acc = self.storageAccount(address).?;
 
         const slot = acc.storage.getPtr(key).?;
 
@@ -1196,7 +1233,7 @@ pub fn Journal(comptime DB: type) type {
             return &self.database;
         }
 
-        pub fn sloadProbe(self: *const @This(), address: primitives.Address, key: primitives.StorageKey) SloadProbe {
+        pub fn sloadProbe(self: *@This(), address: primitives.Address, key: primitives.StorageKey) SloadProbe {
             return self.inner.sloadProbe(address, key);
         }
 
@@ -1370,7 +1407,7 @@ pub fn Journal(comptime DB: type) type {
         }
 
         /// Check whether a storage slot is cold WITHOUT loading it from the database.
-        pub fn isStorageCold(self: *const @This(), address: primitives.Address, key: primitives.StorageKey) bool {
+        pub fn isStorageCold(self: *@This(), address: primitives.Address, key: primitives.StorageKey) bool {
             return self.inner.isStorageCold(address, key);
         }
 

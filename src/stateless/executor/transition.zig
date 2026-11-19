@@ -700,7 +700,7 @@ pub fn transitionWithContext(
 
     // Pre-size evm_state to avoid repeated grows: all pre-state accounts plus a few per tx.
     const account_hint: u32 = @intCast(pre_alloc_in.count() + txs.len * 4);
-    try ctx.journaled_state.inner.evm_state.ensureTotalCapacity(account_hint);
+    try ctx.journaled_state.inner.reserveAccounts(account_hint);
     // commitTx and discardTx both clear the journal, so it holds one transaction's entries:
     // size it for a heavy transaction, not the whole block (which would waste peak heap).
     try ctx.journaled_state.inner.journal.ensureTotalCapacity(alloc_mod.get(), 4096);
