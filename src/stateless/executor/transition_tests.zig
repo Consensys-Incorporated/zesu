@@ -551,3 +551,10 @@ test "a call transaction with nonce 2^64-2 is compared with the sender nonce" {
     try std.testing.expectError(error.NonceMismatchTooHigh, runTransferAtNonce(5, max_nonce - 1));
     _ = try runTransferAtNonce(max_nonce - 1, max_nonce - 1);
 }
+
+// The shape of the spec test tests/frontier/validation/test_transaction.py::test_tx_max_nonce:
+// the sender sits at 2^64-1 too, so the nonce comparison passes.
+test "a call transaction with nonce 2^64-1 is rejected when the sender is at 2^64-1" {
+    const max_nonce = std.math.maxInt(u64);
+    try std.testing.expectError(error.NonceIsMax, runTransferAtNonce(max_nonce, max_nonce));
+}

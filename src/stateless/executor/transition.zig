@@ -773,6 +773,9 @@ pub fn transitionWithContext(
             }
         }
 
+        // EIP-2681: 2^64-1 is not a usable nonce, for any transaction kind.
+        if (tx.nonce == std.math.maxInt(u64)) return error.NonceIsMax;
+
         // 1c. EIP-7825 (Osaka+): max gas limit per transaction = TX_GAS_LIMIT_CAP
         if (primitives.isEnabledIn(spec, .osaka) and !primitives.isEnabledIn(spec, .amsterdam) and tx.gas > primitives.TX_GAS_LIMIT_CAP) {
             return error.GasLimitExceedsCap;
@@ -992,19 +995,6 @@ pub fn transitionWithContext(
                 if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
                 ctx.tx.authorization_list = null;
                 return if (sender_info.nonce > tx_nonce) error.NonceMismatch else error.NonceMismatchTooHigh;
-            }
-
-            // EIP-2681: CREATE is invalid when sender nonce == maxInt(u64) (would overflow on increment).
-            if (tx.to == null and sender_info.nonce == std.math.maxInt(u64)) {
-                ctx.journaled_state.discardTx();
-                if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
-                ctx.tx.data = null;
-                ctx.tx.access_list.deinit();
-                if (ctx.tx.blob_hashes) |*bh| bh.deinit(alloc_mod.get());
-                ctx.tx.blob_hashes = null;
-                if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
-                ctx.tx.authorization_list = null;
-                return error.NonceIsMax;
             }
 
             // Base fee check (EIP-1559): gas_price (= maxFeePerGas for type 2/3/4) must cover basefee.

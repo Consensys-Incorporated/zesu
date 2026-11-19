@@ -225,11 +225,9 @@ pub const Validation = struct {
             }
         }
 
-        // EIP-2681: CREATE tx with sender nonce at u64 max is invalid
-        if (tx.kind == .Create) {
-            if (account_info.nonce == std.math.maxInt(u64)) {
-                return ValidationError.NonceIsMax;
-            }
+        // EIP-2681: a sender at nonce 2^64-1 cannot send; the increment below would overflow.
+        if (account_info.nonce == std.math.maxInt(u64)) {
+            return ValidationError.NonceIsMax;
         }
 
         // Validate nonce
