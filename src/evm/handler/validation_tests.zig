@@ -201,6 +201,32 @@ test "validateAgainstStateAndDeductCaller: gas fee plus value past 2^256 is an i
     try std.testing.expectError(ValidationError.InsufficientBalance, result);
 }
 
+// Control: the same comparison at its edge, balance == gas fee + value == 2^256 - 1, passes.
+test "validateAgainstStateAndDeductCaller: gas fee plus value of exactly 2^256 - 1 is affordable" {
+    const caller: primitives.Address = [_]u8{0xED} ** 20;
+
+    var db = database.InMemoryDB.init(std.heap.c_allocator);
+    defer db.deinit();
+    try db.insertAccount(caller, state.AccountInfo{
+        .balance = std.math.maxInt(primitives.U256),
+        .nonce = 0,
+        .code_hash = primitives.KECCAK_EMPTY,
+        .code = null,
+    });
+
+    var ctx = context.DefaultContext.new(db, primitives.SpecId.prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
+
+    ctx.tx.caller = caller;
+    ctx.tx.gas_limit = 21000;
+    ctx.tx.gas_price = 1;
+    ctx.tx.value = std.math.maxInt(primitives.U256) - 21000;
+    ctx.tx.nonce = 0;
+
+    try Validation.validateAgainstStateAndDeductCaller(&mevm.evm, 21000);
+}
+
 // Reference check_transaction: for a blob transaction
 // `max_gas_fee += Uint(calculate_total_blob_gas(tx)) * Uint(tx.max_fee_per_blob_gas)`
 // before the same balance comparison.

@@ -498,3 +498,23 @@ test "an empty account touched by a zero-amount withdrawal is deleted" {
     const wd = [_]input.Withdrawal{.{ .index = 0, .validator_index = 0, .address = EmptyAccountDb.EMPTY, .amount = 0 }};
     try std.testing.expect(try deletesEmptyAccount(&wd));
 }
+
+// Reference check_transaction (forks/amsterdam/fork.py, same in earlier forks):
+// `if Uint(sender_account.balance) < max_gas_fee + Uint(tx.value): raise InsufficientBalanceError`,
+// in unbounded integers.
+test "a transaction whose gas fee plus value exceeds 2^256 is rejected for insufficient balance" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var txs = [_]input.TxInput{.{
+        .from = TEST_SENDER,
+        .to = TEST_RECIPIENT,
+        .nonce = 0,
+        .gas = 100_000,
+        .gas_price = 1,
+        .value = std.math.maxInt(u256),
+    }};
+
+    var ctx = makeTestCtx();
+    try std.testing.expectError(error.InsufficientBalance, runTestBlock(arena_state.allocator(), &ctx, &txs));
+}
