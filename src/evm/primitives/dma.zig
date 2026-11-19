@@ -8,7 +8,8 @@
 //!
 //! The extended form needs no parameter store or read, so a 32-byte copy costs
 //! `DMA_MEMCPY_COST` plus two instructions, against eight instructions and eight
-//! memory accesses for four load/store pairs.
+//! memory accesses for four load/store pairs. That saving exists only inline, which is
+//! why this asm lives in zesu rather than behind an extern accelerator call.
 //!
 //! Both instructions must be in one `asm` block: the transpiler matches the
 //! `csrs`/`addi` pair, and anything scheduled between them breaks recognition.

@@ -1,5 +1,7 @@
 //! What the zkVM the guest object is built for provides beyond rv64im: build.zig's
 //! `GuestFeatures`, as comptime flags. All false for native builds and the rv64im baseline.
+//! zkVM-specific code is compiled into zesu here, not linked through the accelerator
+//! interface, because it has to inline into the interpreter; see `GuestFeatures` in build.zig.
 
 const build_options = @import("build_options");
 

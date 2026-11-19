@@ -43,6 +43,14 @@ const ModuleSet = struct {
 /// What the zkVM a guest object is built for provides beyond the rv64im baseline. Every field
 /// defaults to false: the portable guest, and every native build. Each one only selects code at
 /// comptime; the zkVM project that links the object must provide what it enables.
+///
+/// Deliberate exception to "zkVM-specific code lives in the zkVM build": these paths are
+/// compiled into zesu because they must be inlined into zesu's own hot code. `dma` replaces
+/// 32-byte stack copies with a two-instruction asm pair; behind an extern call the call
+/// overhead would cost more than it saves. `jump_dest` and `arith256_mod` would tolerate a
+/// call, but neither is in the zkvm-standards accelerator interface yet, so they sit here
+/// too. Move them to the accelerator interface once standardized (arith256_mod: eth-act
+/// zkvm-standards PR #22).
 pub const GuestFeatures = struct {
     /// Fixed-size copy accelerator, used by `primitives.dma`
     /// (currently: the ZisK DMA chip).
@@ -74,6 +82,7 @@ fn buildModules(
     crypto_backend: CryptoBackend,
     guest: bool,
     features: GuestFeatures,
+    keccak_memo: bool,
 ) ModuleSet {
     const use_extern = crypto_backend == .@"extern";
 
@@ -126,6 +135,9 @@ fn buildModules(
     // For primitives.mix64 — the keccak memo indexes on the same non-uniform key
     // material as the address maps and needs the identical mixer, so both share one.
     accelerators.addImport("primitives", primitives);
+    const accel_opts = b.addOptions();
+    accel_opts.addOption(bool, "keccak_memo", keccak_memo);
+    accelerators.addOptions("build_options", accel_opts);
 
     const precompile_types = mkmod(b, expose, "precompile_types", .{
         .root_source_file = b.path("src/evm/precompile/types.zig"),
@@ -489,7 +501,7 @@ pub fn addGuestObject(
     features: GuestFeatures,
 ) *std.Build.Step.Compile {
     // The extern crypto backend ignores crypto_prefix (it only locates native libraries).
-    const obj_mods = buildModules(b, target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), "", .@"extern", true, features);
+    const obj_mods = buildModules(b, target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), "", .@"extern", true, features, true);
 
     const obj = b.addObject(.{
         .name = "zesu",
@@ -502,8 +514,7 @@ pub fn addGuestObject(
 
 /// Build a relocatable rv64im ELF guest object on the freestanding riscv64 baseline plus
 /// `extra_features`, and wire an install step named `step_name` that publishes it to
-/// `install_name` under zig-out. Backs the published `rv64im-object` (and, for now,
-/// `zisk-object`) release artifacts.
+/// `install_name` under zig-out. Backs the published `rv64im-object` release artifact.
 fn addRv64imObjectStep(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
@@ -559,9 +570,14 @@ pub fn build(b: *std.Build) void {
     // instead linked dynamically from /usr/local/lib and libmcl_path is unused.)
     const libblst_path = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
     const libmcl_path = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
+    const keccak_memo = b.option(
+        bool,
+        "keccak-memo",
+        "Memoize keccak256 of 20/32-byte inputs in an unsynchronized global; disable to hash from several threads (default: true)",
+    ) orelse true;
 
     // ── Module graph (exposed via addModule; backend selected by option) ──────
-    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend, false, .{});
+    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend, false, .{}, keccak_memo);
     const block_rlp_size_test_step = b.step("test-block-rlp-size", "Run block RLP size unit tests");
     const block_rlp_size_test = b.addTest(.{ .root_module = mods.block_rlp_size });
     const run_block_rlp_size_test = b.addRunArtifact(block_rlp_size_test);
@@ -745,6 +761,13 @@ pub fn build(b: *std.Build) void {
         const test_step = b.step("test", "Run all unit tests");
         test_step.dependOn(&run_block_rlp_size_test.step);
 
+        // Standalone so CI can run them cheaply with -Dkeccak-memo=false.
+        const accel_test = b.addTest(.{ .root_module = mods.accelerators });
+        addCryptoLibraries(accel_test, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        const run_accel_test = b.addRunArtifact(accel_test);
+        b.step("test-accelerators", "Run crypto accelerator (keccak256) unit tests").dependOn(&run_accel_test.step);
+        test_step.dependOn(&run_accel_test.step);
+
         for ([_]struct { m: *std.Build.Module, name: []const u8 }{
             .{ .m = mods.precompile, .name = "precompile" },
             .{ .m = mods.interpreter, .name = "interpreter" },
@@ -773,13 +796,12 @@ pub fn build(b: *std.Build) void {
     // alt_fl_alloc.zig free-list allocator (over ZKVM_HEAP_POS/TOP), so it needs no set() call.
     //
     // `rv64im-object` targets the zkvm-standards baseline (M + Zicclsm + unaligned scalar
-    // mem) shared across zkVM backends. `zisk-object` adds Zbb/Zbs (single ops on ZisK, but
-    // not on every zkVM, so kept off the shared baseline) and the ZisK DMA feature.
+    // mem) shared across zkVM backends. zkVM-specific ISA extensions and GuestFeatures are
+    // left to each zkVM's own build, which calls addGuestObject with its own target.
     //
-    // Build with: zig build rv64im-object | zig build zisk-object
+    // Build with: zig build rv64im-object
     // Verify undefined refs: llvm-nm zig-out/lib/<name> | grep ' U '
     addRv64imObjectStep(b, optimize, &.{ .m, .zicclsm, .unaligned_scalar_mem }, "rv64im-object", "Build relocatable rv64im ELF object (zesu.o)", "lib/zesu.o", .{});
-    addRv64imObjectStep(b, optimize, &.{ .m, .zicclsm, .unaligned_scalar_mem, .zbb, .zbs }, "zisk-object", "Build relocatable rv64im+Zbb+Zbs ELF object for the ZisK guest (zesu-zisk.o)", "lib/zesu-zisk.o", .{ .dma = true });
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
     const spec_test_version = "tests@v21.0.2";
