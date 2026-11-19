@@ -52,12 +52,6 @@ pub const WitnessDatabase = struct {
     /// trie walk, and lets it skip unchanged accounts (originalAccount). Accounts absent
     /// from pre-state are cached with exists = false and EMPTY_TRIE_HASH.
     original_accounts: std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80),
-    /// mpt.validateSecuredTriePaths's filter over `node_index` and stack.
-    path_check: mpt.PathCheck,
-    /// Storage roots whose witness trie has passed checkTriePaths, so each trie the
-    /// block reads is walked once.
-    checked_storage_roots: std.HashMap(primitives.Hash, void, primitives.HashContext, 80),
-    alloc: std.mem.Allocator,
     /// Set only while a system call runs. Its origin is SYSTEM_ADDRESS, whose account the
     /// reference never reads, so a missing proof for it is accepted only then.
     system_call_origin: bool = false,
@@ -69,9 +63,6 @@ pub const WitnessDatabase = struct {
         nonce: u64 = 0,
         balance: u256 = 0,
         code_hash: primitives.Hash = primitives.KECCAK_EMPTY,
-        /// Set once storage() has found the storage trie empty or looked its root up in
-        /// checked_storage_roots, so later slot reads skip both.
-        storage_paths_checked: bool = false,
 
         fn of(as: ?mpt.AccountState) OriginalAccount {
             const a = as orelse return .{ .storage_root = EMPTY_TRIE_HASH };
@@ -122,9 +113,6 @@ pub const WitnessDatabase = struct {
             .block_hashes = block_hashes,
             .deployed_codes = std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80).init(alloc),
             .original_accounts = std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80).init(alloc),
-            .path_check = try mpt.PathCheck.init(alloc, node_index),
-            .checked_storage_roots = std.HashMap(primitives.Hash, void, primitives.HashContext, 80).init(alloc),
-            .alloc = alloc,
         };
     }
 
@@ -134,14 +122,6 @@ pub const WitnessDatabase = struct {
         while (bc_it.next()) |bc| bc.deinit();
         self.deployed_codes.deinit();
         self.original_accounts.deinit();
-        self.path_check.deinit(self.alloc);
-        self.checked_storage_roots.deinit();
-    }
-
-    /// Rejects a witness trie under `root` whose paths do not end at the 64-nibble key
-    /// length (see mpt.validateSecuredTriePaths).
-    pub fn checkTriePaths(self: *const Self, root: primitives.Hash) DbError!void {
-        mpt.validateSecuredTriePaths(root, self.node_index, &self.path_check) catch return DbError.InvalidWitness;
     }
 
     /// Called by the journal to register code the block itself writes: bytecodes deployed
@@ -190,23 +170,21 @@ pub const WitnessDatabase = struct {
             self.pre_state_root,
             address,
             self.node_index,
-        ) catch |err| switch (err) {
+        ) catch {
             // EIP-8025 witness completeness: InvalidProof means a trie node needed to
             // resolve this account is missing from the witness. A COMPLETE witness proves
             // every touched account's (non-)existence — a truly-absent account resolves to
             // null via an exclusion proof, never InvalidProof — so a missing node means the
             // witness is incomplete for a touched account and replay must fail.
             // Exception: a system call's origin, SYSTEM_ADDRESS, is never read from
-            // pre-state by the reference, so its proof is legitimately absent. Any other
-            // read of SYSTEM_ADDRESS (a withdrawal, BALANCE) must be proved.
-            error.InvalidProof => {
-                if (self.system_call_origin and std.mem.eql(u8, &address, &SYSTEM_ADDRESS)) {
-                    _ = self.original_accounts.remove(address);
-                    return null;
-                }
-                return DbError.InvalidWitness;
-            },
-            else => return DbError.InvalidWitness,
+            // pre-state by the reference, so no error on that read counts: neither a
+            // missing node nor a malformed one the lookup reaches. Any other read of
+            // SYSTEM_ADDRESS (a withdrawal, BALANCE) must be proved.
+            if (self.system_call_origin and std.mem.eql(u8, &address, &SYSTEM_ADDRESS)) {
+                _ = self.original_accounts.remove(address);
+                return null;
+            }
+            return DbError.InvalidWitness;
         };
 
         // Proven: publish it to the reserved slot.
@@ -247,49 +225,34 @@ pub const WitnessDatabase = struct {
         address: primitives.Address,
         index: primitives.StorageKey,
     ) !primitives.StorageValue {
-        const orig = self.original_accounts.getPtr(address) orelse blk: {
+        const storage_root = if (self.original_accounts.getPtr(address)) |o| o.storage_root else blk: {
             const account_state = mpt.verifyAccountIndexed(
                 self.pre_state_root,
                 address,
                 self.node_index,
-            ) catch |err| switch (err) {
+            ) catch {
                 // InvalidProof means the witness lacks the node needed to prove
                 // anything here — genuine absence is reported as a null
                 // account_state below ("valid non-inclusion" in mpt/main.zig).
                 // Defaulting to EMPTY_TRIE_HASH would make every subsequent slot
                 // read on this account return 0, i.e. a wrong execution result
                 // from an incomplete witness. Matches basic()'s handling.
-                error.InvalidProof => return DbError.InvalidWitness,
-                else => return DbError.InvalidWitness,
+                return DbError.InvalidWitness;
             };
             // OOM panics rather than propagates: see basic()'s comment above for why.
-            self.original_accounts.put(address, OriginalAccount.of(account_state)) catch @panic("out of memory");
-            break :blk self.original_accounts.getPtr(address).?;
+            const orig = OriginalAccount.of(account_state);
+            self.original_accounts.put(address, orig) catch @panic("out of memory");
+            break :blk orig.storage_root;
         };
-        const storage_root = orig.storage_root;
-        // The reference checks a storage trie the first time the block reads it.
-        if (!orig.storage_paths_checked) {
-            if (!std.mem.eql(u8, &storage_root, &EMPTY_TRIE_HASH)) {
-                // OOM panics rather than propagates: see basic()'s comment above for why.
-                const gop = self.checked_storage_roots.getOrPut(storage_root) catch @panic("out of memory");
-                if (!gop.found_existing) self.checkTriePaths(storage_root) catch |err| {
-                    _ = self.checked_storage_roots.remove(storage_root);
-                    return err;
-                };
-            }
-            orig.storage_paths_checked = true;
-        }
         const slot = u256ToHash(index);
-        const value = mpt.verifyStorageIndexed(storage_root, slot, self.node_index) catch |err| switch (err) {
+        return mpt.verifyStorageIndexed(storage_root, slot, self.node_index) catch {
             // A slot that is genuinely unset yields null from verifyStorageIndexed
             // (valid non-inclusion), which becomes 0 without an error. Reaching
             // InvalidProof means the storage node is missing from the witness, so
             // returning 0 would fabricate a value — the slot's real contents are
             // unknown and may be non-zero.
-            error.InvalidProof => return DbError.InvalidWitness,
-            else => return DbError.InvalidWitness,
+            return DbError.InvalidWitness;
         };
-        return value;
     }
 
     // ── hasNonZeroStorageForAddress ─────────────────────────────────────────

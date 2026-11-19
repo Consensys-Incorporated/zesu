@@ -49,7 +49,8 @@ pub fn decodeItem(input: []const u8) error{InvalidRlp}!DecodeResult {
         const len_len: usize = first - 0xb7;
         if (1 + len_len > input.len) return error.InvalidRlp;
         const len = readBigEndian(input[1 .. 1 + len_len]) catch return error.InvalidRlp;
-        if (1 + len_len + len > input.len) return error.InvalidRlp;
+        // Against the bytes left, so a huge claimed length cannot overflow the sum.
+        if (len > input.len - 1 - len_len) return error.InvalidRlp;
         return .{
             .item = .{ .bytes = input[1 + len_len .. 1 + len_len + len] },
             .consumed = 1 + len_len + len,
@@ -64,12 +65,32 @@ pub fn decodeItem(input: []const u8) error{InvalidRlp}!DecodeResult {
         const len_len: usize = first - 0xf7;
         if (1 + len_len > input.len) return error.InvalidRlp;
         const payload_len = readBigEndian(input[1 .. 1 + len_len]) catch return error.InvalidRlp;
-        if (1 + len_len + payload_len > input.len) return error.InvalidRlp;
+        // Against the bytes left, so a huge claimed length cannot overflow the sum.
+        if (payload_len > input.len - 1 - len_len) return error.InvalidRlp;
         return .{
             .item = .{ .list = input[1 + len_len .. 1 + len_len + payload_len] },
             .consumed = 1 + len_len + payload_len,
         };
     }
+}
+
+/// Whether `input`, an embedded trie node, is exactly one canonical item whose nested items
+/// are all canonical, as the reference decodes a reached node whole. Embedded nodes are
+/// under 32 bytes, and anything longer is rejected, which bounds the recursion.
+pub fn isWellFormed(input: []const u8) bool {
+    if (input.len >= 32) return false;
+    const r = decodeItemCanonical(input) catch return false;
+    if (r.consumed != input.len) return false;
+    var rest = switch (r.item) {
+        .bytes => return true,
+        .list => |payload| payload,
+    };
+    while (rest.len > 0) {
+        const item = decodeItemCanonical(rest) catch return false;
+        if (!isWellFormed(rest[0..item.consumed])) return false;
+        rest = rest[item.consumed..];
+    }
+    return true;
 }
 
 // First-byte boundaries of the RLP encodings, and the longest payload the short form holds.

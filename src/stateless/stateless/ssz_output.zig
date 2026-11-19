@@ -1,4 +1,4 @@
-//! SSZ serialization for SszStatelessValidationResult (tests-zkevm@v21.0.6 layout).
+//! SSZ serialization for SszStatelessValidationResult (tests-zkevm@v21.0.7 layout).
 //!
 //! Output layout (43 bytes, all fields fixed-size):
 //!   [0..32]  new_payload_request_root  Bytes32  SSZ hash_tree_root of SszNewPayloadRequest
@@ -109,15 +109,12 @@ fn mixInLength(root: [32]u8, length: u64) [32]u8 {
 ///   leaves[0..len] are the actual values
 ///   leaves[len..2^depth] are all zero chunks.
 fn sparseRoot(leaves: []const [32]u8, depth: u8) [32]u8 {
-    if (depth == 0) {
-        return if (leaves.len >= 1) leaves[0] else [_]u8{0} ** 32;
-    }
+    if (leaves.len == 0) return zeroHash(depth);
+    if (depth == 0) return leaves[0];
     const half: usize = @as(usize, 1) << @intCast(depth - 1);
     const left_leaves = if (leaves.len > half) leaves[0..half] else leaves;
     const right_leaves = if (leaves.len > half) leaves[half..] else &[_][32]u8{};
-    const left = sparseRoot(left_leaves, depth - 1);
-    const right = if (leaves.len <= half) zeroHash(depth - 1) else sparseRoot(right_leaves, depth - 1);
-    return sha2(left, right);
+    return sha2(sparseRoot(left_leaves, depth - 1), sparseRoot(right_leaves, depth - 1));
 }
 
 /// Merkleize exactly N chunks (N must be a power of two).
@@ -315,11 +312,11 @@ fn htWithdrawalList(alloc: std.mem.Allocator, withdrawals: []const input.Withdra
 
 // ── SszNewPayloadRequest hash_tree_root ───────────────────────────────────────
 
-/// hash_tree_root for ProgressiveList[Bytes32] (versioned_hashes).
+/// hash_tree_root for List[Bytes32, MAX_BLOB_COMMITMENTS_PER_BLOCK] (versioned_hashes).
 /// Bytes32 is a ByteVector, not a basic type, so elements are unpacked —
-/// each hash is already exactly one chunk.
+/// each hash is already exactly one chunk; 4096 = 2^12 leaves.
 fn htVersionedHashes(hashes: []const [32]u8) [32]u8 {
-    return progressiveListRoot(hashes);
+    return mixInLength(sparseRoot(hashes, 12), hashes.len);
 }
 
 // ── SszExecutionRequests hash_tree_root ──────────────────────────────────────
@@ -436,9 +433,9 @@ fn htExecutionRequests(alloc: std.mem.Allocator, er: input.ExecutionRequests) ![
 /// Compute the SSZ hash_tree_root of SszNewPayloadRequest.
 /// This is the `new_payload_request_root` field in the output.
 ///
-/// SszNewPayloadRequest is a plain Container with 4 fields (already power of 2):
+/// SszNewPayloadRequest is a ProgressiveContainer(active_fields=[1] * 4):
 ///   execution_payload:        SszExecutionPayload
-///   versioned_hashes:         ProgressiveList[Bytes32]
+///   versioned_hashes:         List[Bytes32, MAX_BLOB_COMMITMENTS_PER_BLOCK]
 ///   parent_beacon_block_root: Bytes32
 ///   execution_requests:       SszExecutionRequests
 pub fn newPayloadRequestRoot(
@@ -450,8 +447,7 @@ pub fn newPayloadRequestRoot(
     const h2 = htBytes32(req.parent_beacon_block_root);
     const h3 = try htExecutionRequests(alloc, req.execution_requests);
 
-    // merkleize([h0, h1, h2, h3]): 4 chunks, power of 2
-    return sha2(sha2(h0, h1), sha2(h2, h3));
+    return progressiveContainerRoot(&.{ h0, h1, h2, h3 }, 4);
 }
 
 // ── Serialize output ──────────────────────────────────────────────────────────

@@ -130,11 +130,7 @@ fn buildLeafNode(buf: []u8, key_hash: primitives.Hash, value: []const u8) usize 
     return encList(buf, 0, payload[0..pl]);
 }
 
-fn buildEmptyBranchNode(buf: []u8) usize {
-    buf[0] = 0xd1;
-    @memset(buf[1..18], 0x80);
-    return 18;
-}
+const buildBranchMissingKey = mpt.testing.buildBranchMissingKey;
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
@@ -180,14 +176,14 @@ test "basic returns verified AccountInfo" {
     try std.testing.expectEqualSlices(u8, &KECCAK_EMPTY, &info.?.code_hash);
 }
 
-// ─── Test 2: basic — non-inclusion via empty branch root ──────────────────────
+// ─── Test 2: basic — non-inclusion via empty branch slot ──────────────────────
 
-test "basic returns null for valid non-inclusion proof (empty trie)" {
+test "basic returns null for valid non-inclusion proof (empty branch slot)" {
     var address: primitives.Address = @splat(0x00);
     address[19] = 0x22;
 
-    var branch: [18]u8 = undefined;
-    const branch_len = buildEmptyBranchNode(&branch);
+    var branch: [83]u8 = undefined;
+    const branch_len = buildBranchMissingKey(&branch, mpt.keccak256(&address));
     const state_root = mpt.keccak256(branch[0..branch_len]);
 
     const w = input.StateWitness{
@@ -579,10 +575,10 @@ test "hasNonZeroStorageForAddress reports false for a provably absent account" {
     var address: primitives.Address = @splat(0x00);
     address[19] = 0x99;
 
-    // An empty branch root proves non-inclusion for every address, so the answer
-    // is knowable and must be `false`, not an error.
-    var branch: [18]u8 = undefined;
-    const branch_len = buildEmptyBranchNode(&branch);
+    // The branch root proves the address absent, so the answer is knowable and must
+    // be `false`, not an error.
+    var branch: [83]u8 = undefined;
+    const branch_len = buildBranchMissingKey(&branch, mpt.keccak256(&address));
     const branch_bytes = branch[0..branch_len];
     const state_root = mpt.keccak256(branch_bytes);
 
@@ -764,6 +760,29 @@ test "basic of SYSTEM_ADDRESS in a system call is null and not cached" {
     try std.testing.expect(wdb.originalAccount(primitives.SYSTEM_ADDRESS) == null);
 
     // Outside a system call the same read must be proved, not served from a stale entry.
+    wdb.system_call_origin = false;
+    try std.testing.expectError(error.InvalidWitness, wdb.basic(primitives.SYSTEM_ADDRESS));
+}
+
+test "basic of SYSTEM_ADDRESS in a system call ignores a malformed node on its path" {
+    // A root whose two-item list has an empty HP key: a lookup reaching it fails with a
+    // node error, not InvalidProof.
+    const root = [_]u8{ 0xc2, 0x80, 0x80 };
+    var w = emptyNodesWitness();
+    w.state_root = mpt.keccak256(&root);
+    w.nodes = &.{&root};
+
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
+
+    const lookup = mpt.verifyAccountIndexed(w.state_root, primitives.SYSTEM_ADDRESS, &idx);
+    try std.testing.expect(if (lookup) |_| false else |err| err != error.InvalidProof);
+
+    wdb.system_call_origin = true;
+    try std.testing.expect((try wdb.basic(primitives.SYSTEM_ADDRESS)) == null);
+
     wdb.system_call_origin = false;
     try std.testing.expectError(error.InvalidWitness, wdb.basic(primitives.SYSTEM_ADDRESS));
 }

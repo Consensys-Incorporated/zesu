@@ -63,7 +63,8 @@ pub fn hpEncode(nibbles: []const u8, is_leaf: bool, out: []u8) []u8 {
 /// Decode a hex-prefix (compact) encoded path into nibbles written to `out`.
 ///
 /// Returns `{ is_leaf, len }` where `len` is the number of nibbles written.
-/// `out` must have length >= bytes.len * 2.
+/// A path with more nibbles than `out` holds is error.InvalidHp: witness paths are
+/// untrusted, and callers decode into fixed stack buffers.
 pub fn hpDecode(
     bytes: []const u8,
     out: []u8,
@@ -75,6 +76,7 @@ pub fn hpDecode(
 
     const is_leaf = (flag & 0x02) != 0;
     const is_odd = (flag & 0x01) != 0;
+    if (2 * (bytes.len - 1) + @intFromBool(is_odd) > out.len) return error.InvalidHp;
 
     var out_len: usize = 0;
 

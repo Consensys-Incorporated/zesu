@@ -69,7 +69,7 @@ All inputs are read from **stdin** by default, or from the file at `$ZESU_INPUT`
 
 ### SSZ schema
 
-tests-zkevm@v21.0.6 layout (the zkevm fixture release `zig build fetch-zkevm-fixtures` downloads). A 2-byte big-endian schema id precedes the container: the
+tests-zkevm@v21.0.7 layout (the zkevm fixture release `zig build fetch-zkevm-fixtures` downloads). A 2-byte big-endian schema id precedes the container: the
 `ProtocolFork` index, then the schema revision (`0x1501` = Amsterdam, revision 1).
 
 ```
@@ -170,9 +170,9 @@ All fixtures come from [ethereum/execution-specs releases](https://github.com/et
 
 | Release series | Pinned in `build.zig` | Used by |
 |---|---|---|
-| `tests@` | `tests@v21.0.1` | `fetch-fixtures`, `state-tests`, `blockchain-tests`, `transaction-tests`, Hive (`tools/hive/README.md`) |
-| `tests-zkevm@` | `tests-zkevm@v21.0.6` | `fetch-zkevm-fixtures`, `zkevm-tests` |
-| `tests-zkevm-benchmark@` | `tests-zkevm-benchmark@v21.0.5` | benchmark tiers (also pinned in `.github/workflows/benchmark.yml`) |
+| `tests@` | `tests@v21.0.2` | `fetch-fixtures`, `state-tests`, `blockchain-tests`, `transaction-tests`, Hive (`tools/hive/README.md`) |
+| `tests-zkevm@` | `tests-zkevm@v21.0.7` | `fetch-zkevm-fixtures`, `zkevm-tests` |
+| `tests-zkevm-benchmark@` | `tests-zkevm-benchmark@v21.0.7` | benchmark tiers (also pinned in `.github/workflows/benchmark.yml`) |
 
 ## Repository layout
 

@@ -77,7 +77,7 @@ env:
   # blocks at about a minute each, so bench_sample.py keeps the measured (last)
   # block of TIER_PER_FILE tests from each fixture file: 120 blocks at 1.
   TIER: 30M
-  TIER_RELEASE: tests-zkevm-benchmark@v21.0.5
+  TIER_RELEASE: tests-zkevm-benchmark@v21.0.7
   TIER_DIR: for_amsterdam_at_0030M
   TIER_PER_FILE: "1"
   # Runners the tier sample is split across: ~6-7 blocks each keeps a shard

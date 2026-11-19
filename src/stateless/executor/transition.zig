@@ -1308,6 +1308,11 @@ pub fn transitionWithContext(
             if (e.value_ptr.*.status.self_destructed) {
                 if (amsterdam_no_burn and e.value_ptr.*.info.balance != 0) continue;
                 try deleted.append(arena, e.key_ptr.*);
+            } else if (e.value_ptr.*.status.touched and !e.value_ptr.*.status.loaded_as_not_existing and !post_alloc.contains(e.key_ptr.*)) {
+                // An account that existed and ends the block empty (EIP-161), such as one
+                // self-destructed and then touched again by a zero-amount withdrawal.
+                // Untouched (merely read) accounts keep their leaf.
+                try deleted.append(arena, e.key_ptr.*);
             }
         }
     }
@@ -1577,6 +1582,9 @@ fn extractPostState(
                 !std.mem.eql(u8, &ch, &primitives.KECCAK_EMPTY)
             else
                 acct.code.len > 0;
+            // TODO(EIP-8253): acct.storage holds only this block's changed slots, and
+            // EIP-161 emptiness ignores storage. The term can only differ from EIP-161 for
+            // a nonce-0, code-less account with storage; drop it once EIP-8253 retires them.
             if (acct.nonce == 0 and acct.balance == 0 and !has_code and acct.storage.count() == 0) {
                 _ = post.remove(addr);
                 continue;
