@@ -536,7 +536,7 @@ pub const Interpreter = struct {
 // `const` and calling `coldReg` when the gate is closed, so the table still
 // supplies opUnknown. Sound because the spec is fixed for the frame; worth it
 // only for opcodes hot enough that a register branch beats a table load plus
-// an indirect call (SHL/SHR/SAR, RETURNDATASIZE, PUSH0).
+// an indirect call (SHL/SHR/SAR, RETURNDATASIZE, PUSH0, DUPN/SWAPN/EXCHANGE).
 
 /// Fetch the opcode at `pc` from the code slice runDispatch resolves once per frame
 /// (`ExtBytecode.opcode()` would switch on the Bytecode union tag on every fetch).
@@ -732,6 +732,8 @@ fn runDispatch(
     const has_push0 = primitives.isEnabledIn(self.runtime_flags.spec_id, .shanghai);
     // EIP-211. Loop-invariant like has_shifts.
     const has_returndata = primitives.isEnabledIn(self.runtime_flags.spec_id, .byzantium);
+    // EIP-8024. Loop-invariant like has_shifts.
+    const has_stack_imm = primitives.isEnabledIn(self.runtime_flags.spec_id, .amsterdam);
 
     var r = Regs{
         .pc = self.bytecode.pc,
@@ -1036,11 +1038,72 @@ fn runDispatch(
             }
             continue :sw opcodeAt(code, r.pc);
         },
+        // DUPN, SWAPN, EXCHANGE (EIP-8024, Amsterdam): one immediate byte, which reads
+        // the zero padding when the opcode is the last byte of the code.
+        0xE6, 0xE7, 0xE8 => |op| {
+            r.pc += 1;
+            if (has_stack_imm) {
+                if (!charge(self, &r, gas_costs.G_VERYLOW)) return;
+                const imm: usize = code[r.pc];
+                r.pc += 1;
+                switch (op) {
+                    0xE6, 0xE7 => {
+                        // decode_single: 91..=127 is invalid, the rest maps to 17..=235.
+                        if (imm > 90 and imm < 128) {
+                            fail(self, &r, .invalid_opcode);
+                            return;
+                        }
+                        const n = (imm + 145) % 256;
+                        if (op == 0xE6) {
+                            if (r.sp < n) {
+                                fail(self, &r, .stack_underflow);
+                                return;
+                            }
+                            if (r.sp >= stack_mod.STACK_LIMIT) {
+                                fail(self, &r, .stack_overflow);
+                                return;
+                            }
+                            r.sb[r.sp] = r.sb[r.sp - n];
+                            r.sp += 1;
+                        } else {
+                            if (r.sp < n + 1) {
+                                fail(self, &r, .stack_underflow);
+                                return;
+                            }
+                            const t = r.sb[r.sp - 1];
+                            r.sb[r.sp - 1] = r.sb[r.sp - 1 - n];
+                            r.sb[r.sp - 1 - n] = t;
+                        }
+                    },
+                    0xE8 => {
+                        // decode_pair: 82..=127 is invalid; swaps depths n < m below the top.
+                        if (imm >= 82 and imm <= 127) {
+                            fail(self, &r, .invalid_opcode);
+                            return;
+                        }
+                        const k = imm ^ 143;
+                        const q = k >> 4;
+                        const lo = k & 0xF;
+                        const n = if (q < lo) q + 1 else lo + 1;
+                        const m = if (q < lo) lo + 1 else 29 - q;
+                        if (r.sp < m + 1) {
+                            fail(self, &r, .stack_underflow);
+                            return;
+                        }
+                        const t = r.sb[r.sp - 1 - n];
+                        r.sb[r.sp - 1 - n] = r.sb[r.sp - 1 - m];
+                        r.sb[r.sp - 1 - m] = t;
+                    },
+                    else => unreachable,
+                }
+            } else if (!coldReg(self, table, ctx, op, &r)) return;
+            continue :sw opcodeAt(code, r.pc);
+        },
         // Cold path: table lookup + indirect call. Fork-gated opcodes (TLOAD/TSTORE
         // etc.) get opUnknown on old forks from the table.
         // Naming every cold value explicitly (rather than using `else`) keeps the jump
         // table dense over the whole u8 domain — no upper-bound compare needed.
-        0x04...0x0f, 0x1e, 0x1f, 0x20...0x2f, 0x31, 0x32, 0x37, 0x39...0x3c, 0x3e, 0x3f...0x4f, 0x54, 0x55, 0x5c...0x5e, 0xa0...0xff => |op| {
+        0x04...0x0f, 0x1e, 0x1f, 0x20...0x2f, 0x31, 0x32, 0x37, 0x39...0x3c, 0x3e, 0x3f...0x4f, 0x54, 0x55, 0x5c...0x5e, 0xa0...0xe5, 0xe9...0xff => |op| {
             r.pc += 1;
             if (!coldReg(self, table, ctx, op, &r)) return;
             // Only the cold path can suspend the frame, so this is the one arm
