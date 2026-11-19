@@ -59,6 +59,11 @@ jobs:
           DYLD_LIBRARY_PATH: /opt/homebrew/lib:/usr/local/lib
         run: zig build test
 
+      - name: Run keccak tests without keccak memo
+        env:
+          DYLD_LIBRARY_PATH: /opt/homebrew/lib:/usr/local/lib
+        run: zig build test-accelerators -Dkeccak-memo=false
+
   zkevm-tests:
     name: zkEVM Tests
     runs-on: ubuntu-latest

@@ -7,6 +7,7 @@
 const impl = @import("accel_impl");
 const std = @import("std");
 const primitives = @import("primitives");
+const build_options = @import("build_options");
 
 // ── keccak256 key-hash memo ───────────────────────────────────────────────────
 //
@@ -18,8 +19,9 @@ const primitives = @import("primitives");
 // Static direct-mapped cache: no allocator, and under a sparse zkVM memory cost
 // model only touched buckets count, so generous capacity is free. A collision
 // recomputes and overwrites. It runs on native too, so the spec-test suites
-// exercise the guest's code path; execution is single-threaded, so plain globals
-// are safe. kmemo_len 0 = empty slot.
+// exercise the guest's code path. The plain globals assume single-threaded hashing;
+// consumers that hash from several threads build with -Dkeccak-memo=false, which
+// compiles the memo out. kmemo_len 0 = empty slot.
 const KMEMO_LEN = 1 << 14; // 16384 buckets
 var kmemo_len = [_]u8{0} ** KMEMO_LEN;
 var kmemo_key: [KMEMO_LEN][32]u8 = undefined;
@@ -83,7 +85,7 @@ pub inline fn keccak256(data: []const u8, output: *Hash32) void {
         output.* = primitives.KECCAK_EMPTY;
         return;
     }
-    if (data.len == 20 or data.len == 32) {
+    if (build_options.keccak_memo and (data.len == 20 or data.len == 32)) {
         const idx = kmemoIndex(data);
         if (kmemo_len[idx] == data.len and std.mem.eql(u8, kmemo_key[idx][0..data.len], data)) {
             output.* = kmemo_val[idx];
@@ -218,4 +220,8 @@ pub inline fn secp256r1_verify(
     verified: *bool,
 ) void {
     impl.secp256r1_verify(msg, sig, pubkey, verified);
+}
+
+test {
+    _ = @import("accelerators_tests.zig");
 }

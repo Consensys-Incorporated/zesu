@@ -64,7 +64,9 @@ stay on the instruction-table (cold) path. See the INVARIANT comment there.
 - **keccak256 memo.** The key-hash memo in `src/crypto/accelerators.zig` stays: ZisK does
   not cache keccak256, and removing the memo measured +0.57% to +1.09% on mainnet. The
   agreed (deferred) plan is to move it up into `src/stateless/mpt/main.zig`, where the
-  trie keys are hashed; don't add other caching to the accelerator interface.
+  trie keys are hashed; don't add other caching to the accelerator interface. The memo is
+  an unsynchronized global, on by default; `-Dkeccak-memo=false` compiles it out for native
+  consumers that hash from several threads.
 - **Remove dead code** rather than keeping unreachable branches, duplicated `else` arms, or
   "future-proofing" fields that are always zero.
 
