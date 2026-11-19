@@ -205,6 +205,29 @@ test "MOD: mod zero = 0" {
     try expectEqual(@as(U, 0), interp.stack.popUnsafe());
 }
 
+test "MOD: wordMod equals the u256 remainder when both operands fit one word" {
+    const words = [_]u64{ 0, 1, 2, 7, 10, 0xFFFF_FFFF, 1 << 63, std.math.maxInt(u64) - 1, std.math.maxInt(u64) };
+    for (words) |a| {
+        for (words) |m| {
+            const want: U = if (m == 0) 0 else @as(U, a) % @as(U, m);
+            const got = arithmetic.wordMod(.{ a, 0, 0, 0 }, .{ m, 0, 0, 0 });
+            try expectEqual(@as(?u64, @intCast(want)), got);
+        }
+    }
+}
+
+test "MOD: wordMod declines any operand wider than one word" {
+    for (1..4) |i| {
+        var wide = [4]u64{ 5, 0, 0, 0 };
+        wide[i] = 1;
+        try expectEqual(@as(?u64, null), arithmetic.wordMod(wide, .{ 3, 0, 0, 0 }));
+        try expectEqual(@as(?u64, null), arithmetic.wordMod(.{ 5, 0, 0, 0 }, wide));
+        // A zero low word must not be taken for a zero modulus.
+        wide[0] = 0;
+        try expectEqual(@as(?u64, null), arithmetic.wordMod(.{ 5, 0, 0, 0 }, wide));
+    }
+}
+
 // --- SDIV tests ---
 
 test "SDIV: positive / positive" {
