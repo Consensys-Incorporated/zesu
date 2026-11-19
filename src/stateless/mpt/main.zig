@@ -835,13 +835,17 @@ fn batchUpdateNodeIndexed(
         // Extension and leaf: fall back to sequential single-change updates.
         // These cases are rare for multi-change batches (most shared ancestors are branches).
         // Each iteration may look up children created by the previous one via nodes.get —
-        // recording them in `nodes` is required here.
+        // recording them in `nodes` is required here. Inserts go first, as in the
+        // reference, so a delete never collapses a branch a later insert refills.
         else => {
             var current = node_rlp;
-            for (changes) |ch| {
-                var key_nibs: [64]u8 = undefined;
-                nibbles.bytesToNibbles(&ch.key, &key_nibs);
-                current = try updNodeExRecorded(alloc, current, key_nibs[depth..], ch.value, nodes);
+            for ([_]bool{ false, true }) |deletes| {
+                for (changes) |ch| {
+                    if ((ch.value == null) != deletes) continue;
+                    var key_nibs: [64]u8 = undefined;
+                    nibbles.bytesToNibbles(&ch.key, &key_nibs);
+                    current = try updNodeExRecorded(alloc, current, key_nibs[depth..], ch.value, nodes);
+                }
             }
             return current;
         },

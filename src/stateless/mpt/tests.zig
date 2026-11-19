@@ -1242,3 +1242,45 @@ test "verifyProofIndexed agrees with verifyProof on random tries" {
         }
     }
 }
+
+// An extension over a branch {a, b}; the batch deletes a and inserts c under the same
+// branch, and a sorts before c. Applying the insert first, as the reference does for
+// storage, keeps the branch at two children, so b is never read and a witness built
+// from the reference leaves it out.
+test "batchUpdateIndexed: an insert next to a delete below an extension does not read the sibling" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var key_a: [32]u8 = @splat(0x11);
+    key_a[0] = 0x41;
+    var key_b: [32]u8 = @splat(0x22);
+    key_b[0] = 0x42;
+    var key_c: [32]u8 = @splat(0x33);
+    key_c[0] = 0x43;
+
+    const leafBelowSecondNibble = struct {
+        fn f(a: std.mem.Allocator, key: [32]u8, val: []const u8) ![]const u8 {
+            var nibs: [64]u8 = undefined;
+            nibbles.bytesToNibbles(&key, &nibs);
+            return updMakeLeaf(a, nibs[2..], val);
+        }
+    }.f;
+    const leaf_a = try leafBelowSecondNibble(alloc, key_a, "va");
+    const leaf_b = try leafBelowSecondNibble(alloc, key_b, "vb");
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    enc[1] = try updHashOrEmbed(alloc, leaf_a);
+    enc[2] = try updHashOrEmbed(alloc, leaf_b);
+    const branch = try updEncodeBranch(alloc, &enc, &.{});
+    const root = try updMakeExtension(alloc, &.{4}, try updHashOrEmbed(alloc, branch));
+
+    // No leaf_b: nothing on the reference's update path reads it.
+    var index = try buildNodeIndex(alloc, &.{ root, branch, leaf_a });
+    defer index.deinit();
+
+    const changes = [_]BatchChange{ .{ .key = key_a, .value = null }, .{ .key = key_c, .value = "vc" } };
+    const got = try batchUpdateIndexed(alloc, keccak256(root), &changes, &index);
+
+    var kv = [_]builder.KV{ .{ .key = &key_b, .value = "vb" }, .{ .key = &key_c, .value = "vc" } };
+    try std.testing.expectEqual(try builder.trieRoot(alloc, &kv), got);
+}
