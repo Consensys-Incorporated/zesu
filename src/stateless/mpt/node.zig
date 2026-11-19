@@ -166,51 +166,6 @@ fn decodeNodeRef(item: rlp.RlpItem, raw: []const u8) error{InvalidNode}!NodeRef 
     }
 }
 
-/// Decode only the child at `nibble` (0–15) from a branch node, stopping iteration
-/// as soon as the target slot is reached instead of parsing all 17 children.
-///
-/// Returns null when `bytes` is a leaf or extension node (2-item list), allowing the
-/// caller to fall through to full decoding. Returns error for malformed RLP.
-pub fn decodeNibble(bytes: []const u8, nibble: u8) error{ InvalidRlp, InvalidNode }!?NodeRef {
-    // A branch is almost always a long list with a two-byte length: read it as decodeItem would.
-    const payload = if (bytes.len >= 3 and bytes[0] == 0xf9) blk: {
-        const len = @as(usize, bytes[1]) << 8 | bytes[2];
-        if (3 + len > bytes.len) return error.InvalidRlp;
-        break :blk bytes[3..][0..len];
-    } else switch ((try rlp.decodeItem(bytes)).item) {
-        .list => |p| p,
-        .bytes => return error.InvalidNode,
-    };
-    var rest = payload;
-
-    // Skip items 0..nibble-1. A branch's children are almost all 0x80 (empty) or 0xa0 plus a
-    // 32-byte hash, whose lengths the prefix byte alone fixes; anything else is decoded.
-    for (0..nibble) |_| {
-        if (rest.len == 0) return null; // fewer than nibble+1 items → leaf/extension
-        rest = rest[(try decodeSlot(rest)).consumed..];
-    }
-    // Capture the target child, reading an empty or hashed slot from its prefix byte.
-    if (rest.len == 0) return null;
-    const r = try decodeSlot(rest);
-    const result = try decodeNodeRef(r.item, rest[0..r.consumed]);
-    rest = rest[r.consumed..];
-
-    // Disambiguate leaf/extension (2 items) from branch (17 items).
-    // After consuming nibble+1 items:
-    //   nibble >= 2: a 2-item node is exhausted by item 1, so reaching here guarantees branch.
-    //   nibble == 1: if rest is empty we consumed exactly 2 items → leaf/extension.
-    //   nibble == 0: consume item 1 to check if the list is exactly 2 items long.
-    if (nibble == 1 and rest.len == 0) return null;
-    if (nibble == 0) {
-        if (rest.len == 0) return null; // degenerate 1-item list
-        const r1 = try rlp.decodeItem(rest);
-        rest = rest[r1.consumed..];
-        if (rest.len == 0) return null; // exactly 2 items → leaf/extension
-    }
-
-    return result;
-}
-
 // ─── Unit tests ────────────────────────────────────────────────────────────────
 
 test "decodeNode leaf" {

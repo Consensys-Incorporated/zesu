@@ -52,7 +52,6 @@ pub const WitnessDatabase = struct {
     /// trie walk, and lets it skip unchanged accounts (originalAccount). Accounts absent
     /// from pre-state are cached with exists = false and EMPTY_TRIE_HASH.
     original_accounts: std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80),
-    alloc: std.mem.Allocator,
     /// Set only while a system call runs. Its origin is SYSTEM_ADDRESS, whose account the
     /// reference never reads, so a missing proof for it is accepted only then.
     system_call_origin: bool = false,
@@ -114,7 +113,6 @@ pub const WitnessDatabase = struct {
             .block_hashes = block_hashes,
             .deployed_codes = std.HashMap(primitives.Hash, bytecode.Bytecode, primitives.HashContext, 80).init(alloc),
             .original_accounts = std.HashMap(primitives.Address, OriginalAccount, primitives.AddressContext, 80).init(alloc),
-            .alloc = alloc,
         };
     }
 
@@ -227,7 +225,7 @@ pub const WitnessDatabase = struct {
         address: primitives.Address,
         index: primitives.StorageKey,
     ) !primitives.StorageValue {
-        const orig = self.original_accounts.getPtr(address) orelse blk: {
+        const storage_root = if (self.original_accounts.getPtr(address)) |o| o.storage_root else blk: {
             const account_state = mpt.verifyAccountIndexed(
                 self.pre_state_root,
                 address,
@@ -243,10 +241,10 @@ pub const WitnessDatabase = struct {
                 else => return DbError.InvalidWitness,
             };
             // OOM panics rather than propagates: see basic()'s comment above for why.
-            self.original_accounts.put(address, OriginalAccount.of(account_state)) catch @panic("out of memory");
-            break :blk self.original_accounts.getPtr(address).?;
+            const orig = OriginalAccount.of(account_state);
+            self.original_accounts.put(address, orig) catch @panic("out of memory");
+            break :blk orig.storage_root;
         };
-        const storage_root = orig.storage_root;
         const slot = u256ToHash(index);
         const value = mpt.verifyStorageIndexed(storage_root, slot, self.node_index) catch |err| switch (err) {
             // A slot that is genuinely unset yields null from verifyStorageIndexed

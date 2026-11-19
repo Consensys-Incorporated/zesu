@@ -1662,7 +1662,6 @@ fn collapseIndexed(
         },
         .extension => |e| {
             const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
-            if (hp.is_leaf) return error.InvalidNode;
             if (hp.len >= remaining) return error.InvalidProof;
             @memcpy(merged[1 .. 1 + hp.len], path_buf[0..hp.len]);
             const child_ref = try updRefEnc(alloc, e.child);
@@ -2007,4 +2006,28 @@ pub const testing = struct {
     pub const rlpListHeaderWrite = Mpt.rlpListHeaderWrite;
     pub const BranchSlots = Mpt.BranchSlots;
     pub const hpPathIs = Mpt.hpPathIs;
+
+    /// A branch whose two children (hashes absent from the witness) sit on nibbles other than
+    /// `key_hash`'s first, so a lookup of that key ends at an empty slot: a non-inclusion proof.
+    /// A branch needs two children, so an all-empty one is not a valid witness node.
+    pub fn buildBranchMissingKey(buf: *[83]u8, key_hash: [32]u8) usize {
+        buf[0] = 0xf8;
+        buf[1] = 2 * 33 + 15;
+        const first = key_hash[0] >> 4;
+        const a: usize = (first + 1) % 16;
+        const b: usize = (first + 2) % 16;
+        var pos: usize = 2;
+        for (0..16) |i| {
+            if (i == a or i == b) {
+                buf[pos] = 0xa0;
+                @memset(buf[pos + 1 ..][0..32], @intCast(0x11 + i));
+                pos += 33;
+            } else {
+                buf[pos] = 0x80;
+                pos += 1;
+            }
+        }
+        buf[pos] = 0x80;
+        return pos + 1;
+    }
 };
