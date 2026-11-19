@@ -785,3 +785,26 @@ test "basic of SYSTEM_ADDRESS in a system call is null and not cached" {
     wdb.system_call_origin = false;
     try std.testing.expectError(error.InvalidWitness, wdb.basic(primitives.SYSTEM_ADDRESS));
 }
+
+test "basic of SYSTEM_ADDRESS in a system call ignores a malformed node on its path" {
+    // A root whose two-item list has an empty HP key: a lookup reaching it fails with a
+    // node error, not InvalidProof.
+    const root = [_]u8{ 0xc2, 0x80, 0x80 };
+    var w = emptyNodesWitness();
+    w.state_root = mpt.keccak256(&root);
+    w.nodes = &.{&root};
+
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
+
+    const lookup = mpt.verifyAccountIndexed(w.state_root, primitives.SYSTEM_ADDRESS, &idx);
+    try std.testing.expect(if (lookup) |_| false else |err| err != error.InvalidProof);
+
+    wdb.system_call_origin = true;
+    try std.testing.expect((try wdb.basic(primitives.SYSTEM_ADDRESS)) == null);
+
+    wdb.system_call_origin = false;
+    try std.testing.expectError(error.InvalidWitness, wdb.basic(primitives.SYSTEM_ADDRESS));
+}

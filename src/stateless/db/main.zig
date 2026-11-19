@@ -172,23 +172,21 @@ pub const WitnessDatabase = struct {
             self.pre_state_root,
             address,
             self.node_index,
-        ) catch |err| switch (err) {
+        ) catch {
             // EIP-8025 witness completeness: InvalidProof means a trie node needed to
             // resolve this account is missing from the witness. A COMPLETE witness proves
             // every touched account's (non-)existence — a truly-absent account resolves to
             // null via an exclusion proof, never InvalidProof — so a missing node means the
             // witness is incomplete for a touched account and replay must fail.
             // Exception: a system call's origin, SYSTEM_ADDRESS, is never read from
-            // pre-state by the reference, so its proof is legitimately absent. Any other
-            // read of SYSTEM_ADDRESS (a withdrawal, BALANCE) must be proved.
-            error.InvalidProof => {
-                if (self.system_call_origin and std.mem.eql(u8, &address, &SYSTEM_ADDRESS)) {
-                    _ = self.original_accounts.remove(address);
-                    return null;
-                }
-                return DbError.InvalidWitness;
-            },
-            else => return DbError.InvalidWitness,
+            // pre-state by the reference, so no error on that read counts: neither a
+            // missing node nor a malformed one the lookup reaches. Any other read of
+            // SYSTEM_ADDRESS (a withdrawal, BALANCE) must be proved.
+            if (self.system_call_origin and std.mem.eql(u8, &address, &SYSTEM_ADDRESS)) {
+                _ = self.original_accounts.remove(address);
+                return null;
+            }
+            return DbError.InvalidWitness;
         };
 
         // Proven: publish it to the reserved slot.
