@@ -8,9 +8,9 @@ rv64im object:
   classification instead of `@clz`).
 
 `addGuestObject` in `build.zig` hardcodes `alt_fl_alloc.zig` as the
-`zesu_allocator` root for the guest object (both the `rv64im-object` and
-`zisk-object` steps); there is no build option to switch. `fl_alloc.zig` is
-not wired into any build. This replaced the earlier bump allocator
+`zesu_allocator` root for every guest object (the `rv64im-object` step and
+zkVM-specific builds that call `addGuestObject`); there is no build option to switch.
+`fl_alloc.zig` is not wired into any build. This replaced the earlier bump allocator
 (`bump_alloc.zig`, still in the tree but unused) whose `free` was a no-op.
 Native/exposed builds don't use any of these: their `zesu_allocator` is the
 settable singleton in `src/evm/allocator.zig`.
@@ -107,7 +107,7 @@ O(1), no coalescing.
 
 `sizeClass()` runs on **every** alloc and free. In a zkVM every executed
 instruction is a proving cost, so its instruction count matters directly.
-(The `zisk-object` build does enable Zbb, but it ships `alt_fl_alloc.zig` too.)
+(A zkVM build that adds Zbb via `addGuestObject` still gets `alt_fl_alloc.zig`.)
 
 ```
                  sizeClass(size)  — called on EVERY alloc & free
