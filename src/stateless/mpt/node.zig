@@ -140,7 +140,7 @@ inline fn decodeSlot(input: []const u8) error{InvalidRlp}!rlp.DecodeResult {
 inline fn isChildRef(item: rlp.RlpItem, raw: []const u8) bool {
     return switch (item) {
         .bytes => |b| b.len == 0 or b.len == 32,
-        .list => raw.len < 32,
+        .list => raw.len < 32 and rlp.isWellFormed(raw),
     };
 }
 

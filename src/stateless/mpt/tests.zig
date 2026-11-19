@@ -1284,3 +1284,31 @@ test "batchUpdateIndexed: an insert next to a delete below an extension does not
     var kv = [_]builder.KV{ .{ .key = &key_b, .value = "vb" }, .{ .key = &key_c, .value = "vc" } };
     try std.testing.expectEqual(try builder.trieRoot(alloc, &kv), got);
 }
+
+// The reference decodes a reached node whole, so a malformed embedded child fails the
+// lookup even when the key's path goes through another slot.
+test "verifyProofIndexed: a branch with a malformed off-path embedded child is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+
+    const path: [63]u8 = @splat(0);
+    const leaf = try updMakeLeaf(alloc, &path, "value");
+    try index.put(keccak256(leaf), leaf);
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    enc[1] = try updHashOrEmbed(alloc, leaf);
+    enc[2] = &.{ 0xc1, 0x81 };
+    const root = try updEncodeBranch(alloc, &enc, &.{});
+    try index.put(keccak256(root), root);
+
+    if (mpt.verifyProofIndexed(keccak256(root), pathTestKey(1), &index)) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
+
+    // The same branch with a well-formed embedded child serves the lookup.
+    enc[2] = &.{ 0xc2, 0x80, 0x80 };
+    const ok_root = try updEncodeBranch(alloc, &enc, &.{});
+    try index.put(keccak256(ok_root), ok_root);
+    try std.testing.expectEqualStrings("value", (try mpt.verifyProofIndexed(keccak256(ok_root), pathTestKey(1), &index)).?);
+}

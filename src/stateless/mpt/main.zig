@@ -933,6 +933,7 @@ const BranchSlots = struct {
             };
             if (i == 16 and b != 0x80) return null;
             if (n > end - pos) return null;
+            if (b >= 0xc0 and !rlp.isWellFormed(node_rlp[pos..][0..n])) return null;
             occupied += @intFromBool(b != 0x80);
             pos += n;
         }
