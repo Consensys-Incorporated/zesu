@@ -1984,6 +1984,7 @@ fn updRlpList(alloc: std.mem.Allocator, items: []const []const u8) ![]u8 {
 test {
     _ = @import("./tests.zig");
     _ = @import("./rlp_tests.zig");
+    _ = @import("./node_tests.zig");
 }
 
 const Mpt = @This();

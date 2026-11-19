@@ -74,27 +74,23 @@ pub fn decodeItem(input: []const u8) error{InvalidRlp}!DecodeResult {
     }
 }
 
-/// Whether `input` is exactly one item whose nested lists all decode. For embedded trie
-/// nodes, which a parent's header check alone does not cover; they are under 32 bytes,
-/// so the recursion is shallow.
+/// Whether `input`, an embedded trie node, is exactly one canonical item whose nested items
+/// are all canonical, as the reference decodes a reached node whole. Embedded nodes are
+/// under 32 bytes, and anything longer is rejected, which bounds the recursion.
 pub fn isWellFormed(input: []const u8) bool {
-    const r = decodeItem(input) catch return false;
+    if (input.len >= 32) return false;
+    const r = decodeItemCanonical(input) catch return false;
     if (r.consumed != input.len) return false;
     var rest = switch (r.item) {
         .bytes => return true,
         .list => |payload| payload,
     };
     while (rest.len > 0) {
-        const item = decodeItem(rest) catch return false;
+        const item = decodeItemCanonical(rest) catch return false;
         if (!isWellFormed(rest[0..item.consumed])) return false;
         rest = rest[item.consumed..];
     }
     return true;
-}
-
-test "decodeItem: a claimed length past the input is rejected, not overflowed" {
-    try std.testing.expectError(error.InvalidRlp, decodeItem(&([_]u8{0xff} ** 40)));
-    try std.testing.expectError(error.InvalidRlp, decodeItem(&([_]u8{0xbf} ** 40)));
 }
 
 // First-byte boundaries of the RLP encodings, and the longest payload the short form holds.

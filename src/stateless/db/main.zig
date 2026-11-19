@@ -230,15 +230,14 @@ pub const WitnessDatabase = struct {
                 self.pre_state_root,
                 address,
                 self.node_index,
-            ) catch |err| switch (err) {
+            ) catch {
                 // InvalidProof means the witness lacks the node needed to prove
                 // anything here — genuine absence is reported as a null
                 // account_state below ("valid non-inclusion" in mpt/main.zig).
                 // Defaulting to EMPTY_TRIE_HASH would make every subsequent slot
                 // read on this account return 0, i.e. a wrong execution result
                 // from an incomplete witness. Matches basic()'s handling.
-                error.InvalidProof => return DbError.InvalidWitness,
-                else => return DbError.InvalidWitness,
+                return DbError.InvalidWitness;
             };
             // OOM panics rather than propagates: see basic()'s comment above for why.
             const orig = OriginalAccount.of(account_state);
@@ -246,16 +245,14 @@ pub const WitnessDatabase = struct {
             break :blk orig.storage_root;
         };
         const slot = u256ToHash(index);
-        const value = mpt.verifyStorageIndexed(storage_root, slot, self.node_index) catch |err| switch (err) {
+        return mpt.verifyStorageIndexed(storage_root, slot, self.node_index) catch {
             // A slot that is genuinely unset yields null from verifyStorageIndexed
             // (valid non-inclusion), which becomes 0 without an error. Reaching
             // InvalidProof means the storage node is missing from the witness, so
             // returning 0 would fabricate a value — the slot's real contents are
             // unknown and may be non-zero.
-            error.InvalidProof => return DbError.InvalidWitness,
-            else => return DbError.InvalidWitness,
+            return DbError.InvalidWitness;
         };
-        return value;
     }
 
     // ── hasNonZeroStorageForAddress ─────────────────────────────────────────

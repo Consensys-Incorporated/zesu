@@ -178,7 +178,7 @@ test "basic returns verified AccountInfo" {
 
 // ─── Test 2: basic — non-inclusion via empty branch slot ──────────────────────
 
-test "basic returns null for valid non-inclusion proof (empty trie)" {
+test "basic returns null for valid non-inclusion proof (empty branch slot)" {
     var address: primitives.Address = @splat(0x00);
     address[19] = 0x22;
 

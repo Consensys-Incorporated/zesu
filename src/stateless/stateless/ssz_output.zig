@@ -110,15 +110,11 @@ fn mixInLength(root: [32]u8, length: u64) [32]u8 {
 ///   leaves[len..2^depth] are all zero chunks.
 fn sparseRoot(leaves: []const [32]u8, depth: u8) [32]u8 {
     if (leaves.len == 0) return zeroHash(depth);
-    if (depth == 0) {
-        return if (leaves.len >= 1) leaves[0] else [_]u8{0} ** 32;
-    }
+    if (depth == 0) return leaves[0];
     const half: usize = @as(usize, 1) << @intCast(depth - 1);
     const left_leaves = if (leaves.len > half) leaves[0..half] else leaves;
     const right_leaves = if (leaves.len > half) leaves[half..] else &[_][32]u8{};
-    const left = sparseRoot(left_leaves, depth - 1);
-    const right = if (leaves.len <= half) zeroHash(depth - 1) else sparseRoot(right_leaves, depth - 1);
-    return sha2(left, right);
+    return sha2(sparseRoot(left_leaves, depth - 1), sparseRoot(right_leaves, depth - 1));
 }
 
 /// Merkleize exactly N chunks (N must be a power of two).

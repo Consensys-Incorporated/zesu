@@ -480,6 +480,7 @@ fn deletesEmptyAccount(withdrawals: []const input.Withdrawal) !bool {
     var env = testEnv();
     env.withdrawals = @constCast(withdrawals);
     var ctx = context_mod.Context(EmptyAccountDb).new(.{}, primitives.SpecId.shanghai);
+    defer ctx.journaled_state.deinit();
     ctx.block = transition_mod.buildBlockEnv(env, primitives.SpecId.shanghai);
     const result = try transitionWithContext(arena_state.allocator(), &ctx, .{}, env, &txs, primitives.SpecId.shanghai, 1, SystemContracts.forChainId(1), 0);
     try std.testing.expectEqual(context_mod.ContextError.ok, ctx.ctx_error);

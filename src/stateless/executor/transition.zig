@@ -1582,9 +1582,9 @@ fn extractPostState(
                 !std.mem.eql(u8, &ch, &primitives.KECCAK_EMPTY)
             else
                 acct.code.len > 0;
-            // TODO(EIP-8253): EIP-161 emptiness ignores storage; the storage term only
-            // matters for nonce-0, code-less accounts with storage, which EIP-8253 retires.
-            // Drop it once that fork is the oldest one executed.
+            // TODO(EIP-8253): acct.storage holds only this block's changed slots, and
+            // EIP-161 emptiness ignores storage. The term can only differ from EIP-161 for
+            // a nonce-0, code-less account with storage; drop it once EIP-8253 retires them.
             if (acct.nonce == 0 and acct.balance == 0 and !has_code and acct.storage.count() == 0) {
                 _ = post.remove(addr);
                 continue;

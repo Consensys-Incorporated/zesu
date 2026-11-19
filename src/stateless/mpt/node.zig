@@ -256,12 +256,6 @@ test "decodeNode inline child" {
     try std.testing.expectEqualSlices(u8, &.{ 0xc2, 0x20, 0x01 }, node.extension.child.inline_node);
 }
 
-test "decodeNode invalid: a child that is neither empty, a hash nor embedded" {
-    // Extension whose child is a 4-byte string.
-    const bytes = &[_]u8{ 0xc7, 0x81, 0x11, 0x84, 0x01, 0x02, 0x03, 0x04 };
-    try std.testing.expectError(error.InvalidNode, decodeNode(bytes));
-}
-
 test "decodeNode invalid: wrong item count" {
     // 3 items → error.InvalidNode
     const bytes = &[_]u8{ 0xc3, 0x80, 0x80, 0x80 };
