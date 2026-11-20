@@ -172,6 +172,96 @@ test "validateAgainstStateAndDeductCaller: EIP-3607 rejects account with code" {
     try std.testing.expectError(ValidationError.SenderHasCode, result);
 }
 
+// Reference check_transaction (forks/amsterdam/fork.py, same from Cancun on):
+// `if Uint(sender_account.balance) < max_gas_fee + Uint(tx.value): raise InsufficientBalanceError`.
+// Uint is unbounded, so a sum past 2^256 is more than any balance.
+test "validateAgainstStateAndDeductCaller: gas fee plus value past 2^256 is an insufficient balance" {
+    const caller: primitives.Address = [_]u8{0xEE} ** 20;
+
+    var db = database.InMemoryDB.init(std.heap.c_allocator);
+    defer db.deinit();
+    try db.insertAccount(caller, state.AccountInfo{
+        .balance = std.math.maxInt(primitives.U256),
+        .nonce = 0,
+        .code_hash = primitives.KECCAK_EMPTY,
+        .code = null,
+    });
+
+    var ctx = context.DefaultContext.new(db, primitives.SpecId.prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
+
+    ctx.tx.caller = caller;
+    ctx.tx.gas_limit = 21000;
+    ctx.tx.gas_price = 1;
+    ctx.tx.value = std.math.maxInt(primitives.U256);
+    ctx.tx.nonce = 0;
+
+    const result = Validation.validateAgainstStateAndDeductCaller(&mevm.evm, 21000);
+    try std.testing.expectError(ValidationError.InsufficientBalance, result);
+}
+
+// Control: the same comparison at its edge, balance == gas fee + value == 2^256 - 1, passes.
+test "validateAgainstStateAndDeductCaller: gas fee plus value of exactly 2^256 - 1 is affordable" {
+    const caller: primitives.Address = [_]u8{0xED} ** 20;
+
+    var db = database.InMemoryDB.init(std.heap.c_allocator);
+    defer db.deinit();
+    try db.insertAccount(caller, state.AccountInfo{
+        .balance = std.math.maxInt(primitives.U256),
+        .nonce = 0,
+        .code_hash = primitives.KECCAK_EMPTY,
+        .code = null,
+    });
+
+    var ctx = context.DefaultContext.new(db, primitives.SpecId.prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
+
+    ctx.tx.caller = caller;
+    ctx.tx.gas_limit = 21000;
+    ctx.tx.gas_price = 1;
+    ctx.tx.value = std.math.maxInt(primitives.U256) - 21000;
+    ctx.tx.nonce = 0;
+
+    try Validation.validateAgainstStateAndDeductCaller(&mevm.evm, 21000);
+}
+
+// Reference check_transaction: for a blob transaction
+// `max_gas_fee += Uint(calculate_total_blob_gas(tx)) * Uint(tx.max_fee_per_blob_gas)`
+// before the same balance comparison.
+test "validateAgainstStateAndDeductCaller: blob fee taking the total past 2^256 is an insufficient balance" {
+    const caller: primitives.Address = [_]u8{0xEF} ** 20;
+
+    var db = database.InMemoryDB.init(std.heap.c_allocator);
+    defer db.deinit();
+    try db.insertAccount(caller, state.AccountInfo{
+        .balance = std.math.maxInt(primitives.U256),
+        .nonce = 0,
+        .code_hash = primitives.KECCAK_EMPTY,
+        .code = null,
+    });
+
+    var ctx = context.DefaultContext.new(db, primitives.SpecId.prague);
+    var mevm = MainBuilder.buildMainnet(&ctx);
+    defer mevm.destroy();
+
+    var blob_hashes = std.ArrayList(primitives.Hash).empty;
+    try blob_hashes.append(std.heap.c_allocator, [_]u8{0x01} ++ [_]u8{0} ** 31);
+
+    ctx.tx.caller = caller;
+    ctx.tx.gas_limit = 21000;
+    ctx.tx.gas_price = 1;
+    // Gas fee plus value is exactly 2^256 - 1; one blob at 1 wei per blob gas adds 131072.
+    ctx.tx.value = std.math.maxInt(primitives.U256) - 21000;
+    ctx.tx.blob_hashes = blob_hashes;
+    ctx.tx.max_fee_per_blob_gas = 1;
+    ctx.tx.nonce = 0;
+
+    const result = Validation.validateAgainstStateAndDeductCaller(&mevm.evm, 21000);
+    try std.testing.expectError(ValidationError.InsufficientBalance, result);
+}
+
 // -------------------------------------------------------------------------
 // countZeroBytes
 // -------------------------------------------------------------------------

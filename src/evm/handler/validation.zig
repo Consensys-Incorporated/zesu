@@ -279,12 +279,13 @@ pub const Validation = struct {
             }
         }
 
-        // Validate balance covers worst-case gas fee + value + blob fee.
+        // Validate balance covers worst-case gas fee + value + blob fee. The reference sums
+        // in unbounded integers: a total past 2^256 exceeds any balance.
         var max_cost = std.math.add(primitives.U256, max_gas_fee, tx.value) catch {
-            return ValidationError.BalanceOverflow;
+            return ValidationError.InsufficientBalance;
         };
         max_cost = std.math.add(primitives.U256, max_cost, max_blob_fee) catch {
-            return ValidationError.BlobFeeOverflow;
+            return ValidationError.InsufficientBalance;
         };
         if (account_info.balance < max_cost) {
             if (!cfg.disable_balance_check) {
@@ -655,8 +656,6 @@ pub const ValidationError = error{
     SenderHasCode,
     NonceMismatch,
     NonceIsMax,
-    BalanceOverflow,
-    BlobFeeOverflow,
     InsufficientBalance,
     GasPriceLessThanBaseFee,
     CallerLoadFailed,

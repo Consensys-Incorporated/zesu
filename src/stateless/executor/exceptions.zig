@@ -151,7 +151,7 @@ pub fn mapTransactionError(err: anyerror) []const u8 {
         error.NonceMismatch => E.NONCE_MISMATCH_TOO_LOW.name(),
         error.NonceMismatchTooHigh => E.NONCE_MISMATCH_TOO_HIGH.name(),
         error.NonceIsMax => E.NONCE_IS_MAX.name(),
-        error.BalanceOverflow, error.BlobFeeOverflow, error.InsufficientBalance => E.INSUFFICIENT_ACCOUNT_FUNDS.name(),
+        error.InsufficientBalance => E.INSUFFICIENT_ACCOUNT_FUNDS.name(),
         error.InvalidChainId => E.INVALID_CHAIN_ID.name(),
         error.GasLimitExceedsCap => E.GAS_LIMIT_EXCEEDS_MAXIMUM.name(),
         error.Type4TxContractCreation => E.TYPE_4_TX_CONTRACT_CREATION.name(),

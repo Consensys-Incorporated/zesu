@@ -1030,8 +1030,10 @@ pub fn transitionWithContext(
                 const max_blob_fee: u256 = tx.max_fee_per_blob_gas orelse 0;
                 break :blk n * 131_072 * max_blob_fee;
             } else 0;
-            const max_cost = max_gas_fee + tx.value + blob_cost;
-            if (sender_info.balance < max_cost) {
+            // The reference sums in unbounded integers: a total past 2^256 exceeds any balance.
+            const fee_and_value = @addWithOverflow(max_gas_fee, tx.value);
+            const max_cost = @addWithOverflow(fee_and_value[0], blob_cost);
+            if (fee_and_value[1] != 0 or max_cost[1] != 0 or sender_info.balance < max_cost[0]) {
                 ctx.journaled_state.discardTx();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
