@@ -175,11 +175,28 @@ const BaTracker = struct {
             }
         }
 
+        // One pass: an account's entries in `committed`/`committed_storage` are read and
+        // replaced only while it is the current candidate (`cands` holds each address once),
+        // so comparing and committing it together is the same as two passes. Each pointer
+        // below is held only across inserts into its map for this same address.
         for (cands.items) |cand| {
             const addr = cand.addr;
             const acct = cand.acct;
             if (filter_by_tx and acct.transaction_id < from_tx_id) continue;
             if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
+
+            const known_gop = self.committed.getOrPut(a, addr) catch @panic("out of memory");
+            if (!known_gop.found_existing) {
+                // Lazy init: query DB for pre-block state (handles stateless path where
+                // pre_alloc_in is empty and committed was not seeded for this account).
+                const pre = ctx.journaled_state.database.basic(addr) catch null;
+                known_gop.value_ptr.* = if (pre) |p| .{
+                    .balance = p.balance,
+                    .nonce = p.nonce,
+                    .code_hash = p.code_hash,
+                } else KnownAcct{};
+            }
+            const known = known_gop.value_ptr.*;
 
             // Same-tx-created-and-selfdestructed (ephemeral) account: per EIP-7928 spec's
             // destroy_storage(), storage writes become reads. Nonce/code changes are suppressed,
@@ -192,17 +209,6 @@ const BaTracker = struct {
                     if (!sm.found_existing) sm.value_ptr.* = .{};
                     sm.value_ptr.*.put(a, se.key_ptr.*, {}) catch @panic("out of memory");
                 }
-                const known = blk: {
-                    if (self.committed.get(addr)) |k| break :blk k;
-                    const pre = ctx.journaled_state.database.basic(addr) catch null;
-                    const k: KnownAcct = if (pre) |p| .{
-                        .balance = p.balance,
-                        .nonce = p.nonce,
-                        .code_hash = p.code_hash,
-                    } else KnownAcct{};
-                    self.committed.put(self.alloc, addr, k) catch @panic("out of memory");
-                    break :blk k;
-                };
                 // Record any balance change on a self-destructed account. EIP-8246 (Amsterdam+)
                 // no longer burns ETH, so a self-destructed account that keeps a non-zero balance
                 // survives as a cleared account and its balance change must be recorded (including
@@ -213,22 +219,14 @@ const BaTracker = struct {
                     const entry = self.bal_chg.getOrPutValue(a, addr, .empty) catch @panic("out of memory");
                     entry.value_ptr.*.append(a, bal_mod.BaiU256{ .bai = bai, .value = acct.info.balance }) catch @panic("out of memory");
                 }
+                // Nonce/code/storage are gone. Commit the live balance (which may be non-zero if
+                // ETH arrived after the SELFDESTRUCT opcode) so that subsequent BAIs don't
+                // spuriously re-record the same balance. Storage is cleared so a re-creation in
+                // the next tx is detected via nonce/code changes.
+                known_gop.value_ptr.* = KnownAcct{ .balance = acct.info.balance };
+                if (self.committed_storage.getPtr(addr)) |sm| sm.clearRetainingCapacity();
                 continue;
             }
-
-            const known = blk: {
-                if (self.committed.get(addr)) |k| break :blk k;
-                // Lazy init: query DB for pre-block state (handles stateless path where
-                // pre_alloc_in is empty and committed was not seeded for this account).
-                const pre = ctx.journaled_state.database.basic(addr) catch null;
-                const k: KnownAcct = if (pre) |p| .{
-                    .balance = p.balance,
-                    .nonce = p.nonce,
-                    .code_hash = p.code_hash,
-                } else KnownAcct{};
-                self.committed.put(self.alloc, addr, k) catch @panic("out of memory");
-                break :blk k;
-            };
 
             // Balance
             if (acct.info.balance != known.balance) {
@@ -273,67 +271,49 @@ const BaTracker = struct {
                 entry.value_ptr.*.append(a, bal_mod.BaiCode{ .bai = bai, .code = code_bytes }) catch @panic("out of memory");
             }
 
-            // Storage changes: slots written in this phase
-            var stor_it = acct.storage.iterator();
-            while (stor_it.next()) |se| {
-                if (!se.value_ptr.*.was_written) continue;
-                const slot = se.key_ptr.*;
-                const present = se.value_ptr.*.present_value;
-                const committed_val: u256 = blk_slot: {
-                    if (self.committed_storage.get(addr)) |sm| {
-                        if (sm.get(slot)) |v| break :blk_slot v;
-                    }
-                    // Lazy init: the pre-block value. A slot of storage loaded from the witness
-                    // already holds it from its first load, which re-proving it would only repeat;
-                    // storage created or wiped this block asks the DB (handles stateless path).
-                    const db_val = if (!acct.status.created and !acct.status.storage_wiped)
-                        se.value_ptr.*.pre_block_value
-                    else
-                        ctx.journaled_state.database.storage(addr, slot) catch 0;
-                    if (db_val != 0) {
-                        const sm2 = self.committed_storage.getOrPut(self.alloc, addr) catch @panic("out of memory");
-                        if (!sm2.found_existing) sm2.value_ptr.* = .{};
-                        sm2.value_ptr.*.put(self.alloc, slot, db_val) catch @panic("out of memory");
-                    }
-                    break :blk_slot db_val;
-                };
-                if (present == committed_val) continue;
-                const addr_map = self.slot_chg.getOrPut(a, addr) catch @panic("out of memory");
-                if (!addr_map.found_existing) addr_map.value_ptr.* = .{};
-                const slot_list = addr_map.value_ptr.*.getOrPutValue(a, slot, .empty) catch @panic("out of memory");
-                slot_list.value_ptr.*.append(a, bal_mod.SlotBaiValue{ .bai = bai, .value = present }) catch @panic("out of memory");
-            }
-        }
-
-        // Update committed state to current evm_state (only accounts touched this tx).
-        for (cands.items) |cand| {
-            const addr = cand.addr;
-            const acct = cand.acct;
-            if (filter_by_tx and acct.transaction_id < from_tx_id) continue;
-            if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
-            // Selfdestructed accounts: nonce/code/storage are gone. Commit the live balance
-            // (which may be non-zero if ETH arrived after the SELFDESTRUCT opcode) so that
-            // subsequent BAIs don't spuriously re-record the same balance. Storage is cleared
-            // so a re-creation in the next tx is detected via nonce/code changes.
-            if (acct.status.self_destructed) {
-                self.committed.put(a, addr, KnownAcct{ .balance = acct.info.balance }) catch @panic("out of memory");
-                if (self.committed_storage.getPtr(addr)) |sm| sm.clearRetainingCapacity();
-                continue;
-            }
-            self.committed.put(a, addr, KnownAcct{
+            known_gop.value_ptr.* = KnownAcct{
                 .balance = acct.info.balance,
                 .nonce = acct.info.nonce,
                 .code_hash = acct.info.code_hash,
-            }) catch @panic("out of memory");
+            };
+
+            // Storage changes: slots written in this phase. `was_written` survives commitTx, so
+            // a slot not accessed since `from_tx_id` (every write first warms it) still holds
+            // the value the previous call committed.
+            var committed_slots: ?*primitives.SlotMapUnmanaged(u256) = null;
+            var changed_slots: ?*primitives.SlotMapUnmanaged(std.ArrayListUnmanaged(bal_mod.SlotBaiValue)) = null;
             var stor_it = acct.storage.iterator();
             while (stor_it.next()) |se| {
                 if (!se.value_ptr.*.was_written) continue;
-                const sm = self.committed_storage.getOrPut(a, addr) catch @panic("out of memory");
-                if (!sm.found_existing) sm.value_ptr.* = .{};
-                sm.value_ptr.*.put(a, se.key_ptr.*, se.value_ptr.*.present_value) catch @panic("out of memory");
+                if (filter_by_tx and se.value_ptr.*.transaction_id < from_tx_id) continue;
+                const slot = se.key_ptr.*;
+                const present = se.value_ptr.*.present_value;
+                if (committed_slots == null) {
+                    const sm = self.committed_storage.getOrPut(a, addr) catch @panic("out of memory");
+                    if (!sm.found_existing) sm.value_ptr.* = .{};
+                    committed_slots = sm.value_ptr;
+                }
+                const sgop = committed_slots.?.getOrPut(a, slot) catch @panic("out of memory");
+                // Lazy init: the pre-block value. A slot of storage loaded from the witness
+                // already holds it from its first load, which re-proving it would only repeat;
+                // storage created or wiped this block asks the DB (handles stateless path).
+                const committed_val: u256 = if (sgop.found_existing)
+                    sgop.value_ptr.*
+                else if (!acct.status.created and !acct.status.storage_wiped)
+                    se.value_ptr.*.pre_block_value
+                else
+                    ctx.journaled_state.database.storage(addr, slot) catch 0;
+                sgop.value_ptr.* = present;
+                if (present == committed_val) continue;
+                if (changed_slots == null) {
+                    const cm = self.slot_chg.getOrPut(a, addr) catch @panic("out of memory");
+                    if (!cm.found_existing) cm.value_ptr.* = .{};
+                    changed_slots = cm.value_ptr;
+                }
+                const slot_list = changed_slots.?.getOrPutValue(a, slot, .empty) catch @panic("out of memory");
+                slot_list.value_ptr.*.append(a, bal_mod.SlotBaiValue{ .bai = bai, .value = present }) catch @panic("out of memory");
             }
         }
-
         // Consumed: anything touched after this point belongs to the next call.
         // Cleared for the pre-block call too, so the list cannot accumulate the
         // whole block's first touches.
