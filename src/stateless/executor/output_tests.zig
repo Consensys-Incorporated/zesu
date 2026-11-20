@@ -6,6 +6,7 @@ const mpt = @import("mpt");
 
 const rlp = @import("./rlp_encode.zig");
 const output = @import("./output.zig");
+const types = @import("executor_types");
 
 test "account encoding and change sort match the generic paths" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -81,5 +82,70 @@ test "sortChanges is stable and stays correct when every key shares a first byte
     for (want, got) |w, g| {
         try std.testing.expectEqualSlices(u8, &w.key, &g.key);
         try std.testing.expectEqual(w.value.?.ptr, g.value.?.ptr); // same order among equal keys
+    }
+}
+
+fn genericReceiptRlp(alloc: std.mem.Allocator, receipt: types.Receipt) ![]u8 {
+    var log_items = std.ArrayListUnmanaged([]const u8).empty;
+    for (receipt.logs) |log| {
+        var topic_items = std.ArrayListUnmanaged([]const u8).empty;
+        for (log.topics) |t| try topic_items.append(alloc, try rlp.encodeBytes(alloc, &t));
+        try log_items.append(alloc, try rlp.encodeList(alloc, &.{
+            try rlp.encodeBytes(alloc, &log.address),
+            try rlp.encodeList(alloc, topic_items.items),
+            try rlp.encodeBytes(alloc, log.data),
+        }));
+    }
+    const first_field = if (receipt.state_root) |sr|
+        try rlp.encodeBytes(alloc, &sr)
+    else
+        try rlp.encodeBytes(alloc, if (receipt.status == 1) &.{0x01} else &.{});
+    const body = try rlp.encodeList(alloc, &.{
+        first_field,
+        try rlp.encodeU64(alloc, receipt.cumulative_gas_used),
+        try rlp.encodeBytes(alloc, &receipt.logs_bloom),
+        try rlp.encodeList(alloc, log_items.items),
+    });
+    return if (receipt.type == 0) body else rlp.concat(alloc, &.{ &.{receipt.type}, body });
+}
+
+test "receipt encoding matches the generic rlp helpers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(0x7263_7074);
+    const r = prng.random();
+
+    // Data lengths around the single-byte, short-string and 1/2/3-length-byte boundaries.
+    const data_lens = [_]usize{ 0, 1, 2, 55, 56, 255, 256, 65535, 65536, 70000 };
+    for (0..400) |i| {
+        _ = arena.reset(.retain_capacity);
+        var receipt = std.mem.zeroes(types.Receipt);
+        receipt.type = @intCast(i % 5);
+        receipt.status = @intCast(i % 2);
+        if (i % 7 == 3) receipt.state_root = @splat(@truncate(i));
+        receipt.cumulative_gas_used = switch (i % 4) {
+            0 => 0,
+            1 => r.int(u7),
+            2 => 0x80,
+            else => r.int(u64),
+        };
+        r.bytes(&receipt.logs_bloom);
+
+        const logs = try alloc.alloc(types.Log, if (i % 11 == 0) 0 else r.uintLessThan(usize, 6));
+        for (logs, 0..) |*log, j| {
+            log.* = std.mem.zeroes(types.Log);
+            r.bytes(&log.address);
+            log.topics = try alloc.alloc(types.Hash, r.uintAtMost(usize, 4));
+            for (log.topics) |*t| r.bytes(t);
+            const data = try alloc.alloc(u8, data_lens[(i + j) % data_lens.len]);
+            r.bytes(data);
+            // A lone byte below 0x80 encodes as itself; exercise both sides.
+            if (data.len == 1) data[0] = if (j % 2 == 0) 0x7f else 0x80;
+            log.data = data;
+        }
+        receipt.logs = logs;
+
+        try std.testing.expectEqualSlices(u8, try genericReceiptRlp(alloc, receipt), try output.encodeReceiptRlp(alloc, receipt));
     }
 }

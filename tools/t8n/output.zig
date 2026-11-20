@@ -26,6 +26,7 @@ const executor = @import("executor");
 const types = executor.executor_types;
 const transition_mod = executor.executor_transition;
 const executor_output = executor.executor_output;
+const tx_signing = executor.executor_tx_signing;
 
 // ─── Re-export canonical computation functions ────────────────────────────────
 
@@ -117,7 +118,9 @@ pub fn writeResultJson(
     buf.clearRetainingCapacity();
     try bw.writeAll("\"receipts\": [\n");
     for (result.receipts, 0..) |receipt, i| {
-        try writeReceiptJson(bw, receipt);
+        // Receipt i belongs to accepted_txs[i]: transition() fails fast on any invalid tx.
+        const tx_hash = try tx_signing.txHash(alloc, &result.accepted_txs[i], result.chain_id);
+        try writeReceiptJson(bw, receipt, tx_hash);
         if (i < result.receipts.len - 1) try bw.writeAll(",");
         try bw.writeAll("\n");
     }
@@ -171,11 +174,11 @@ pub fn writeResultJson(
     try writer.writeAll("}\n");
 }
 
-fn writeReceiptJson(writer: anytype, receipt: transition_mod.Receipt) !void {
+fn writeReceiptJson(writer: anytype, receipt: transition_mod.Receipt, tx_hash: [32]u8) !void {
     try writer.writeAll("    {\n");
     try writer.print("      \"type\": \"0x{x}\",\n", .{receipt.type});
     try writer.writeAll("      \"transactionHash\": ");
-    try writeHash(writer, receipt.tx_hash);
+    try writeHash(writer, tx_hash);
     try writer.writeAll(",\n");
     try writer.print("      \"transactionIndex\": \"0x{x}\",\n", .{receipt.tx_index});
     try writer.writeAll("      \"blockHash\": ");
@@ -208,7 +211,7 @@ fn writeReceiptJson(writer: anytype, receipt: transition_mod.Receipt) !void {
     // Logs
     try writer.writeAll("      \"logs\": [\n");
     for (receipt.logs, 0..) |log, li| {
-        try writeLogJson(writer, log);
+        try writeLogJson(writer, log, tx_hash);
         if (li < receipt.logs.len - 1) try writer.writeAll(",");
         try writer.writeAll("\n");
     }
@@ -233,7 +236,7 @@ fn writeReceiptJson(writer: anytype, receipt: transition_mod.Receipt) !void {
     try writer.writeAll("\n    }");
 }
 
-fn writeLogJson(writer: anytype, log: transition_mod.Log) !void {
+fn writeLogJson(writer: anytype, log: transition_mod.Log, tx_hash: [32]u8) !void {
     try writer.writeAll("        {\n");
     try writer.writeAll("          \"address\": ");
     try writeAddr(writer, log.address);
@@ -252,7 +255,7 @@ fn writeLogJson(writer: anytype, log: transition_mod.Log) !void {
 
     try writer.print("          \"blockNumber\": \"0x{x}\",\n", .{log.block_number});
     try writer.writeAll("          \"transactionHash\": ");
-    try writeHash(writer, log.tx_hash);
+    try writeHash(writer, tx_hash);
     try writer.writeAll(",\n");
     try writer.print("          \"transactionIndex\": \"0x{x}\",\n", .{log.tx_index});
     try writer.writeAll("          \"blockHash\": ");

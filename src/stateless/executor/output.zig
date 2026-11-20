@@ -363,37 +363,47 @@ fn writeUintRlp(out: []u8, n: u256) usize {
     return 1 + len;
 }
 
-fn encodeReceiptRlp(alloc: std.mem.Allocator, receipt: types.Receipt) ![]u8 {
-    // Encode logs
-    var log_items = std.ArrayListUnmanaged([]const u8).empty;
-    for (receipt.logs) |log| {
-        var topic_items = std.ArrayListUnmanaged([]const u8).empty;
-        for (log.topics) |t| try topic_items.append(alloc, try rlp.encodeBytes(alloc, &t));
-        const log_parts = [_][]const u8{
-            try rlp.encodeBytes(alloc, &log.address),
-            try rlp.encodeList(alloc, topic_items.items),
-            try rlp.encodeBytes(alloc, log.data),
-        };
-        try log_items.append(alloc, try rlp.encodeList(alloc, &log_parts));
+/// Typed receipt RLP (`type ++ rlp(body)` for typed, `rlp(body)` for legacy), sized up
+/// front and written in one pass, as the generic rlp helpers would encode it.
+pub fn encodeReceiptRlp(alloc: std.mem.Allocator, receipt: types.Receipt) ![]u8 {
+    var logs_payload: usize = 0;
+    for (receipt.logs) |log| logs_payload += rlp.listLen(logPayloadLen(log));
+    // Pre-Byzantium (EIP-658): first field is the 32-byte stateRoot. Post-Byzantium: the
+    // status byte, 0x01 for success and the empty string for failure; both are 1 byte.
+    const first_len: usize = if (receipt.state_root != null) hash_rlp_len else 1;
+    const payload = first_len + rlp.uintLen(u64, receipt.cumulative_gas_used) +
+        rlp.strLen(&receipt.logs_bloom) + rlp.listLen(logs_payload);
+    const type_len: usize = @intFromBool(receipt.type != 0);
+    const out = try alloc.alloc(u8, type_len + rlp.listLen(payload));
+    errdefer alloc.free(out);
+
+    var w = rlp.Writer{ .buf = out };
+    if (type_len != 0) w.byte(receipt.type);
+    w.listHeader(payload);
+    if (receipt.state_root) |sr| {
+        w.str(&sr);
+    } else {
+        w.str(if (receipt.status == 1) &.{0x01} else &.{});
     }
-    const bloom_bytes: []const u8 = &receipt.logs_bloom;
-    // Pre-Byzantium (EIP-658): first field is 32-byte stateRoot.
-    // Post-Byzantium: first field is 1-byte status (0x01 = success, 0x00 = failure).
-    const first_field = if (receipt.state_root) |sr|
-        try rlp.encodeBytes(alloc, &sr)
-    else
-        try rlp.encodeBytes(alloc, if (receipt.status == 1) &.{0x01} else &.{});
-    const parts = [_][]const u8{
-        first_field,
-        try rlp.encodeU64(alloc, receipt.cumulative_gas_used),
-        try rlp.encodeBytes(alloc, bloom_bytes),
-        try rlp.encodeList(alloc, log_items.items),
-    };
-    const body = try rlp.encodeList(alloc, &parts);
-    return if (receipt.type == 0)
-        body
-    else
-        rlp.concat(alloc, &.{ &.{receipt.type}, body });
+    w.uint(u64, receipt.cumulative_gas_used);
+    w.str(&receipt.logs_bloom);
+    w.listHeader(logs_payload);
+    for (receipt.logs) |log| {
+        // [address, [topic, ...], data]
+        w.listHeader(logPayloadLen(log));
+        w.str(&log.address);
+        w.listHeader(log.topics.len * hash_rlp_len);
+        for (log.topics) |*t| w.str(t);
+        w.str(log.data);
+    }
+    // Not an assert: release builds are ReleaseFast, where a sizing/write mismatch would
+    // otherwise leave part of the receipt uninitialised.
+    if (w.pos != out.len) return error.ReceiptSizeMismatch;
+    return out;
+}
+
+fn logPayloadLen(log: types.Log) usize {
+    return rlp.strLen(&log.address) + rlp.listLen(log.topics.len * hash_rlp_len) + rlp.strLen(log.data);
 }
 
 /// RLP-encode a transaction index as the trie key.
