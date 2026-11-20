@@ -272,9 +272,10 @@ const zisk_mod = struct {
     extern fn mul_mod256_c(a: *const [4]u64, b: *const [4]u64, m: *const [4]u64, out: *[4]u64) void;
 
     fn reduce(a: primitives.U256, m: primitives.U256) primitives.U256 {
-        if (m == 0) return 0;
         const al = toLimbs(a);
         const ml = toLimbs(m);
+        if (wordMod(al, ml)) |r| return r;
+        if (m == 0) return 0;
         var out: [4]u64 = undefined;
         reduce_mod256_c(&al, &ml, &out);
         return fromLimbs(out);
@@ -298,6 +299,19 @@ const zisk_mod = struct {
         return fromLimbs(out);
     }
 };
+
+/// `a % m` when both fit one machine word (0 when `m == 0`), else null. One hardware
+/// remainder, so the accelerated MOD path takes it instead of a precompile call.
+pub inline fn wordMod(a: [4]u64, m: [4]u64) ?u64 {
+    // One branch per limb: a wide operand leaves at the first non-zero limb.
+    inline for (1..4) |i| {
+        if (a[i] != 0) return null;
+    }
+    inline for (1..4) |i| {
+        if (m[i] != 0) return null;
+    }
+    return if (m[0] == 0) 0 else a[0] % m[0];
+}
 
 /// Decompose u256 into 4 little-endian u64 limbs.
 pub inline fn toLimbs(v: primitives.U256) [4]u64 {
