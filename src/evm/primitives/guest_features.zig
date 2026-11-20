@@ -13,3 +13,6 @@ pub const has_jump_dest: bool = build_options.has_jump_dest;
 
 /// 256-bit modular arithmetic linked into the guest as `*_mod256_c` (currently: libziskos).
 pub const has_arith256_mod: bool = build_options.has_arith256_mod;
+
+/// 256-bit EXP and division/modular family linked into the guest as `zkvm_u256_le_*`.
+pub const has_u256_calls: bool = build_options.has_u256_calls;

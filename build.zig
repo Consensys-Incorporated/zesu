@@ -61,6 +61,9 @@ pub const GuestFeatures = struct {
     /// 256-bit MOD/ADDMOD/MULMOD, provided by the linking zkVM project as `*_mod256_c`
     /// functions in the guest (currently: libziskos).
     arith256_mod: bool = false,
+    /// 256-bit EXP and the division/modular family as `zkvm_u256_le_*` calls on four
+    /// little-endian limbs, provided by the linking zkVM project (currently: ZisK >= 1.4).
+    u256_calls: bool = false,
 };
 
 /// Create (and optionally expose) zesu's whole module graph for a single target.
@@ -103,6 +106,7 @@ fn buildModules(
     primitives_opts.addOption(bool, "has_dma", features.dma);
     primitives_opts.addOption(bool, "has_jump_dest", features.jump_dest);
     primitives_opts.addOption(bool, "has_arith256_mod", features.arith256_mod);
+    primitives_opts.addOption(bool, "has_u256_calls", features.u256_calls);
 
     const primitives = mkmod(b, expose, "primitives", .{
         .root_source_file = b.path("src/evm/primitives/main.zig"),
