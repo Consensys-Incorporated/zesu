@@ -131,12 +131,7 @@ fn runSystemCallImpl(
     setSystemCallOrigin(ctx, true);
     defer {
         setSystemCallOrigin(ctx, false);
-        if (!origin_was_loaded) {
-            if (ctx.journaled_state.inner.evm_state.fetchRemove(SYSTEM_ADDRESS)) |kv| {
-                var acct = kv.value;
-                acct.storage.deinit();
-            }
-        }
+        if (!origin_was_loaded) ctx.journaled_state.inner.removeAccount(SYSTEM_ADDRESS);
     }
 
     const EvmT = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType);
