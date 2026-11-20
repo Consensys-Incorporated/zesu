@@ -598,9 +598,7 @@ fn decodeUint64(bytes: []const u8) error{InvalidRlp}!u64 {
 fn decodeUint256(bytes: []const u8) error{InvalidRlp}!u256 {
     if (bytes.len == 0) return 0;
     if (bytes.len > 32) return error.InvalidRlp;
-    var result: u256 = 0;
-    for (bytes) |b| result = (result << 8) | b;
-    return result;
+    return rlp.beUint(u256, bytes);
 }
 
 // ─── MPT Update (stateless storage root computation) ─────────────────────────

@@ -120,6 +120,15 @@ pub fn decodeItemCanonical(input: []const u8) error{InvalidRlp}!DecodeResult {
     return r;
 }
 
+/// Big-endian unsigned integer from at most `@sizeOf(T)` bytes (empty = 0). Copies into a
+/// zero-padded word buffer instead of shifting a wide integer once per byte.
+pub fn beUint(comptime T: type, bytes: []const u8) T {
+    std.debug.assert(bytes.len <= @sizeOf(T));
+    var buf = [_]u8{0} ** @sizeOf(T);
+    @memcpy(buf[@sizeOf(T) - bytes.len ..], bytes);
+    return std.mem.readInt(T, &buf, .big);
+}
+
 /// Read a big-endian unsigned integer from 1–8 bytes.
 fn readBigEndian(bytes: []const u8) error{Overflow}!usize {
     if (bytes.len == 0 or bytes.len > 8) return error.Overflow;

@@ -4,6 +4,7 @@ const std = @import("std");
 
 const decodeItem = @import("./rlp.zig").decodeItem;
 const decodeItemCanonical = @import("./rlp.zig").decodeItemCanonical;
+const beUint = @import("./rlp.zig").beUint;
 
 test "decodeItemCanonical rejects non-canonical encodings" {
     // A single byte below 0x80 wrapped as a one-byte string.
@@ -42,4 +43,21 @@ test "isWellFormed checks nested lists, not just the outer header" {
 test "decodeItem: a claimed length past the input is rejected, not overflowed" {
     try std.testing.expectError(error.InvalidRlp, decodeItem(&([_]u8{0xff} ** 40)));
     try std.testing.expectError(error.InvalidRlp, decodeItem(&([_]u8{0xbf} ** 40)));
+}
+
+test "beUint matches a byte-by-byte big-endian read" {
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const rand = prng.random();
+    var buf: [32]u8 = undefined;
+    for (0..200) |_| {
+        rand.bytes(&buf);
+        const len = rand.uintAtMost(usize, 32);
+        var want: u256 = 0;
+        for (buf[0..len]) |b| want = (want << 8) | b;
+        try std.testing.expectEqual(want, beUint(u256, buf[0..len]));
+        const len128 = @min(len, 16);
+        try std.testing.expectEqual(@as(u128, @intCast(want >> @intCast(8 * (len - len128)))), beUint(u128, buf[0..len128]));
+    }
+    try std.testing.expectEqual(@as(u256, 0), beUint(u256, &.{}));
+    try std.testing.expectEqual(@as(u256, std.math.maxInt(u256)), beUint(u256, &([_]u8{0xff} ** 32)));
 }
