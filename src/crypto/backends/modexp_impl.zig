@@ -2,6 +2,7 @@
 /// Gas/ABI handling lives in src/evm/precompile/.
 const std = @import("std");
 const alloc_mod = @import("zesu_allocator");
+const modexp_mont = @import("modexp_mont.zig");
 
 /// Compute base^exp % modulus and write the result into `output`.
 /// `output` must be exactly `modulus.len` bytes (it is zeroed here).
@@ -54,7 +55,10 @@ pub fn modexp(
         return true;
     }
 
-    // Big-integer path
+    // Odd moduli of up to 128 limbs: fixed-width Montgomery, no allocation or division.
+    if (modexp_mont.modexp(base, exp, mod_trimmed, output)) return true;
+
+    // Big-integer path (even or larger moduli)
     modexpBigInt(alloc_mod.get(), base, exp, modulus, output) catch return false;
     return true;
 }
