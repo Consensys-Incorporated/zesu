@@ -781,17 +781,24 @@ fn analyzeLegacy(bytecode: []const u8) LegacyAnalyzedBytecode {
     // starts. A SWAR word-skipping fast path was slower on real blocks (PUSH bytes
     // are too common for clean 8-byte windows). The step table replaces the PUSH
     // range test with one load.
-    const base = bytecode.ptr;
-    const end = @intFromPtr(base) + bytecode.len;
-    var p = base;
-    while (@intFromPtr(p) < end) {
+    //
+    // The walk runs over `exec` with its pad set to JUMPDEST: the first opcode
+    // position at or past the end lands in the pad, so the end test only runs
+    // on JUMPDESTs. The pad goes back to STOP afterwards.
+    comptime std.debug.assert(EXEC_PAD > 32);
+    @memset(exec[bytecode.len..], JUMPDEST);
+    const base = exec.ptr;
+    var p: [*]const u8 = base;
+    while (true) {
         const opcode = p[0];
+        p += legacy_step[opcode];
         if (opcode == JUMPDEST) {
-            const i = @intFromPtr(p) - @intFromPtr(base);
+            const i = @intFromPtr(p) - 1 - @intFromPtr(base);
+            if (i >= bytecode.len) break;
             bit_vec[i >> 3] |= @as(u8, 1) << @intCast(i & 7);
         }
-        p += legacy_step[opcode];
     }
+    @memset(exec[bytecode.len..], STOP);
 
     return LegacyAnalyzedBytecode{
         .bytecode = bytecode,

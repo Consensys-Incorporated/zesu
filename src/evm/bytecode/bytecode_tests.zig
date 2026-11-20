@@ -4,9 +4,28 @@ const bytecode_mod = @import("main.zig");
 const JUMPDEST = bytecode_mod.JUMPDEST;
 const PUSH1 = bytecode_mod.PUSH1;
 const LegacyRawBytecode = bytecode_mod.LegacyRawBytecode;
+const STOP = bytecode_mod.STOP;
+const EXEC_PAD = bytecode_mod.EXEC_PAD;
 
 fn analyzeLegacy(code: []const u8) bytecode_mod.LegacyAnalyzedBytecode {
     return LegacyRawBytecode.init(code).intoAnalyzed();
+}
+
+/// Jump table matches `expect`, no bitmap bit past the code is set, and the
+/// executable copy is the code followed by EXEC_PAD STOPs.
+fn expectAnalysis(code: []const u8, expect: []const bool) !void {
+    const analyzed = analyzeLegacy(code);
+    for (expect, 0..) |want, pc| {
+        try std.testing.expectEqual(want, analyzed.jump_table.isValid(pc));
+    }
+    // Read the raw bitmap: `isValid` is false for any pc >= len regardless of the bits.
+    const data = analyzed.jump_table.data;
+    for (code.len..data.len * 8) |pc| {
+        try std.testing.expectEqual(@as(u8, 0), data[pc >> 3] & (@as(u8, 1) << @intCast(pc & 7)));
+    }
+    try std.testing.expectEqual(code.len + EXEC_PAD, analyzed.exec.len);
+    try std.testing.expectEqualSlices(u8, code, analyzed.exec[0..code.len]);
+    for (analyzed.exec[code.len..]) |b| try std.testing.expectEqual(STOP, b);
 }
 
 test "analyzeLegacy: jump table agrees with a serial reference" {
@@ -57,10 +76,7 @@ test "analyzeLegacy: jump table agrees with a serial reference" {
         const expect = try ref.jumpdests(alloc, code);
         defer alloc.free(expect);
 
-        const analyzed = analyzeLegacy(code);
-        for (expect, 0..) |want, pc| {
-            try std.testing.expectEqual(want, analyzed.jump_table.isValid(pc));
-        }
+        try expectAnalysis(code, expect);
     }
 
     // Adversarial fixed cases.
@@ -74,13 +90,13 @@ test "analyzeLegacy: jump table agrees with a serial reference" {
         &([_]u8{JUMPDEST} ** 9),
         &([_]u8{0x00} ** 8 ++ [_]u8{JUMPDEST}), // a skippable word then a target
         &([_]u8{0x00} ** 16),
+        &.{ 0x00, PUSH1 + 31 }, // PUSH32 on the last byte
+        &.{ PUSH1, 0x00, JUMPDEST }, // target on the last byte
+        &.{ PUSH1 + 1, 0x00, JUMPDEST }, // last byte is PUSH2 data
     };
     for (cases) |code| {
         const expect = try ref.jumpdests(alloc, code);
         defer alloc.free(expect);
-        const analyzed = analyzeLegacy(code);
-        for (expect, 0..) |want, pc| {
-            try std.testing.expectEqual(want, analyzed.jump_table.isValid(pc));
-        }
+        try expectAnalysis(code, expect);
     }
 }
