@@ -944,6 +944,58 @@ fn runDispatch(
         // PUSH1..PUSH32: immediates read straight from the code slice.
         inline 0x60...0x7F => |push_op| {
             const n = push_op - 0x60 + 1;
+            // Idioms: a PUSH1/PUSH2 and the opcodes after its immediate, run as one step
+            // when gas and stack allow the whole sequence. Anything else, including every
+            // halt, falls through to the single-opcode path below, which reports it.
+            // The bytes read ahead are inside the code's zero padding at worst.
+            if (n == 1) {
+                const imm: usize = code[r.pc + 1];
+                switch (code[r.pc + 2]) {
+                    0x01 => if (r.gas >= 2 * gas_costs.G_VERYLOW and r.sp >= 1 and r.sp < stack_mod.STACK_LIMIT) { // ADD
+                        r.gas -= 2 * gas_costs.G_VERYLOW;
+                        r.sb[r.sp - 1] +%= imm;
+                        r.pc += 3;
+                        continue :sw opcodeAt(code, r.pc);
+                    },
+                    0x56 => { // JUMP
+                        const cost = gas_costs.G_VERYLOW + gas_costs.G_MID + gas_costs.G_JUMPDEST;
+                        if (r.gas >= cost and r.sp < stack_mod.STACK_LIMIT and self.bytecode.isValidJump(imm)) {
+                            r.gas -= cost;
+                            r.pc = imm + 1;
+                            continue :sw opcodeAt(code, r.pc);
+                        }
+                    },
+                    else => {},
+                }
+            } else if (n == 2) {
+                switch (code[r.pc + 3]) {
+                    0x50 => if (r.gas >= gas_costs.G_VERYLOW + gas_costs.G_BASE and r.sp < stack_mod.STACK_LIMIT) { // POP
+                        r.gas -= gas_costs.G_VERYLOW + gas_costs.G_BASE;
+                        r.pc += 4;
+                        continue :sw opcodeAt(code, r.pc);
+                    },
+                    // GAS LT PUSH1 dest JUMPI: jump to dest when the gas left is below the immediate.
+                    0x5A => if (code[r.pc + 4] == 0x10 and code[r.pc + 5] == 0x60 and code[r.pc + 7] == 0x57) {
+                        const to_gas = gas_costs.G_VERYLOW + gas_costs.G_BASE;
+                        const not_taken = to_gas + 2 * gas_costs.G_VERYLOW + gas_costs.G_HIGH;
+                        if (r.gas >= not_taken + gas_costs.G_JUMPDEST and r.sp + 2 <= stack_mod.STACK_LIMIT) {
+                            const limit: u64 = @as(u64, code[r.pc + 1]) << 8 | code[r.pc + 2];
+                            if (r.gas - to_gas >= limit) {
+                                r.gas -= not_taken;
+                                r.pc += 8;
+                                continue :sw opcodeAt(code, r.pc);
+                            }
+                            const dest: usize = code[r.pc + 6];
+                            if (self.bytecode.isValidJump(dest)) {
+                                r.gas -= not_taken + gas_costs.G_JUMPDEST;
+                                r.pc = dest + 1;
+                                continue :sw opcodeAt(code, r.pc);
+                            }
+                        }
+                    },
+                    else => {},
+                }
+            }
             r.pc += 1;
             if (!charge(self, &r, gas_costs.G_VERYLOW)) return;
             if (r.sp >= stack_mod.STACK_LIMIT) {
