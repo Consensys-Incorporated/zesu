@@ -139,3 +139,35 @@ test "KECCAK256: deterministic" {
 
     try expectEqual(hash1, hash2);
 }
+
+fn keccak64(data: *const [64]u8) !U {
+    var interp = Interpreter.defaultExt();
+    defer interp.memory.deinit();
+    try interp.memory.buffer.resize(std.heap.c_allocator, 64);
+    @memcpy(interp.memory.buffer.items[0..64], data);
+    interp.stack.pushUnsafe(@as(U, 64));
+    interp.stack.pushUnsafe(@as(U, 0));
+    var ctx = InstructionContext{ .interpreter = &interp };
+    opKeccak256(&ctx);
+    return interp.stack.popUnsafe();
+}
+
+test "KECCAK256: 64-byte inputs memoized correctly, including bucket collisions" {
+    // a and b differ only in bytes 0..16, which the 64-byte memo index ignores,
+    // so they share a bucket and must evict each other rather than alias.
+    var a: [64]u8 = undefined;
+    for (&a, 0..) |*x, i| x.* = @intCast(i);
+    var b = a;
+    b[0] ^= 0xff;
+    var expected_a: [32]u8 = undefined;
+    var expected_b: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(&a, &expected_a, .{});
+    std.crypto.hash.sha3.Keccak256.hash(&b, &expected_b, .{});
+    const ea = std.mem.readInt(u256, &expected_a, .big);
+    const eb = std.mem.readInt(u256, &expected_b, .big);
+    for (0..2) |_| {
+        try expectEqual(ea, try keccak64(&a));
+        try expectEqual(ea, try keccak64(&a));
+        try expectEqual(eb, try keccak64(&b));
+    }
+}
