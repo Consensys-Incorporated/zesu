@@ -761,17 +761,17 @@ fn batchUpdateNodeIndexed(
     } else true;
     if (inserts_only) {
         if (BranchSlots.of(node_rlp)) |slots| {
-            var new_enc: [16]?[]const u8 = @splat(null);
+            var new_children: [16]?[]const u8 = @splat(null);
             var i: usize = 0;
             while (i < changes.len) {
                 const nib = nibbleAt(&changes[i].key, depth);
                 var j = i + 1;
                 while (j < changes.len and nibbleAt(&changes[j].key, depth) == nib) j += 1;
                 const new_child_rlp = try batchUpdateNodeIndexed(alloc, try slots.child(node_rlp, nib, nodes), changes[i..j], depth + 1, nodes);
-                new_enc[nib] = try updHashOrEmbed(alloc, new_child_rlp);
+                new_children[nib] = new_child_rlp;
                 i = j;
             }
-            return slots.replaceChildren(alloc, node_rlp, &new_enc);
+            return slots.replaceChildren(alloc, node_rlp, &new_children);
         }
     }
 
@@ -953,26 +953,81 @@ const BranchSlots = struct {
         };
     }
 
-    /// The branch with each child that has an entry in `new_enc` replaced by it.
-    pub fn replaceChildren(self: *const BranchSlots, alloc: std.mem.Allocator, node_rlp: []const u8, new_enc: *const [16]?[]const u8) ![]const u8 {
+    /// Bytes of the reference a branch stores for the child node `child_rlp`.
+    inline fn refLen(child_rlp: []const u8) usize {
+        return if (child_rlp.len < 32) child_rlp.len else 33;
+    }
+
+    /// Writes that reference: the node itself when shorter than 32 bytes, else its hash,
+    /// hashed straight into `out`. `out.len` is `refLen(child_rlp)`.
+    inline fn writeRef(out: []u8, child_rlp: []const u8) void {
+        if (child_rlp.len < 32) {
+            @memcpy(out, child_rlp);
+        } else {
+            out[0] = 0xa0;
+            accel.keccak256(child_rlp, out[1..33]);
+        }
+    }
+
+    /// The branch with each child that has an entry in `new_children`, a child node,
+    /// replaced by a reference to it.
+    pub fn replaceChildren(self: *const BranchSlots, alloc: std.mem.Allocator, node_rlp: []const u8, new_children: *const [16]?[]const u8) ![]const u8 {
         var payload: usize = self.at[17] - self.at[0];
-        for (new_enc, 0..) |enc, i| {
-            if (enc) |e| payload = payload - (self.at[i + 1] - self.at[i]) + e.len;
+        var same_size = true;
+        for (new_children, 0..) |new_child, i| {
+            const c = new_child orelse continue;
+            const old = self.at[i + 1] - self.at[i];
+            const new = refLen(c);
+            same_size = same_size and old == new;
+            payload = payload - old + new;
+        }
+        // References of unchanged size leave the list header and every other byte in place.
+        if (same_size) {
+            const out = try alloc.dupe(u8, node_rlp[0..self.at[17]]);
+            for (new_children, 0..) |new_child, i| {
+                if (new_child) |c| writeRef(out[self.at[i]..self.at[i + 1]], c);
+            }
+            return out;
         }
         const out = try alloc.alloc(u8, rlpListHeaderLen(payload) + payload);
         var pos = rlpListHeaderWrite(out, 0, payload);
         var from: usize = self.at[0];
-        for (new_enc, 0..) |enc, i| {
-            const e = enc orelse continue;
+        for (new_children, 0..) |new_child, i| {
+            const c = new_child orelse continue;
             const keep = node_rlp[from..self.at[i]];
             @memcpy(out[pos..][0..keep.len], keep);
             pos += keep.len;
-            @memcpy(out[pos..][0..e.len], e);
-            pos += e.len;
+            const n = refLen(c);
+            writeRef(out[pos..][0..n], c);
+            pos += n;
             from = self.at[i + 1];
         }
         const tail = node_rlp[from..self.at[17]];
         @memcpy(out[pos..][0..tail.len], tail);
+        return out;
+    }
+
+    /// The branch with child `nib` replaced by a reference to the child node `child_rlp`.
+    pub fn replaceChildNode(self: *const BranchSlots, alloc: std.mem.Allocator, node_rlp: []const u8, nib: u8, child_rlp: []const u8) ![]const u8 {
+        const first = self.at[0];
+        const lo = self.at[nib];
+        const hi = self.at[nib + 1];
+        const end = self.at[17];
+        const n = refLen(child_rlp);
+        // A reference of unchanged size leaves the list header and every other byte in place.
+        if (hi - lo == n) {
+            const out = try alloc.dupe(u8, node_rlp[0..end]);
+            writeRef(out[lo..hi], child_rlp);
+            return out;
+        }
+        const payload = (end - first) - (hi - lo) + n;
+        const out = try alloc.alloc(u8, rlpListHeaderLen(payload) + payload);
+        var pos = rlpListHeaderWrite(out, 0, payload);
+        @memcpy(out[pos..][0 .. lo - first], node_rlp[first..lo]);
+        pos += lo - first;
+        writeRef(out[pos..][0..n], child_rlp);
+        pos += n;
+        @memcpy(out[pos..][0 .. end - hi], node_rlp[hi..end]);
         return out;
     }
 
@@ -1021,8 +1076,8 @@ fn updNodeExImpl(
             const nib = remaining[0];
             const child_rlp = try slots.child(node_rlp, nib, nodes);
             const new_child_rlp = try updNodeExImpl(record_created, alloc, child_rlp, remaining[1..], new_val, nodes);
-            const new_child_enc = if (comptime record_created) try updHashOrEmbedRecorded(alloc, new_child_rlp, nodes) else try updHashOrEmbed(alloc, new_child_rlp);
-            return slots.replaceChild(alloc, node_rlp, nib, new_child_enc);
+            if (comptime !record_created) return slots.replaceChildNode(alloc, node_rlp, nib, new_child_rlp);
+            return slots.replaceChild(alloc, node_rlp, nib, try updHashOrEmbedRecorded(alloc, new_child_rlp, nodes));
         }
     }
 

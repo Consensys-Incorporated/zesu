@@ -1056,7 +1056,7 @@ test "BranchSlots.ofScan: rejects what updEncodeBranch would not reproduce" {
     try std.testing.expect(BranchSlots.of(&.{}) == null);
 }
 
-test "BranchSlots: replaceChild and replaceChildren match re-encoding across header sizes" {
+test "BranchSlots: replaceChild matches re-encoding across header sizes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1080,25 +1080,56 @@ test "BranchSlots: replaceChild and replaceChildren match re-encoding across hea
         enc[i] = &EMPTY_NODE_RLP;
         try std.testing.expectEqualSlices(u8, try testBranch(alloc, &enc), cur);
     }
+}
 
-    // Several children at once, mixing hash, inline and emptied slots.
+test "BranchSlots: replaceChildNode and replaceChildren match re-encoding with hashed, inline and empty children" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
     const inline_leaf = try updMakeLeaf(alloc, &.{}, "a");
+    const hashed_a = try updMakeLeaf(alloc, &(.{5} ** 40), "x" ** 40);
+    const hashed_b = try updMakeLeaf(alloc, &(.{6} ** 40), "y" ** 40);
+    try std.testing.expect(inline_leaf.len < 32 and hashed_a.len >= 32 and hashed_b.len >= 32);
+
+    // One child at a time. The payload grows from 17 to 17 + 32 * 16 bytes and back, so the
+    // list header goes from one byte to 0xf8 to 0xf9; replacing a hash by another hash, or
+    // an empty slot by an empty node, keeps the reference's size.
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    var cur = try testBranch(alloc, &enc);
+    const rounds = [_][]const u8{ hashed_a, hashed_b, inline_leaf, &EMPTY_NODE_RLP, &EMPTY_NODE_RLP };
+    for (rounds) |child| {
+        for (0..16) |i| {
+            cur = try BranchSlots.of(cur).?.replaceChildNode(alloc, cur, @intCast(i), child);
+            enc[i] = try updHashOrEmbed(alloc, child);
+            try std.testing.expectEqualSlices(u8, try testBranch(alloc, &enc), cur);
+        }
+    }
+
+    // Several children at once.
     var start: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
     for (0..16) |i| if (i % 3 == 0) {
         start[i] = try updRlpBytes(alloc, &([_]u8{@intCast(i + 1)} ** 32));
     };
     const base = try testBranch(alloc, &start);
-    var new_enc: [16]?[]const u8 = @splat(null);
-    new_enc[0] = inline_leaf;
-    new_enc[1] = try updRlpBytes(alloc, &([_]u8{0xee} ** 32));
-    new_enc[3] = &EMPTY_NODE_RLP;
-    new_enc[15] = inline_leaf;
-    var want = start;
-    for (new_enc, 0..) |e, i| if (e) |x| {
-        want[i] = x;
-    };
-    const got = try BranchSlots.of(base).?.replaceChildren(alloc, base, &new_enc);
-    try std.testing.expectEqualSlices(u8, try testBranch(alloc, &want), got);
+    const Case = [16]?[]const u8;
+    var resized: Case = @splat(null);
+    resized[0] = inline_leaf; // hash to inline
+    resized[1] = hashed_a; // empty to hash
+    resized[3] = &EMPTY_NODE_RLP; // hash to empty
+    resized[15] = inline_leaf;
+    var same_size: Case = @splat(null);
+    same_size[0] = hashed_a; // hash to hash
+    same_size[2] = &EMPTY_NODE_RLP; // empty to empty
+    same_size[15] = hashed_b;
+    for ([_]Case{ resized, same_size }) |new_children| {
+        var want = start;
+        for (new_children, 0..) |child, i| if (child) |c| {
+            want[i] = try updHashOrEmbed(alloc, c);
+        };
+        const got = try BranchSlots.of(base).?.replaceChildren(alloc, base, &new_children);
+        try std.testing.expectEqualSlices(u8, try testBranch(alloc, &want), got);
+    }
 }
 
 test "updNodeExRecorded: splicing a branch with inline, hashed and empty children" {
