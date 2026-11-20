@@ -536,7 +536,8 @@ pub const Interpreter = struct {
 // `const` and calling `coldReg` when the gate is closed, so the table still
 // supplies opUnknown. Sound because the spec is fixed for the frame; worth it
 // only for opcodes hot enough that a register branch beats a table load plus
-// an indirect call (SHL/SHR/SAR, RETURNDATASIZE, PUSH0).
+// an indirect call (SHL/SHR/SAR, RETURNDATASIZE, PUSH0, CHAINID, BASEFEE,
+// BLOBBASEFEE, SLOTNUM).
 
 /// Fetch the opcode at `pc` from the code slice runDispatch resolves once per frame
 /// (`ExtBytecode.opcode()` would switch on the Bytecode union tag on every fetch).
@@ -732,6 +733,8 @@ fn runDispatch(
     const has_push0 = primitives.isEnabledIn(self.runtime_flags.spec_id, .shanghai);
     // EIP-211. Loop-invariant like has_shifts.
     const has_returndata = primitives.isEnabledIn(self.runtime_flags.spec_id, .byzantium);
+    // Gates CHAINID, BASEFEE, BLOBBASEFEE and SLOTNUM (see envWord); fixed for the frame.
+    const spec = self.runtime_flags.spec_id;
 
     var r = Regs{
         .pc = self.bytecode.pc,
@@ -1036,11 +1039,25 @@ fn runDispatch(
             }
             continue :sw opcodeAt(code, r.pc);
         },
+        // ORIGIN, GASPRICE, COINBASE, TIMESTAMP, NUMBER, GASLIMIT: Frontier, G_BASE in
+        // every fork, one host value pushed. CHAINID, BASEFEE, BLOBBASEFEE and SLOTNUM
+        // join them behind their fork gates (see envWord).
+        0x32, 0x3A, 0x41, 0x42, 0x43, 0x45, 0x46, 0x48, 0x4A, 0x4B => |op| {
+            r.pc += 1;
+            const v: ?primitives.U256 = switch (op) {
+                inline 0x32, 0x3A, 0x41, 0x42, 0x43, 0x45, 0x46, 0x48, 0x4A, 0x4B => |env_op| envWord(ctx.host, env_op, spec),
+                else => unreachable,
+            };
+            if (v) |w| {
+                if (!pushReg(self, &r, gas_costs.G_BASE, w)) return;
+            } else if (!coldReg(self, table, ctx, op, &r)) return;
+            continue :sw opcodeAt(code, r.pc);
+        },
         // Cold path: table lookup + indirect call. Fork-gated opcodes (TLOAD/TSTORE
         // etc.) get opUnknown on old forks from the table.
         // Naming every cold value explicitly (rather than using `else`) keeps the jump
         // table dense over the whole u8 domain — no upper-bound compare needed.
-        0x04...0x0f, 0x1e, 0x1f, 0x20...0x2f, 0x31, 0x32, 0x37, 0x39...0x3c, 0x3e, 0x3f...0x4f, 0x54, 0x55, 0x5c...0x5e, 0xa0...0xff => |op| {
+        0x04...0x0f, 0x1e, 0x1f, 0x20...0x2f, 0x31, 0x37, 0x39, 0x3b, 0x3c, 0x3e, 0x3f, 0x40, 0x44, 0x47, 0x49, 0x4c...0x4f, 0x54, 0x55, 0x5c...0x5e, 0xa0...0xff => |op| {
             r.pc += 1;
             if (!coldReg(self, table, ctx, op, &r)) return;
             // Only the cold path can suspend the frame, so this is the one arm
@@ -1049,6 +1066,25 @@ fn runDispatch(
                 continue :sw opcodeAt(code, r.pc);
         },
     }
+}
+
+/// The value an inlined host read pushes, or null when the table's handler must run
+/// instead: no host, a closed fork gate, or no slot number (those handlers halt).
+inline fn envWord(host: ?*Host, comptime op: u8, spec: primitives.SpecId) ?primitives.U256 {
+    const h = host orelse return null;
+    return switch (op) {
+        0x32 => host_mod.addressToU256(h.origin()),
+        0x3A => h.gasPrice(),
+        0x41 => host_mod.addressToU256(h.coinbase()),
+        0x42 => h.timestamp(),
+        0x43 => h.blockNumber(),
+        0x45 => h.blockGasLimit(),
+        0x46 => if (primitives.isEnabledIn(spec, .istanbul)) h.chainId() else null,
+        0x48 => if (primitives.isEnabledIn(spec, .london)) h.basefee() else null,
+        0x4A => if (primitives.isEnabledIn(spec, .cancun)) h.blobBasefee() else null,
+        0x4B => if (primitives.isEnabledIn(spec, .amsterdam)) (if (h.slotNumber()) |slot| slot else null) else null,
+        else => unreachable,
+    };
 }
 
 /// The cold path with the register state published for the handler and read back
