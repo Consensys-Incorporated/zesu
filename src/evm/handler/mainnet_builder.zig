@@ -87,7 +87,8 @@ pub const MainContext = struct {
 /// the heap-allocated `*MainnetEvm`, and stack-allocated test helpers.
 pub const MainnetHandler = struct {
     /// Validate transaction — environment checks (no DB access) then caller state check.
-    pub fn validate(evm: anytype, initial_gas: *validation.InitialAndFloorGas) !void {
+    /// `intrinsic` is this transaction's validateInitialTxGas result if already computed.
+    pub fn validate(evm: anytype, initial_gas: *validation.InitialAndFloorGas, intrinsic: ?validation.InitialAndFloorGas) !void {
         const ctx = evm.getContext();
 
         // 1. Validate block/tx/cfg fields (chain ID, gas cap, priority fee ordering)
@@ -100,7 +101,7 @@ pub const MainnetHandler = struct {
         try validation.Validation.validateEip7702Tx(&ctx.tx, ctx.cfg.spec);
 
         // 4. Calculate intrinsic gas and validate gas_limit covers it
-        initial_gas.* = try validation.Validation.validateInitialTxGas(evm);
+        initial_gas.* = intrinsic orelse try validation.Validation.validateInitialTxGas(evm);
 
         // 5. Load caller, check nonce/code/balance, deduct max fee, bump nonce
         try validation.Validation.validateAgainstStateAndDeductCaller(evm, initial_gas.initial_gas);
@@ -1116,10 +1117,16 @@ fn executeIterative(
 /// pointer to any `EvmFor(DB)` (for a `*MainnetEvm`, pass `&mevm.evm`).
 pub const ExecuteEvm = struct {
     pub fn execute(evm: anytype) !main.ExecutionResult {
+        return executeWithIntrinsic(evm, null);
+    }
+
+    /// `execute` for a caller that already ran validateInitialTxGas on this transaction
+    /// and passes its result, so the calldata is not scanned again.
+    pub fn executeWithIntrinsic(evm: anytype, intrinsic: ?validation.InitialAndFloorGas) !main.ExecutionResult {
         var initial_gas = validation.InitialAndFloorGas{ .initial_gas = 0, .floor_gas = 0 };
 
         // Validate (env checks + caller deduction)
-        MainnetHandler.validate(evm, &initial_gas) catch |err| {
+        MainnetHandler.validate(evm, &initial_gas, intrinsic) catch |err| {
             MainnetHandler.catchError(evm, err);
             return main.ExecutionResult.new(.Fail, 0);
         };
