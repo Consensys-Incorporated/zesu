@@ -213,7 +213,6 @@ test "a transaction to a delegated account whose delegate code is in the witness
 fn depositReceipt(log: *input.Log) input.Receipt {
     return .{
         .type = 2,
-        .tx_hash = @splat(0),
         .tx_index = 0,
         .block_hash = @splat(0),
         .block_number = 0,
@@ -239,7 +238,6 @@ test "deposit requests come from the chain's own deposit contract" {
         .topics = &topics,
         .data = &data,
         .block_number = 0,
-        .tx_hash = @splat(0),
         .tx_index = 0,
         .block_hash = @splat(0),
         .log_index = 0,
@@ -268,7 +266,6 @@ test "a configured deposit contract replaces the chain-id default" {
         .topics = &topics,
         .data = &data,
         .block_number = 0,
-        .tx_hash = @splat(0),
         .tx_index = 0,
         .block_hash = @splat(0),
         .log_index = 0,

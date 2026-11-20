@@ -91,7 +91,6 @@ pub const Log = struct {
     topics: []Hash,
     data: []const u8,
     block_number: u64,
-    tx_hash: Hash,
     tx_index: u64,
     block_hash: Hash,
     log_index: u64,
@@ -100,7 +99,6 @@ pub const Log = struct {
 
 pub const Receipt = struct {
     type: u8,
-    tx_hash: Hash,
     tx_index: u64,
     block_hash: Hash,
     block_number: u64,
