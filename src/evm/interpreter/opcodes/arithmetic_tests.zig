@@ -440,6 +440,60 @@ test "EXP: out of gas (dynamic word cost)" {
     try expectEqual(.out_of_gas, interp.result);
 }
 
+/// Reference EXP: the textbook square-and-multiply over whole u256 values.
+fn refExp(base: U, exp: U) U {
+    var r: U = 1;
+    var b = base;
+    var e = exp;
+    while (e != 0) : (e >>= 1) {
+        if (e & 1 == 1) r = r *% b;
+        b = b *% b;
+    }
+    return r;
+}
+
+test "expMod256: known values" {
+    const exp = arithmetic.expMod256;
+    try expectEqual(@as(U, 1), exp(0, 0));
+    try expectEqual(@as(U, 0), exp(0, MAX));
+    try expectEqual(@as(U, 1), exp(1, MAX));
+    try expectEqual(MAX, exp(MAX, MAX)); // (-1)^odd
+    try expectEqual(@as(U, 1), exp(MAX, MAX - 1)); // (-1)^even
+    try expectEqual(@as(U, 1) << 255, exp(2, 255));
+    try expectEqual(@as(U, 0), exp(2, 256));
+    try expectEqual(@as(U, 0), exp(1 << 128, 2));
+    try expectEqual((@as(U, 1) << 129) + 1, exp((1 << 128) + 1, 2));
+    try expectEqual(@as(U, 1_000_000_000_000_000_000), exp(10, 18));
+    // Exponents of 2+ limbs take the sliding-window path; check it against the reference
+    // at limb boundaries, where a window straddles two limbs.
+    for ([_]U{ 1 << 64, (1 << 64) + 1, (1 << 65) - 1, 1 << 128, (1 << 128) - 1, (1 << 192) | 0xF, 1 << 255 }) |e| {
+        try expectEqual(refExp(3, e), exp(3, e));
+        try expectEqual(refExp(MAX - 2, e), exp(MAX - 2, e));
+    }
+}
+
+test "expMod256: matches reference square-and-multiply on random inputs" {
+    var prng = std.Random.DefaultPrng.init(0x5eed_e4b0);
+    const rand = prng.random();
+    for (0..20_000) |_| {
+        var b: U = 0;
+        var e: U = 0;
+        for (0..4) |_| {
+            b = (b << 64) | rand.int(u64);
+            e = (e << 64) | rand.int(u64);
+        }
+        // Spread exponents over every bit width, and sometimes make them sparse or dense.
+        e >>= @intCast(rand.uintLessThan(u16, 256));
+        switch (rand.uintLessThan(u8, 4)) {
+            0 => e &= e >> 1 & e >> 2, // sparse
+            1 => e |= e >> 1 | e >> 2, // dense
+            else => {},
+        }
+        if (rand.boolean()) b >>= @intCast(rand.uintLessThan(u16, 256));
+        try expectEqual(refExp(b, e), arithmetic.expMod256(b, e));
+    }
+}
+
 test "EXP: stack underflow" {
     var interp = Interpreter.defaultExt();
     var ctx = InstructionContext{ .interpreter = &interp };
