@@ -56,7 +56,7 @@ pub fn opDiv(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = divU256(a, b);
+    stack.setTopUnsafe().* = if (comptime primitives.guest_features.has_u256_calls) zkvm_u256.div(a, b) else divU256(a, b);
 }
 
 /// SDIV opcode (0x05): a / b (signed, division by zero returns 0)
@@ -70,7 +70,7 @@ pub fn opSdiv(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = sdiv(a, b);
+    stack.setTopUnsafe().* = if (comptime primitives.guest_features.has_u256_calls) zkvm_u256.sdiv(a, b) else sdiv(a, b);
 }
 
 /// MOD opcode (0x06): a % b (unsigned, mod by zero returns 0)
@@ -84,7 +84,7 @@ pub fn opMod(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = if (comptime primitives.guest_features.has_arith256_mod) zisk_mod.reduce(a, b) else modU256(a, b);
+    stack.setTopUnsafe().* = if (comptime primitives.guest_features.has_u256_calls) zkvm_u256.mod(a, b) else if (comptime primitives.guest_features.has_arith256_mod) zisk_mod.reduce(a, b) else modU256(a, b);
 }
 
 /// SMOD opcode (0x07): a % b (signed, mod by zero returns 0)
@@ -98,7 +98,7 @@ pub fn opSmod(ctx: *InstructionContext) void {
     const a = stack.peekUnsafe(0);
     const b = stack.peekUnsafe(1);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = smod(a, b);
+    stack.setTopUnsafe().* = if (comptime primitives.guest_features.has_u256_calls) zkvm_u256.smod(a, b) else smod(a, b);
 }
 
 /// ADDMOD opcode (0x08): (a + b) % N with u257 intermediate
@@ -113,7 +113,7 @@ pub fn opAddmod(ctx: *InstructionContext) void {
     const b = stack.peekUnsafe(1);
     const n = stack.peekUnsafe(2);
     stack.shrinkUnsafe(2);
-    stack.setTopUnsafe().* = if (comptime primitives.guest_features.has_arith256_mod) zisk_mod.add(a, b, n) else addmod(a, b, n);
+    stack.setTopUnsafe().* = if (comptime primitives.guest_features.has_u256_calls) zkvm_u256.addmod(a, b, n) else if (comptime primitives.guest_features.has_arith256_mod) zisk_mod.add(a, b, n) else addmod(a, b, n);
 }
 
 /// MULMOD opcode (0x09): (a * b) % N with u512 intermediate
@@ -128,7 +128,7 @@ pub fn opMulmod(ctx: *InstructionContext) void {
     const b = stack.peekUnsafe(1);
     const n = stack.peekUnsafe(2);
     stack.shrinkUnsafe(2);
-    stack.setTopUnsafe().* = if (comptime primitives.guest_features.has_arith256_mod) zisk_mod.mul(a, b, n) else mulmod(a, b, n);
+    stack.setTopUnsafe().* = if (comptime primitives.guest_features.has_u256_calls) zkvm_u256.mulmod(a, b, n) else if (comptime primitives.guest_features.has_arith256_mod) zisk_mod.mul(a, b, n) else mulmod(a, b, n);
 }
 
 /// EXP opcode (0x0A): base ^ exponent (mod 2^256)
@@ -154,7 +154,7 @@ pub fn opExp(ctx: *InstructionContext) void {
     }
     const base = stack.peekUnsafe(0);
     stack.shrinkUnsafe(1);
-    stack.setTopUnsafe().* = expMod256(base, exponent);
+    stack.setTopUnsafe().* = if (comptime primitives.guest_features.has_u256_calls) zkvm_u256.exp(base, exponent) else expMod256(base, exponent);
 }
 
 /// SIGNEXTEND opcode (0x0B): Sign extend value from byte position
@@ -296,6 +296,64 @@ const zisk_mod = struct {
         var out: [4]u64 = undefined;
         mul_mod256_c(&al, &bl, &ml, &out);
         return fromLimbs(out);
+    }
+};
+
+/// EXP and the division/modular family through the zkVM's `zkvm_u256_le_*` functions
+/// (referenced solely under `primitives.guest_features.has_u256_calls`). Operands and
+/// result are four little-endian limbs, U256's own layout, so nothing is converted.
+/// Division by zero and a zero modulus give 0, as in the EVM.
+const zkvm_u256 = struct {
+    const W = primitives.U256;
+    extern fn zkvm_u256_le_div(a: *const W, b: *const W, quotient: *W) i32;
+    extern fn zkvm_u256_le_mod(a: *const W, b: *const W, remainder: *W) i32;
+    extern fn zkvm_u256_le_sdiv(a: *const W, b: *const W, quotient: *W) i32;
+    extern fn zkvm_u256_le_smod(a: *const W, b: *const W, remainder: *W) i32;
+    extern fn zkvm_u256_le_addmod(a: *const W, b: *const W, n: *const W, result: *W) i32;
+    extern fn zkvm_u256_le_mulmod(a: *const W, b: *const W, n: *const W, result: *W) i32;
+    extern fn zkvm_u256_le_exp(base: *const W, exponent: *const W, result: *W) i32;
+
+    /// Both operands fit one machine word: a hardware divide beats the call.
+    inline fn words(a: W, b: W) ?[2]u64 {
+        if ((a | b) >> 64 != 0) return null;
+        return .{ @truncate(a), @truncate(b) };
+    }
+    fn div(a: W, b: W) W {
+        if (words(a, b)) |w| return if (w[1] == 0) 0 else w[0] / w[1];
+        var out: W = undefined;
+        _ = zkvm_u256_le_div(&a, &b, &out);
+        return out;
+    }
+    fn mod(a: W, b: W) W {
+        if (words(a, b)) |w| return if (w[1] == 0) 0 else w[0] % w[1];
+        var out: W = undefined;
+        _ = zkvm_u256_le_mod(&a, &b, &out);
+        return out;
+    }
+    fn sdiv(a: W, b: W) W {
+        var out: W = undefined;
+        _ = zkvm_u256_le_sdiv(&a, &b, &out);
+        return out;
+    }
+    fn smod(a: W, b: W) W {
+        var out: W = undefined;
+        _ = zkvm_u256_le_smod(&a, &b, &out);
+        return out;
+    }
+    fn addmod(a: W, b: W, n: W) W {
+        var out: W = undefined;
+        _ = zkvm_u256_le_addmod(&a, &b, &n, &out);
+        return out;
+    }
+    fn mulmod(a: W, b: W, n: W) W {
+        var out: W = undefined;
+        _ = zkvm_u256_le_mulmod(&a, &b, &n, &out);
+        return out;
+    }
+    fn exp(base: W, exponent: W) W {
+        var out: W = undefined;
+        _ = zkvm_u256_le_exp(&base, &exponent, &out);
+        return out;
     }
 };
 
