@@ -105,16 +105,23 @@ fn mixInLength(root: [32]u8, length: u64) [32]u8 {
 
 // ── Sparse Merkle tree ────────────────────────────────────────────────────────
 
-/// Compute the Merkle root of `2^depth` virtual leaves where:
-///   leaves[0..len] are the actual values
-///   leaves[len..2^depth] are all zero chunks.
-fn sparseRoot(leaves: []const [32]u8, depth: u8) [32]u8 {
-    if (leaves.len == 0) return zeroHash(depth);
-    if (depth == 0) return leaves[0];
-    const half: usize = @as(usize, 1) << @intCast(depth - 1);
-    const left_leaves = if (leaves.len > half) leaves[0..half] else leaves;
-    const right_leaves = if (leaves.len > half) leaves[half..] else &[_][32]u8{};
-    return sha2(sparseRoot(left_leaves, depth - 1), sparseRoot(right_leaves, depth - 1));
+/// Merkle root of `2^depth` leaves: `nodes` followed by zero chunks.
+/// Reduces `nodes` in place one level at a time, hashing each sibling pair where it
+/// lies, so the contents of `nodes` are clobbered.
+fn sparseRoot(nodes: [][32]u8, depth: u8) [32]u8 {
+    if (nodes.len == 0) return zeroHash(depth);
+    var len = nodes.len;
+    for (0..depth) |level| {
+        const pairs = len / 2;
+        if (pairs > 0) {
+            // Parent 0 overlaps its own children; every other parent lies below its pair.
+            nodes[0] = sha2(nodes[0], nodes[1]);
+            for (1..pairs) |i| accel.sha256(std.mem.sliceAsBytes(nodes[2 * i ..][0..2]), &nodes[i]);
+        }
+        if (len % 2 != 0) nodes[pairs] = sha2(nodes[len - 1], ZERO_HASHES[level]);
+        len = pairs + len % 2;
+    }
+    return nodes[0];
 }
 
 /// Merkleize exactly N chunks (N must be a power of two).
@@ -143,20 +150,29 @@ fn merkleizeExact(chunks: []const [32]u8) [32]u8 {
 /// holding 1, 4, 16, 64, ... leaves. The spine terminates in a single zero
 /// chunk (not a zero subtree), so the root grows with the actual element count
 /// instead of a fixed capacity.
-fn progressiveRoot(nodes: []const [32]u8) [32]u8 {
-    return progressiveRootAt(nodes, 0);
-}
-
-fn progressiveRootAt(nodes: []const [32]u8, depth: u8) [32]u8 {
-    if (nodes.len == 0) return ZERO_HASHES[0];
-    const base = @as(usize, 1) << @intCast(depth);
-    const n = @min(base, nodes.len);
-    return sha2(sparseRoot(nodes[0..n], depth), progressiveRootAt(nodes[n..], depth + 2));
+/// Clobbers `nodes`: each subtree is reduced in place (see `sparseRoot`) and its root
+/// kept in the leading slots until the spine is folded from the far end.
+fn progressiveRoot(nodes: [][32]u8) [32]u8 {
+    var subtrees: usize = 0;
+    var start: usize = 0;
+    var depth: u8 = 0;
+    while (start < nodes.len) : (depth += 2) {
+        const n = @min(@as(usize, 1) << @intCast(depth), nodes.len - start);
+        nodes[subtrees] = sparseRoot(nodes[start..][0..n], depth);
+        subtrees += 1;
+        start += n;
+    }
+    var root = ZERO_HASHES[0];
+    while (subtrees > 0) {
+        subtrees -= 1;
+        root = sha2(nodes[subtrees], root);
+    }
+    return root;
 }
 
 /// hash_tree_root of a `ProgressiveList` whose elements are not packed
 /// (each element contributes one node): mix_in_length over the progressive root.
-fn progressiveListRoot(roots: []const [32]u8) [32]u8 {
+fn progressiveListRoot(roots: [][32]u8) [32]u8 {
     return mixInLength(progressiveRoot(roots), roots.len);
 }
 
@@ -187,7 +203,7 @@ fn activeFields(comptime n: u8) [32]u8 {
 
 /// hash_tree_root of a `ProgressiveContainer`: progressive root of the field
 /// nodes, paired with the active_fields bitvector.
-fn progressiveContainerRoot(fields: []const [32]u8, comptime n_active: u8) [32]u8 {
+fn progressiveContainerRoot(fields: [][32]u8, comptime n_active: u8) [32]u8 {
     return sha2(progressiveRoot(fields), activeFields(n_active));
 }
 
@@ -291,8 +307,6 @@ fn htExecutionPayload(alloc: std.mem.Allocator, ep: input.ExecutionPayload) !([3
 }
 
 fn htTransactionList(alloc: std.mem.Allocator, raw_txs: []const []const u8) !([32]u8) {
-    if (raw_txs.len == 0) return progressiveListRoot(&.{});
-
     const tx_roots = try alloc.alloc([32]u8, raw_txs.len);
     defer alloc.free(tx_roots);
     for (raw_txs, 0..) |tx, i| tx_roots[i] = try htProgressiveByteList(alloc, tx);
@@ -301,8 +315,6 @@ fn htTransactionList(alloc: std.mem.Allocator, raw_txs: []const []const u8) !([3
 }
 
 fn htWithdrawalList(alloc: std.mem.Allocator, withdrawals: []const input.Withdrawal) !([32]u8) {
-    if (withdrawals.len == 0) return progressiveListRoot(&.{});
-
     const roots = try alloc.alloc([32]u8, withdrawals.len);
     defer alloc.free(roots);
     for (withdrawals, 0..) |w, i| roots[i] = htWithdrawal(w);
@@ -315,8 +327,10 @@ fn htWithdrawalList(alloc: std.mem.Allocator, withdrawals: []const input.Withdra
 /// hash_tree_root for List[Bytes32, MAX_BLOB_COMMITMENTS_PER_BLOCK] (versioned_hashes).
 /// Bytes32 is a ByteVector, not a basic type, so elements are unpacked —
 /// each hash is already exactly one chunk; 4096 = 2^12 leaves.
-fn htVersionedHashes(hashes: []const [32]u8) [32]u8 {
-    return mixInLength(sparseRoot(hashes, 12), hashes.len);
+fn htVersionedHashes(alloc: std.mem.Allocator, hashes: []const [32]u8) ![32]u8 {
+    const nodes = try alloc.dupe([32]u8, hashes);
+    defer alloc.free(nodes);
+    return mixInLength(sparseRoot(nodes, 12), hashes.len);
 }
 
 // ── SszExecutionRequests hash_tree_root ──────────────────────────────────────
@@ -409,7 +423,6 @@ fn htRequestList(
     comptime SIZE: usize,
     comptime itemRoot: fn (*const [SIZE]u8) [32]u8,
 ) ![32]u8 {
-    if (data.len == 0) return progressiveListRoot(&.{});
     if (data.len % SIZE != 0) return error.InvalidSsz;
     const n = data.len / SIZE;
     const roots = try alloc.alloc([32]u8, n);
@@ -420,7 +433,7 @@ fn htRequestList(
 
 /// hash_tree_root for the SszExecutionRequests ProgressiveContainer.
 fn htExecutionRequests(alloc: std.mem.Allocator, er: input.ExecutionRequests) ![32]u8 {
-    const chunks: [5][32]u8 = .{
+    var chunks: [5][32]u8 = .{
         try htRequestList(alloc, er.deposits, 192, htDepositRequest),
         try htRequestList(alloc, er.withdrawals, 76, htWithdrawalRequest),
         try htRequestList(alloc, er.consolidations, 116, htConsolidationRequest),
@@ -443,11 +456,12 @@ pub fn newPayloadRequestRoot(
     req: input.NewPayloadRequest,
 ) ![32]u8 {
     const h0 = try htExecutionPayload(alloc, req.execution_payload);
-    const h1 = htVersionedHashes(req.versioned_hashes);
+    const h1 = try htVersionedHashes(alloc, req.versioned_hashes);
     const h2 = htBytes32(req.parent_beacon_block_root);
     const h3 = try htExecutionRequests(alloc, req.execution_requests);
 
-    return progressiveContainerRoot(&.{ h0, h1, h2, h3 }, 4);
+    var fields: [4][32]u8 = .{ h0, h1, h2, h3 };
+    return progressiveContainerRoot(&fields, 4);
 }
 
 // ── Serialize output ──────────────────────────────────────────────────────────
