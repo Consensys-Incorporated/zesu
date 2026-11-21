@@ -1,18 +1,14 @@
-//! Merkle Patricia Trie: proof verification for stateless execution.
-//!
-//! Verification works against a flat node pool (from debug_executionWitness).
-//! For each step, the next node is located by scanning the pool for an entry
-//! whose keccak256 hash matches the expected reference — no pre-assembled
-//! ordered proof paths are needed.
-//!
-//! All functions are allocation-free; stack buffers are used for nibble paths.
+//! Merkle Patricia Trie over an unordered witness node pool: proof walks, secured-trie
+//! path validation, and root updates. Each step resolves the next node by its keccak256,
+//! via a NodeIndex (the hot path) or a linear pool scan; no ordered proof paths are needed.
+//! Verification is allocation-free; updates allocate the nodes they create.
 
 const std = @import("std");
 const primitives = @import("primitives");
 const input = @import("input");
 const accel = @import("accelerators");
 
-/// RLP decoder — also re-exported so callers (e.g. io.zig) can reuse it.
+/// RLP decoder, re-exported for rlp_decode.zig and tools.
 pub const rlp = @import("rlp.zig");
 pub const builder = @import("builder.zig");
 const nibbles = @import("nibbles.zig");
@@ -39,14 +35,13 @@ pub const AccountState = struct {
     code_hash: primitives.Hash,
 };
 
-/// RLP encoding of an empty node (single byte 0x80). Used as a static sentinel
-/// to avoid bump-allocator dupe calls for the common empty-node case in trie updates.
+/// RLP encoding of an empty node. A static sentinel so trie updates need not allocate one.
 pub const EMPTY_NODE_RLP: [1]u8 = .{0x80};
 
 // ─── keccak256 ─────────────────────────────────────────────────────────────────
 
-/// Delegates to the injected accelerators module.
-/// Default: std.crypto pure-Zig.  Zisk build: hardware CSR circuit.
+/// Delegates to the accelerators module (std.crypto under the default backend,
+/// `zkvm_keccak256` under the extern backend).
 pub fn keccak256(data: []const u8) [32]u8 {
     var hash: [32]u8 = undefined;
     accel.keccak256(data, &hash);
@@ -55,14 +50,11 @@ pub fn keccak256(data: []const u8) [32]u8 {
 
 // ─── NodeIndex ─────────────────────────────────────────────────────────────────
 
-/// Pre-computed hash → node-bytes map built once from the witness node pool.
-/// Use buildNodeIndex() to populate, then pass to the *Indexed verification
-/// functions for O(1) node lookups instead of O(N·keccak) linear scans.
+/// Hash → node-bytes map built once from the witness node pool (buildNodeIndex), used by
+/// the *Indexed functions and batchUpdateIndexed.
 pub const NodeIndex = std.HashMap([32]u8, []const u8, primitives.HashContext, 80);
 
-/// Build a NodeIndex from a flat node pool.
-/// Each entry maps keccak256(node_bytes) → node_bytes.
-/// The returned map is owned by the caller; call deinit() when done.
+/// Values slice into `pool`, which must outlive the index. Caller owns the map.
 pub fn buildNodeIndex(allocator: std.mem.Allocator, pool: []const []const u8) !NodeIndex {
     var index = NodeIndex.init(allocator);
     try index.ensureTotalCapacity(@intCast(pool.len));
@@ -73,7 +65,6 @@ pub fn buildNodeIndex(allocator: std.mem.Allocator, pool: []const []const u8) !N
     return index;
 }
 
-/// O(1) index lookup — used by the indexed API for large witness pools.
 fn findNodeInIndex(index: *const NodeIndex, hash: primitives.Hash) ?[]const u8 {
     return index.get(hash);
 }
@@ -88,192 +79,6 @@ const NodeView = struct {
         return self.witness.get(hash) orelse self.created.get(hash);
     }
 };
-
-// ─── validateSecuredTriePaths ──────────────────────────────────────────────────
-
-/// Nibbles in a secured-trie key: the keccak256 of an address or storage slot.
-const SECURED_KEY_NIBBLES = 64;
-
-/// What validateSecuredTriePaths needs besides the index, built once per block: a byte map
-/// over the index's keys, indexed by hash bytes 8..16 (the index's own hash reads bytes
-/// 0..8), and the walk's stack. Most child hashes the walk meets are not in the witness,
-/// and a miss in the index probes several slots; the map answers most of them in one load.
-pub const PathCheck = struct {
-    present: []u8,
-    mask: u64,
-    stack: []Pending,
-
-    /// A node still to walk, with the key nibbles left below it.
-    const Pending = struct { ptr: [*]const u8, len: u32, remaining: u32 };
-
-    /// Each branch level leaves at most 15 siblings pending, and a branch needs a nibble
-    /// left, so 64 levels of 15 plus the 16 children of the deepest fit.
-    const stack_len = 15 * SECURED_KEY_NIBBLES + 16;
-
-    /// At least 32 entries per node, so about 3% of absent hashes still reach the index.
-    pub fn init(alloc: std.mem.Allocator, index: *const NodeIndex) error{OutOfMemory}!PathCheck {
-        var len: usize = 64;
-        while (len < 32 * index.count()) len <<= 1;
-        const present = try alloc.alloc(u8, len);
-        errdefer alloc.free(present);
-        @memset(present, 0);
-        const check: PathCheck = .{ .present = present, .mask = len - 1, .stack = try alloc.alloc(Pending, stack_len) };
-        var it = index.keyIterator();
-        while (it.next()) |key| present[check.slot(key)] = 1;
-        return check;
-    }
-
-    pub fn deinit(self: PathCheck, alloc: std.mem.Allocator) void {
-        alloc.free(self.stack);
-        alloc.free(self.present);
-    }
-
-    fn slot(self: PathCheck, hash: *const [32]u8) usize {
-        return std.mem.readInt(u64, hash[8..16], .little) & self.mask;
-    }
-
-    fn mayContain(self: PathCheck, hash: *const [32]u8) bool {
-        return self.present[self.slot(hash)] != 0;
-    }
-};
-
-/// Rejects a secured (state or storage) trie whose witness nodes, walked from `root`,
-/// hold a path that does not end at exactly 64 nibbles: a leaf that ends early or late,
-/// an extension that reaches the key length, or a branch at it. Children absent from
-/// `index` are not walked. Mirrors the reference's `_validate_secured_trie_paths`, run on
-/// every trie it decodes from the witness, including nodes no lookup reaches.
-/// `check` must be built from `index`.
-///
-/// Nodes are scanned in place rather than through node.decodeNode, and walked from a stack
-/// rather than by recursion: the walk visits every witness node, and most branch slots are
-/// an empty string or a 32-byte hash, which the scan reads directly. Malformed nodes fail
-/// as decodeNode would.
-pub fn validateSecuredTriePaths(root: primitives.Hash, index: *const NodeIndex, check: *const PathCheck) MptError!void {
-    if (std.mem.eql(u8, &root, &EMPTY_TRIE_HASH)) return;
-    const root_rlp = findNodeInIndex(index, root) orelse return;
-    // Stack writes keep the compiler from proving `check` unchanged, so read it once.
-    const stack = check.stack;
-    const present = check.present.ptr;
-    const mask = check.mask;
-    stack[0] = .{ .ptr = root_rlp.ptr, .len = @intCast(root_rlp.len), .remaining = SECURED_KEY_NIBBLES };
-    var top: usize = 1;
-    while (top > 0) {
-        top -= 1;
-        const node_rlp = stack[top].ptr[0..stack[top].len];
-        const remaining = stack[top].remaining;
-
-        // A branch is almost always a long list with a two-byte length.
-        var rest = if (node_rlp.len >= 3 and node_rlp[0] == 0xf9 and
-            3 + (@as(usize, node_rlp[1]) << 8 | node_rlp[2]) <= node_rlp.len)
-            node_rlp[3..][0 .. @as(usize, node_rlp[1]) << 8 | node_rlp[2]]
-        else switch ((try rlp.decodeItem(node_rlp)).item) {
-            .list => |payload| payload,
-            .bytes => return error.InvalidNode,
-        };
-
-        // A leaf or extension has exactly two items: a hex-prefix path and a value or child.
-        const len_0 = try itemLen(rest);
-        if (rest.len == len_0 + try itemLen(rest[len_0..])) {
-            const path = if (rest[0] < 0x80)
-                rest[0..1]
-            else if (rest[0] <= 0xb7)
-                rest[1..len_0]
-            else switch ((try rlp.decodeItem(rest)).item) {
-                .bytes => |b| b,
-                .list => return error.InvalidNode,
-            };
-            if (path.len == 0) return error.InvalidNode;
-            const len = try hpNibbleLen(path);
-            if (path[0] & 0x20 != 0) {
-                if (len != remaining) return error.InvalidProof;
-                continue;
-            }
-            if (len >= remaining) return error.InvalidProof;
-            const child_raw = rest[len_0..];
-            if (childNode((try rlp.decodeItem(child_raw)).item, child_raw, index, check)) |child|
-                top = try push(stack, top, child, remaining - @as(u32, @intCast(len)));
-            continue;
-        }
-
-        // Branch: 16 children and a value, which is not checked.
-        if (remaining == 0) return error.InvalidProof;
-        // Most branch slots in a witness sit in branches with 16 hashed children: read
-        // those at fixed offsets, and fall back to the scan below for any other layout.
-        if (rest.len == 16 * 33 + 1 and rest[16 * 33] == 0x80) full: {
-            const pending = top;
-            inline for (0..16) |i| {
-                if (rest[33 * i] != 0xa0) {
-                    top = pending;
-                    break :full;
-                }
-                if (present[std.mem.readInt(u64, rest[33 * i + 9 ..][0..8], .little) & mask] != 0)
-                    top = try pushIndexed(stack, top, index, rest[33 * i + 1 ..][0..32], remaining - 1);
-            }
-            continue;
-        }
-        for (0..16) |_| {
-            if (rest.len == 0) return error.InvalidNode;
-            if (rest[0] == 0x80) {
-                rest = rest[1..];
-            } else if (rest[0] == 0xa0 and rest.len >= 33) {
-                if (present[std.mem.readInt(u64, rest[9..17], .little) & mask] != 0) {
-                    if (findNodeInIndex(index, rest[1..33].*)) |child| top = try push(stack, top, child, remaining - 1);
-                }
-                rest = rest[33..];
-            } else {
-                const item = try rlp.decodeItem(rest);
-                if (childNode(item.item, rest[0..item.consumed], index, check)) |child| top = try push(stack, top, child, remaining - 1);
-                rest = rest[item.consumed..];
-            }
-        }
-        if (rest.len == 1 and rest[0] == 0x80) continue;
-        if (rest.len == 0 or (try rlp.decodeItem(rest)).consumed != rest.len) return error.InvalidNode;
-    }
-}
-
-/// Pushes the witness node with this hash, if any. Out of line so that the 16 unrolled
-/// slots of a full branch stay small.
-noinline fn pushIndexed(stack: []PathCheck.Pending, top: usize, index: *const NodeIndex, hash: *const [32]u8, remaining: u32) MptError!usize {
-    return push(stack, top, findNodeInIndex(index, hash.*) orelse return top, remaining);
-}
-
-inline fn push(stack: []PathCheck.Pending, top: usize, node_rlp: []const u8, remaining: u32) MptError!usize {
-    if (top == stack.len) return error.InvalidNode; // unreachable: see PathCheck.stack_len
-    stack[top] = .{ .ptr = node_rlp.ptr, .len = @intCast(node_rlp.len), .remaining = remaining };
-    return top + 1;
-}
-
-/// Length of the RLP item at the start of `bytes`, reading a single byte and a short
-/// string inline: these cover branch slots, paths and storage values.
-inline fn itemLen(bytes: []const u8) MptError!usize {
-    if (bytes.len == 0) return error.InvalidNode;
-    if (bytes[0] < 0x80) return 1;
-    if (bytes[0] <= 0xb7) {
-        const len = 1 + @as(usize, bytes[0] - 0x80);
-        if (len > bytes.len) return error.InvalidRlp;
-        return len;
-    }
-    return (try rlp.decodeItem(bytes)).consumed;
-}
-
-/// The node a child slot refers to, reading the slot as node.decodeNodeRef does, or null
-/// when the slot is empty or the witness lacks the node.
-fn childNode(item: rlp.RlpItem, raw: []const u8, index: *const NodeIndex, check: *const PathCheck) ?[]const u8 {
-    return switch (item) {
-        .bytes => |b| switch (b.len) {
-            0 => null,
-            32 => if (check.mayContain(b[0..32])) findNodeInIndex(index, b[0..32].*) else null,
-            else => b,
-        },
-        .list => raw,
-    };
-}
-
-/// Number of nibbles in a hex-prefix (compact) path, without decoding it.
-fn hpNibbleLen(hp: []const u8) MptError!usize {
-    if (hp.len == 0 or hp[0] >> 4 > 3) return error.InvalidHp;
-    return 2 * (hp.len - 1) + (hp[0] >> 4 & 1);
-}
 
 // ─── findNode ──────────────────────────────────────────────────────────────────
 
@@ -547,26 +352,37 @@ pub fn verifyProofIndexed(
     };
     var expected: ExpectedRef = .{ .hash = &root_hash };
     var pos: u8 = 0;
+    // Set when the node is an extension's child, which must be a branch.
+    var branch_only = false;
 
+    // Each node is checked as the reference checks a witness node when a lookup reaches
+    // it, and only then: nodes no lookup reaches are never read.
     while (true) {
         const node_rlp: []const u8 = switch (expected) {
-            .hash => |h| findNodeInIndex(index, h.*) orelse return error.InvalidProof,
+            .hash => |h| blk: {
+                const found = findNodeInIndex(index, h.*) orelse return error.InvalidProof;
+                // A node shorter than a hash is embedded in its parent, so only the root
+                // is referenced by hash regardless of its length.
+                if (pos > 0 and found.len < 32) return error.InvalidNode;
+                break :blk found;
+            },
             .inline_node => |inl| inl,
         };
 
-        // Fast path for branch nodes: decode only the child we need (O(nibble)
-        // instead of O(17)). decodeNibble returns null for leaf/extension nodes,
-        // in which case we fall through to the full decodeNode path below.
-        if (pos < 64) {
-            if (try node.decodeNibble(node_rlp, nibbleAt(&key_hash, pos))) |child_ref| {
-                pos += 1;
-                switch (child_ref) {
-                    .empty => return null,
-                    .hash => |h| expected = .{ .hash = h },
-                    .inline_node => |inl| expected = .{ .inline_node = inl },
-                }
-                continue;
+        // A well-formed branch: every child empty, a hash or embedded, and no value,
+        // since no secured key ends at a branch. Read only the child the key selects.
+        if (BranchSlots.of(node_rlp)) |slots| {
+            if (pos >= 64) return error.InvalidProof;
+            const nib = nibbleAt(&key_hash, pos);
+            const slot = node_rlp[slots.at[nib]..slots.at[nib + 1]];
+            pos += 1;
+            branch_only = false;
+            switch (slot[0]) {
+                0x80 => return null,
+                0xa0 => expected = .{ .hash = slot[1..33] },
+                else => expected = .{ .inline_node = slot },
             }
+            continue;
         }
 
         const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
@@ -575,26 +391,21 @@ pub fn verifyProofIndexed(
         };
 
         switch (decoded) {
-            .branch => |b| {
-                if (pos >= 64) return error.InvalidProof;
-                const nibble = nibbleAt(&key_hash, pos);
-                pos += 1;
-                switch (b.children[nibble]) {
-                    .empty => return null,
-                    .hash => |h| expected = .{ .hash = h },
-                    .inline_node => |inl| expected = .{ .inline_node = inl },
-                }
-            },
+            // Every branch with valid children and no value has BranchSlots.
+            .branch => return error.InvalidProof,
             .extension => |e| {
+                if (branch_only) return error.InvalidNode;
                 var path_buf: [128]u8 = undefined;
                 const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
                 if (hp.is_leaf) return error.InvalidNode;
                 const prefix_nibs = path_buf[0..hp.len];
-                if (pos + prefix_nibs.len > 64) return error.InvalidProof;
+                // The branch below needs a key nibble left.
+                if (pos + prefix_nibs.len >= 64) return error.InvalidProof;
                 for (prefix_nibs, @as(usize, pos)..) |nib, i| {
                     if (nib != nibbleAt(&key_hash, @intCast(i))) return null;
                 }
                 pos += @intCast(prefix_nibs.len);
+                branch_only = true;
                 switch (e.child) {
                     .empty => return error.InvalidNode,
                     .hash => |h| expected = .{ .hash = h },
@@ -602,12 +413,14 @@ pub fn verifyProofIndexed(
                 }
             },
             .leaf => |lf| {
+                if (branch_only) return error.InvalidNode;
                 // As hpDecode: an empty path or a flag above 3 is invalid. decodeNode
                 // already read the leaf bit, so the flag is 2 (even) or 3 (odd).
                 const hp = lf.key_end;
                 if (hp.len == 0 or hp[0] >> 4 > 3) return error.InvalidHp;
                 const odd: u8 = (hp[0] >> 4) & 1;
-                if (2 * (hp.len - 1) + odd != 64 - @as(usize, pos)) return null;
+                // Every path ends at a leaf after exactly 64 nibbles.
+                if (2 * (hp.len - 1) + odd != 64 - @as(usize, pos)) return error.InvalidProof;
                 // An odd path starts with the low nibble of its first byte; what follows
                 // is whole bytes, aligned with the key from nibble pos + odd on.
                 if (odd == 1 and hp[0] & 0x0f != nibbleAt(&key_hash, pos)) return null;
@@ -858,12 +671,10 @@ pub fn updateStorageChained(
         return;
     }
 
-    // Find root in combined pool (original witness nodes + nodes produced by prior updates)
     const root_bytes = findNode(pool, root.*) orelse
         findNode(extra.items, root.*) orelse
         return error.InvalidProof;
     const new_root_rlp = try updNodeEx(alloc, root_bytes, &key_nibs, new_val_enc, pool, extra);
-    // Store new root in extra so the next update can find it
     try extra.append(alloc, new_root_rlp);
     root.* = if (new_root_rlp.len == 1 and new_root_rlp[0] == 0x80)
         EMPTY_TRIE_HASH
@@ -1014,7 +825,7 @@ fn batchUpdateNodeIndexed(
                     }
                     sole = @intCast(ci);
                 }
-                if (sole >= 0) return collapseIndexed(alloc, @intCast(sole), enc[@intCast(sole)], nodes);
+                if (sole >= 0) return collapseIndexed(alloc, @intCast(sole), enc[@intCast(sole)], @as(usize, depth) + 1, nodes);
                 if (sole == -1) return &EMPTY_NODE_RLP;
             }
 
@@ -1024,13 +835,17 @@ fn batchUpdateNodeIndexed(
         // Extension and leaf: fall back to sequential single-change updates.
         // These cases are rare for multi-change batches (most shared ancestors are branches).
         // Each iteration may look up children created by the previous one via nodes.get —
-        // recording them in `nodes` is required here.
+        // recording them in `nodes` is required here. Inserts go first, as in the
+        // reference, so a delete never collapses a branch a later insert refills.
         else => {
             var current = node_rlp;
-            for (changes) |ch| {
-                var key_nibs: [64]u8 = undefined;
-                nibbles.bytesToNibbles(&ch.key, &key_nibs);
-                current = try updNodeExRecorded(alloc, current, key_nibs[depth..], ch.value, nodes);
+            for ([_]bool{ false, true }) |deletes| {
+                for (changes) |ch| {
+                    if ((ch.value == null) != deletes) continue;
+                    var key_nibs: [64]u8 = undefined;
+                    nibbles.bytesToNibbles(&ch.key, &key_nibs);
+                    current = try updNodeExRecorded(alloc, current, key_nibs[depth..], ch.value, nodes);
+                }
             }
             return current;
         },
@@ -1068,7 +883,7 @@ const BranchSlots = struct {
         // Sixteen hash children and no value: a fixed 532-byte layout, so the slots are a
         // constant and only the 17 item prefixes need checking. One load covers the list
         // header 0xf9 0x02 0x11 and the first child's 0xa0.
-        if (node_rlp.len >= full_len and std.mem.readInt(u32, node_rlp[0..4], .little) == 0xa01102f9 and
+        if (node_rlp.len == full_len and std.mem.readInt(u32, node_rlp[0..4], .little) == 0xa01102f9 and
             node_rlp[full_len - 1] == 0x80)
         {
             const all_hashes = inline for (1..16) |i| {
@@ -1101,8 +916,10 @@ const BranchSlots = struct {
             else => return null,
         }
         const end = pos + payload;
-        if (end > node_rlp.len) return null;
+        if (end != node_rlp.len) return null;
         var slots: BranchSlots = undefined;
+        // A branch needs two children: its value slot is always empty here.
+        var occupied: usize = 0;
         for (0..17) |i| {
             if (pos >= end) return null;
             slots.at[i] = @intCast(pos);
@@ -1110,14 +927,17 @@ const BranchSlots = struct {
             const n: usize = switch (b) {
                 0x80 => 1,
                 0xa0 => 33,
-                0xc0...0xf7 => 1 + @as(usize, b - 0xc0),
+                // An embedded child is shorter than a hash.
+                0xc0...0xde => 1 + @as(usize, b - 0xc0),
                 else => return null,
             };
             if (i == 16 and b != 0x80) return null;
             if (n > end - pos) return null;
+            if (b >= 0xc0 and !rlp.isWellFormed(node_rlp[pos..][0..n])) return null;
+            occupied += @intFromBool(b != 0x80);
             pos += n;
         }
-        if (pos != end) return null;
+        if (pos != end or occupied < 2) return null;
         slots.at[17] = @intCast(end);
         return slots;
     }
@@ -1240,7 +1060,7 @@ fn updNodeExImpl(
                         sole = @intCast(i);
                     }
                 }
-                if (sole >= 0) return collapseIndexed(alloc, @intCast(sole), enc[@intCast(sole)], nodes);
+                if (sole >= 0) return collapseIndexed(alloc, @intCast(sole), enc[@intCast(sole)], 65 - remaining.len, nodes);
                 if (sole == -1) return &EMPTY_NODE_RLP; // all children empty
             }
 
@@ -1267,15 +1087,19 @@ fn updNodeExImpl(
                     if (cd) |decoded_child| {
                         var cpb: [128]u8 = undefined;
                         var merged: [64]u8 = undefined;
+                        // No secured path is longer than a key.
+                        if (prefix.len > merged.len) return error.InvalidProof;
                         @memcpy(merged[0..prefix.len], prefix);
                         switch (decoded_child) {
                             .leaf => |lf| {
                                 const chp = nibbles.hpDecode(lf.key_end, &cpb) catch return error.InvalidHp;
+                                if (prefix.len + chp.len > merged.len) return error.InvalidProof;
                                 @memcpy(merged[prefix.len .. prefix.len + chp.len], cpb[0..chp.len]);
                                 return updMakeLeaf(alloc, merged[0 .. prefix.len + chp.len], lf.value);
                             },
                             .extension => |ee| {
                                 const chp = nibbles.hpDecode(ee.prefix, &cpb) catch return error.InvalidHp;
+                                if (prefix.len + chp.len > merged.len) return error.InvalidProof;
                                 @memcpy(merged[prefix.len .. prefix.len + chp.len], cpb[0..chp.len]);
                                 const child_ref = try updRefEnc(alloc, ee.child);
                                 return updMakeExtension(alloc, merged[0 .. prefix.len + chp.len], child_ref);
@@ -1465,15 +1289,19 @@ fn updNode(
                     if (cd) |decoded_child| {
                         var cpb: [128]u8 = undefined;
                         var merged: [64]u8 = undefined;
+                        // No secured path is longer than a key.
+                        if (prefix.len > merged.len) return error.InvalidProof;
                         @memcpy(merged[0..prefix.len], prefix);
                         switch (decoded_child) {
                             .leaf => |lf| {
                                 const chp = nibbles.hpDecode(lf.key_end, &cpb) catch return error.InvalidHp;
+                                if (prefix.len + chp.len > merged.len) return error.InvalidProof;
                                 @memcpy(merged[prefix.len .. prefix.len + chp.len], cpb[0..chp.len]);
                                 return updMakeLeaf(alloc, merged[0 .. prefix.len + chp.len], lf.value);
                             },
                             .extension => |ee| {
                                 const chp = nibbles.hpDecode(ee.prefix, &cpb) catch return error.InvalidHp;
+                                if (prefix.len + chp.len > merged.len) return error.InvalidProof;
                                 @memcpy(merged[prefix.len .. prefix.len + chp.len], cpb[0..chp.len]);
                                 const child_ref = try updRefEnc(alloc, ee.child);
                                 return updMakeExtension(alloc, merged[0 .. prefix.len + chp.len], child_ref);
@@ -1640,15 +1468,19 @@ fn updNodeEx(
                     if (cd) |decoded_child| {
                         var cpb: [128]u8 = undefined;
                         var merged: [64]u8 = undefined;
+                        // No secured path is longer than a key.
+                        if (prefix.len > merged.len) return error.InvalidProof;
                         @memcpy(merged[0..prefix.len], prefix);
                         switch (decoded_child) {
                             .leaf => |lf| {
                                 const chp = nibbles.hpDecode(lf.key_end, &cpb) catch return error.InvalidHp;
+                                if (prefix.len + chp.len > merged.len) return error.InvalidProof;
                                 @memcpy(merged[prefix.len .. prefix.len + chp.len], cpb[0..chp.len]);
                                 return updMakeLeaf(alloc, merged[0 .. prefix.len + chp.len], lf.value);
                             },
                             .extension => |ee| {
                                 const chp = nibbles.hpDecode(ee.prefix, &cpb) catch return error.InvalidHp;
+                                if (prefix.len + chp.len > merged.len) return error.InvalidProof;
                                 @memcpy(merged[prefix.len .. prefix.len + chp.len], cpb[0..chp.len]);
                                 const child_ref = try updRefEnc(alloc, ee.child);
                                 return updMakeExtension(alloc, merged[0 .. prefix.len + chp.len], child_ref);
@@ -1787,10 +1619,15 @@ inline fn refEncSlice(parent_rlp: []const u8, ref: node.NodeRef) []const u8 {
 /// `child_enc` is the parent-encoded reference already in `enc[sole_nib]`:
 ///   - hash ref: 33 bytes, child_enc[0] == 0xa0
 ///   - inline node: raw RLP bytes (< 32 bytes)
+///
+/// No read reaches the child, so it is checked here as the reference checks a witness
+/// node it resolves `child_depth` nibbles below the root. An extension's own child is
+/// only referenced, not resolved.
 fn collapseIndexed(
     alloc: std.mem.Allocator,
     sole_nib: u8,
     child_enc: []const u8,
+    child_depth: usize,
     nodes: *NodeView,
 ) (MptError || error{OutOfMemory})![]const u8 {
     // Resolve the child's actual RLP bytes.
@@ -1798,7 +1635,9 @@ fn collapseIndexed(
         if (child_enc.len == 33 and child_enc[0] == 0xa0) {
             var h: [32]u8 = undefined;
             @memcpy(&h, child_enc[1..33]);
-            break :blk nodes.get(h) orelse return error.InvalidProof;
+            const found = nodes.get(h) orelse return error.InvalidProof;
+            if (found.len < 32) return error.InvalidNode;
+            break :blk found;
         }
         break :blk child_enc;
     };
@@ -1811,20 +1650,25 @@ fn collapseIndexed(
     var path_buf: [128]u8 = undefined;
     var merged: [64]u8 = undefined;
     merged[0] = sole_nib;
+    if (child_depth > 64) return error.InvalidProof;
+    const remaining = 64 - child_depth;
 
     switch (decoded) {
         .leaf => |lf| {
             const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
+            if (hp.len != remaining) return error.InvalidProof;
             @memcpy(merged[1 .. 1 + hp.len], path_buf[0..hp.len]);
             return updMakeLeaf(alloc, merged[0 .. 1 + hp.len], lf.value);
         },
         .extension => |e| {
             const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
+            if (hp.len >= remaining) return error.InvalidProof;
             @memcpy(merged[1 .. 1 + hp.len], path_buf[0..hp.len]);
             const child_ref = try updRefEnc(alloc, e.child);
             return updMakeExtension(alloc, merged[0 .. 1 + hp.len], child_ref);
         },
         .branch => {
+            if (remaining == 0 or BranchSlots.of(child_bytes) == null) return error.InvalidProof;
             // Child is itself a branch: 1-nibble extension pointing to it.
             return updMakeExtension(alloc, merged[0..1], child_enc);
         },
@@ -1852,19 +1696,17 @@ fn collapseNode(
         error.InvalidNode => return error.InvalidNode,
     };
 
-    var path_buf: [128]u8 = undefined;
+    // The child's path is decoded after its nibble; hpDecode rejects one that overflows.
     var merged: [64]u8 = undefined;
     merged[0] = sole_nib;
 
     switch (decoded) {
         .leaf => |lf| {
-            const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
-            @memcpy(merged[1 .. 1 + hp.len], path_buf[0..hp.len]);
+            const hp = nibbles.hpDecode(lf.key_end, merged[1..]) catch return error.InvalidHp;
             return updMakeLeaf(alloc, merged[0 .. 1 + hp.len], lf.value);
         },
         .extension => |e| {
-            const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
-            @memcpy(merged[1 .. 1 + hp.len], path_buf[0..hp.len]);
+            const hp = nibbles.hpDecode(e.prefix, merged[1..]) catch return error.InvalidHp;
             const child_ref = try updRefEnc(alloc, e.child);
             return updMakeExtension(alloc, merged[0 .. 1 + hp.len], child_ref);
         },
@@ -1896,19 +1738,17 @@ fn collapseNodeEx(
         error.InvalidNode => return error.InvalidNode,
     };
 
-    var path_buf: [128]u8 = undefined;
+    // The child's path is decoded after its nibble; hpDecode rejects one that overflows.
     var merged: [64]u8 = undefined;
     merged[0] = sole_nib;
 
     switch (decoded) {
         .leaf => |lf| {
-            const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
-            @memcpy(merged[1 .. 1 + hp.len], path_buf[0..hp.len]);
+            const hp = nibbles.hpDecode(lf.key_end, merged[1..]) catch return error.InvalidHp;
             return updMakeLeaf(alloc, merged[0 .. 1 + hp.len], lf.value);
         },
         .extension => |e| {
-            const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
-            @memcpy(merged[1 .. 1 + hp.len], path_buf[0..hp.len]);
+            const hp = nibbles.hpDecode(e.prefix, merged[1..]) catch return error.InvalidHp;
             const child_ref = try updRefEnc(alloc, e.child);
             return updMakeExtension(alloc, merged[0 .. 1 + hp.len], child_ref);
         },
@@ -2144,6 +1984,7 @@ fn updRlpList(alloc: std.mem.Allocator, items: []const []const u8) ![]u8 {
 test {
     _ = @import("./tests.zig");
     _ = @import("./rlp_tests.zig");
+    _ = @import("./node_tests.zig");
 }
 
 const Mpt = @This();
@@ -2166,4 +2007,28 @@ pub const testing = struct {
     pub const rlpListHeaderWrite = Mpt.rlpListHeaderWrite;
     pub const BranchSlots = Mpt.BranchSlots;
     pub const hpPathIs = Mpt.hpPathIs;
+
+    /// A branch whose two children (hashes absent from the witness) sit on nibbles other than
+    /// `key_hash`'s first, so a lookup of that key ends at an empty slot: a non-inclusion proof.
+    /// A branch needs two children, so an all-empty one is not a valid witness node.
+    pub fn buildBranchMissingKey(buf: *[83]u8, key_hash: [32]u8) usize {
+        buf[0] = 0xf8;
+        buf[1] = 2 * 33 + 15;
+        const first = key_hash[0] >> 4;
+        const a: usize = (first + 1) % 16;
+        const b: usize = (first + 2) % 16;
+        var pos: usize = 2;
+        for (0..16) |i| {
+            if (i == a or i == b) {
+                buf[pos] = 0xa0;
+                @memset(buf[pos + 1 ..][0..32], @intCast(0x11 + i));
+                pos += 33;
+            } else {
+                buf[pos] = 0x80;
+                pos += 1;
+            }
+        }
+        buf[pos] = 0x80;
+        return pos + 1;
+    }
 };

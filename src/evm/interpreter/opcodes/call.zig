@@ -39,7 +39,6 @@ fn callImpl(
         return;
     }
 
-    // Pop stack items
     const gas_val = stack.peekUnsafe(0);
     const addr_val = stack.peekUnsafe(1);
     const value: primitives.U256 = if (has_value) stack.peekUnsafe(2) else 0;
@@ -118,8 +117,7 @@ fn callImpl(
         return;
     }
 
-    // Load target account info (warm/cold, emptiness) and code (for EIP-7702) in one shot.
-    // This replaces the former separate accountInfo + codeInfo calls (two journal lookups).
+    // Load target account info (warm/cold, emptiness) and code (for EIP-7702) in one lookup.
     const callee_info = h.accountInfoWithCode(target_addr);
     const is_cold = if (callee_info) |info| info.is_cold else pre_is_cold;
     // G_NEWACCOUNT applies to the ETH *recipient*, not the code source.
@@ -264,7 +262,7 @@ fn callImpl(
     };
     const call_is_static = is_static or (scheme == .staticcall);
 
-    // Gather call data from memory
+    // Borrows this frame's memory; valid while the frame is suspended on the sub-call.
     const call_data: []const u8 = if (args_size_u > 0)
         ctx.interpreter.memory.buffer.items[args_off_u .. args_off_u + args_size_u]
     else
@@ -317,8 +315,6 @@ fn callImpl(
     }
 }
 
-/// Resume a suspended CALL frame after the sub-frame has completed.
-/// Called by the frame runner (or synchronous helper) with the final CallResult.
 /// EIP-8037 credit_state_gas_refund for a NEW_ACCOUNT pre-charge that was not consumed
 /// (failed value-CALL / CREATE): refund in LIFO order — to regular gas first if the charge
 /// spilled out of the reservoir, else the reservoir — and unwind it from the frame's totals.
@@ -330,6 +326,8 @@ pub fn refundNewAccountLifo(interp: *Interpreter, amount: u64) void {
     interp.gas.state_gas_spent -|= amount;
 }
 
+/// Resume a suspended CALL frame after the sub-frame has completed.
+/// Called by the frame runner (or synchronous helper) with the final CallResult.
 pub fn resumeCall(interp: *Interpreter, result: host_module.CallResult, ret_off: usize, ret_size: usize, new_account_state_gas: u64) void {
     interp.gas.remaining +|= result.gas_remaining;
     interp.gas.refunded += result.gas_refunded;
@@ -498,9 +496,11 @@ pub fn opCreate(ctx: *InstructionContext) void {
     // the create returns 0 before accessing the address or charging NEW_ACCOUNT — else the
     // target's aliveness. Charge NEW_ACCOUNT only when it returned a non-null, not-alive result.
     var charge_new_account = false;
+    var known_addr: ?primitives.Address = null;
     if (primitives.isEnabledIn(spec, .amsterdam)) {
-        if (h.recordCreateTarget(ctx.interpreter.input.target, value, &[_]u8{}, false, 0, ctx.interpreter.input.depth)) |alive| {
-            charge_new_account = !alive;
+        if (h.recordCreateTarget(ctx.interpreter.input.target, value, &[_]u8{}, false, 0, ctx.interpreter.input.depth)) |t| {
+            charge_new_account = !t.alive;
+            known_addr = t.addr;
         }
     }
 
@@ -544,7 +544,7 @@ pub fn opCreate(ctx: *InstructionContext) void {
     } else 0;
 
     const caller = ctx.interpreter.input.target;
-    const setup = h.setupCreate(caller, value, init_code, forwarded, false, 0, false, ctx.interpreter.input.depth, true);
+    const setup = h.setupCreate(caller, value, init_code, forwarded, false, 0, false, ctx.interpreter.input.depth, true, known_addr);
     switch (setup) {
         .failed => |r| {
             // EIP-8037: pre-exec failure (e.g. address collision) — restore the parent reservoir
@@ -663,10 +663,12 @@ pub fn opCreate2(ctx: *InstructionContext) void {
     // recordCreateTarget returns null when a reference pre-check (depth/balance/nonce) fails,
     // else the target's aliveness. Charge NEW_ACCOUNT only for a non-null, not-alive result.
     var charge_new_account = false;
+    var known_addr: ?primitives.Address = null;
     if (primitives.isEnabledIn(spec, .amsterdam)) {
         const ic: []const u8 = if (size_u > 0) ctx.interpreter.memory.buffer.items[off_u .. off_u + size_u] else &[_]u8{};
-        if (h.recordCreateTarget(ctx.interpreter.input.target, value, ic, true, salt, ctx.interpreter.input.depth)) |alive| {
-            charge_new_account = !alive;
+        if (h.recordCreateTarget(ctx.interpreter.input.target, value, ic, true, salt, ctx.interpreter.input.depth)) |t| {
+            charge_new_account = !t.alive;
+            known_addr = t.addr;
         }
     }
 
@@ -711,7 +713,7 @@ pub fn opCreate2(ctx: *InstructionContext) void {
 
     const caller = ctx.interpreter.input.target;
     const salt_hash = host_module.u256ToHash(salt);
-    const setup = h.setupCreate(caller, value, init_code, forwarded, true, salt, false, ctx.interpreter.input.depth, true);
+    const setup = h.setupCreate(caller, value, init_code, forwarded, true, salt, false, ctx.interpreter.input.depth, true, known_addr);
     switch (setup) {
         .failed => |r| {
             // EIP-8037: pre-exec failure (e.g. address collision) — restore the parent reservoir

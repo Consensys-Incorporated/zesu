@@ -1,10 +1,12 @@
-/// zesu_allocator module for the relocatable rv64im object.
+/// zesu_allocator module for the relocatable rv64im object (the one build.zig wires).
 ///
 /// Design & diagrams: see src/zkvm/FREELIST_ALLOC.md
 ///
 /// Segregated free-list allocator backed by ZKVM_HEAP_POS / ZKVM_HEAP_TOP.
-/// Functionally identical to fl_alloc.zig, but avoids @clz for size-class
-/// classification.
+/// Same design as fl_alloc.zig, but classifies sizes with a branch tree instead
+/// of @clz, and caps the free-listed classes at 16 MiB (22 classes, vs 2 GiB /
+/// 29 classes in fl_alloc.zig). Larger requests are bump-allocated and never
+/// reclaimed.
 const std = @import("std");
 
 extern var ZKVM_HEAP_POS: usize;
@@ -70,10 +72,8 @@ inline fn sizeClassOfBytes(size: usize) usize {
 }
 
 /// Size-class index for a request of `size` bytes with alignment
-/// `1 << log2_align`. `log2_align` is `std.mem.Alignment`'s raw value,
-/// i.e. already log2(alignment) — passed directly by callers, no shift
-/// needed here. The actual block returned is classBytes(return-value)
-/// bytes.
+/// `1 << log2_align` (`log2_align` is `std.mem.Alignment`'s raw value).
+/// The block returned is classBytes(return-value) bytes.
 inline fn sizeClass(size: usize, log2_align: usize) usize {
     const size_class = sizeClassOfBytes(size);
     const align_class = if (log2_align > min_class_bits) log2_align - min_class_bits else 0;
@@ -150,8 +150,7 @@ fn free(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usiz
         @as(*usize, @ptrFromInt(ptr)).* = free_lists[class];
         free_lists[class] = ptr;
     }
-    // Oversized: leaked back into the bump region (unrecoverable, but
-    // allocations >= 16 MiB should not occur in practice).
+    // Oversized (> 16 MiB): leaked; never reused.
 }
 
 const vtable = std.mem.Allocator.VTable{
@@ -166,8 +165,7 @@ pub fn get() std.mem.Allocator {
     return .{ .ptr = &state, .vtable = &vtable };
 }
 
-/// Reference implementation mirroring fl_alloc.zig's @clz-based formula,
-/// used only to cross-check sizeClass() below.
+/// @clz-based formula (as in fl_alloc.zig), used only to cross-check sizeClass() in tests.
 fn referenceSizeClass(size: usize, log2_align: usize) usize {
     const alignment = @as(usize, 1) << @intCast(log2_align);
     const unit = @max(size, alignment);

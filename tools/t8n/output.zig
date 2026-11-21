@@ -3,8 +3,7 @@
 /// Produces geth-compatible result.json and alloc.json files.
 /// All numbers are hex-encoded with 0x prefix; hashes are 0x-prefixed 32-byte hex.
 ///
-/// Trie root computations (computeStateRoot, computeReceiptsRoot, etc.) are
-/// canonical implementations in executor/output.zig; re-exported here.
+/// The trie-root functions are re-exported from the executor's output module.
 const std = @import("std");
 
 /// Minimal anytype-writer wrapper backed by an ArrayListUnmanaged(u8).
@@ -27,6 +26,7 @@ const executor = @import("executor");
 const types = executor.executor_types;
 const transition_mod = executor.executor_transition;
 const executor_output = executor.executor_output;
+const tx_signing = executor.executor_tx_signing;
 
 // ─── Re-export canonical computation functions ────────────────────────────────
 
@@ -82,7 +82,6 @@ pub fn writeResultJson(
     const tx_root = try executor_output.computeTxRoot(alloc, result.accepted_txs, result.chain_id);
     const receipts_root = try executor_output.computeReceiptsRoot(alloc, result.receipts);
 
-    // Collect all fields into a list, then join with commas
     var fields = std.ArrayListUnmanaged([]const u8).empty;
     defer fields.deinit(alloc);
 
@@ -91,65 +90,58 @@ pub fn writeResultJson(
 
     var bw: ListWriter = .{ .list = &buf, .alloc = alloc };
 
-    // stateRoot
     buf.clearRetainingCapacity();
     try bw.writeAll("\"stateRoot\": ");
     try writeHash(bw, state_root);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // txRoot
     buf.clearRetainingCapacity();
     try bw.writeAll("\"txRoot\": ");
     try writeHash(bw, tx_root);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // receiptsRoot
     buf.clearRetainingCapacity();
     try bw.writeAll("\"receiptsRoot\": ");
     try writeHash(bw, receipts_root);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // logsHash
     buf.clearRetainingCapacity();
     try bw.writeAll("\"logsHash\": ");
     try writeHash(bw, logs_hash);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // logsBloom
     buf.clearRetainingCapacity();
     try bw.writeAll("\"logsBloom\": ");
     try writeBloom(bw, result.block_bloom);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // receipts
     buf.clearRetainingCapacity();
     try bw.writeAll("\"receipts\": [\n");
     for (result.receipts, 0..) |receipt, i| {
-        try writeReceiptJson(bw, receipt);
+        // Receipt i belongs to accepted_txs[i]: transition() fails fast on any invalid tx.
+        const tx_hash = try tx_signing.txHash(alloc, &result.accepted_txs[i], result.chain_id);
+        try writeReceiptJson(bw, receipt, tx_hash);
         if (i < result.receipts.len - 1) try bw.writeAll(",");
         try bw.writeAll("\n");
     }
     try bw.writeAll("  ]");
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // rejected — always empty: transition() now fails-fast on any invalid tx
+    // Always empty: transition() fails fast on any invalid tx instead of rejecting it.
     buf.clearRetainingCapacity();
     try bw.writeAll("\"rejected\": []");
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // currentDifficulty
     buf.clearRetainingCapacity();
     try bw.writeAll("\"currentDifficulty\": ");
     try writeU256Hex(bw, difficulty);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // gasUsed
     buf.clearRetainingCapacity();
     try bw.writeAll("\"gasUsed\": ");
     try writeU64Hex(bw, result.cumulative_gas);
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // currentBaseFee (optional)
     if (result.current_base_fee) |bf| {
         buf.clearRetainingCapacity();
         try bw.writeAll("\"currentBaseFee\": ");
@@ -157,7 +149,6 @@ pub fn writeResultJson(
         try fields.append(alloc, try alloc.dupe(u8, buf.items));
     }
 
-    // currentExcessBlobGas (optional)
     if (result.excess_blob_gas) |ebg| {
         buf.clearRetainingCapacity();
         try bw.writeAll("\"currentExcessBlobGas\": ");
@@ -165,7 +156,7 @@ pub fn writeResultJson(
         try fields.append(alloc, try alloc.dupe(u8, buf.items));
     }
 
-    // blobGasUsed (optional, if non-zero)
+    // Omitted when zero.
     if (result.blob_gas_used > 0) {
         buf.clearRetainingCapacity();
         try bw.writeAll("\"blobGasUsed\": ");
@@ -173,7 +164,6 @@ pub fn writeResultJson(
         try fields.append(alloc, try alloc.dupe(u8, buf.items));
     }
 
-    // Emit JSON
     try writer.writeAll("{\n");
     for (fields.items, 0..) |field, i| {
         try writer.writeAll("  ");
@@ -184,11 +174,11 @@ pub fn writeResultJson(
     try writer.writeAll("}\n");
 }
 
-fn writeReceiptJson(writer: anytype, receipt: transition_mod.Receipt) !void {
+fn writeReceiptJson(writer: anytype, receipt: transition_mod.Receipt, tx_hash: [32]u8) !void {
     try writer.writeAll("    {\n");
     try writer.print("      \"type\": \"0x{x}\",\n", .{receipt.type});
     try writer.writeAll("      \"transactionHash\": ");
-    try writeHash(writer, receipt.tx_hash);
+    try writeHash(writer, tx_hash);
     try writer.writeAll(",\n");
     try writer.print("      \"transactionIndex\": \"0x{x}\",\n", .{receipt.tx_index});
     try writer.writeAll("      \"blockHash\": ");
@@ -221,7 +211,7 @@ fn writeReceiptJson(writer: anytype, receipt: transition_mod.Receipt) !void {
     // Logs
     try writer.writeAll("      \"logs\": [\n");
     for (receipt.logs, 0..) |log, li| {
-        try writeLogJson(writer, log);
+        try writeLogJson(writer, log, tx_hash);
         if (li < receipt.logs.len - 1) try writer.writeAll(",");
         try writer.writeAll("\n");
     }
@@ -246,7 +236,7 @@ fn writeReceiptJson(writer: anytype, receipt: transition_mod.Receipt) !void {
     try writer.writeAll("\n    }");
 }
 
-fn writeLogJson(writer: anytype, log: transition_mod.Log) !void {
+fn writeLogJson(writer: anytype, log: transition_mod.Log, tx_hash: [32]u8) !void {
     try writer.writeAll("        {\n");
     try writer.writeAll("          \"address\": ");
     try writeAddr(writer, log.address);
@@ -265,7 +255,7 @@ fn writeLogJson(writer: anytype, log: transition_mod.Log) !void {
 
     try writer.print("          \"blockNumber\": \"0x{x}\",\n", .{log.block_number});
     try writer.writeAll("          \"transactionHash\": ");
-    try writeHash(writer, log.tx_hash);
+    try writeHash(writer, tx_hash);
     try writer.writeAll(",\n");
     try writer.print("          \"transactionIndex\": \"0x{x}\",\n", .{log.tx_index});
     try writer.writeAll("          \"blockHash\": ");

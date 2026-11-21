@@ -1,32 +1,27 @@
 /// zkVM Cryptographic Accelerators Interface
 ///
-/// Thin Zig adapter delegating to the `accel_impl` module injected at build time.
-///
-/// Build variants:
-///   zesu (native):     accel_impl = default.zig        (std.crypto + C libs)
-///   zesu-core (zkvm):  accel_impl = extern_bridge.zig  (extern fn zkvm_* → zisk_accel.o)
+/// Thin Zig adapter delegating to the private `accel_impl` module, selected by
+/// `-Dcrypto-backend`:
+///   default: default.zig        (std.crypto + native C libs)
+///   extern:  extern_bridge.zig  (extern fn zkvm_* resolved at link by the zkVM host)
 const impl = @import("accel_impl");
 const std = @import("std");
 const primitives = @import("primitives");
+const build_options = @import("build_options");
 
 // ── keccak256 key-hash memo ───────────────────────────────────────────────────
 //
 // Secure-trie keys are keccak256 of a raw 20-byte address / 32-byte slot, and the
-// same address/slot is hashed repeatedly across a block (pre-state proof read AND
-// state-root rebuild; the same slot number recurs across contracts) — ~56-67%
-// redundant on real mainnet blocks. keccak256 is pure, so memoizing it is always
-// sound. Done here at the single chokepoint so every caller benefits regardless
-// of code path, restricted to 20/32-byte inputs (the key hashes; node hashes are
-// larger, unique, and skip the memo).
+// same address/slot is hashed repeatedly across a block (pre-state proof read and
+// state-root rebuild; slot numbers recur across contracts). Memoized here, at the
+// single chokepoint, for 20/32-byte inputs only (node hashes are larger and unique).
 //
 // Static direct-mapped cache: no allocator, and under a sparse zkVM memory cost
-// model only touched buckets count toward proving cost, so generous capacity is
-// free. A bucket collision recomputes and overwrites, so the result is always
-// correct. Because keccak256 is pure, the cache is sound to share across calls
-// regardless of target — and crucially it runs on native too, so the state-test /
-// spec-test suites exercise the exact code path the zkVM guest uses (zesu's
-// execution model is single-threaded, so the plain globals carry no race risk).
-// kmemo_len 0 = empty slot.
+// model only touched buckets count, so generous capacity is free. A collision
+// recomputes and overwrites. It runs on native too, so the spec-test suites
+// exercise the guest's code path. The plain globals assume single-threaded hashing;
+// consumers that hash from several threads build with -Dkeccak-memo=false, which
+// compiles the memo out. kmemo_len 0 = empty slot.
 const KMEMO_LEN = 1 << 14; // 16384 buckets
 var kmemo_len = [_]u8{0} ** KMEMO_LEN;
 var kmemo_key: [KMEMO_LEN][32]u8 = undefined;
@@ -74,20 +69,11 @@ pub const Bls12PairingPair = extern struct {
 
 /// Bucket index for the 20/32-byte memo keys.
 ///
-/// The leading bytes of a memo key carry almost no entropy: sequential or
-/// shared-prefix addresses agree on them, and a 32-byte storage slot is a
-/// big-endian u256 whose low slot numbers are all-zero for the first 24 bytes.
-/// Indexing on `data[0..4]` therefore piled every such key into bucket 0 — a 0%
-/// hit rate plus the full compare cost on every lookup. So fold the head with
-/// the tail, where those keys actually differ, and run it through the same
-/// avalanche the address maps use.
-///
-/// `primitives.mix64`'s two-multiply form is required here rather than a cheaper
-/// single mix. Measured over the address and storage-slot shapes that actually
-/// occur (sequential, shared CREATE2 prefix, head-only, middle-only, big-endian
-/// slot numbers, uniform), the two-multiply form holds every one at the
-/// random-hash bound, while every single-multiply variant tried collapsed at
-/// least one shape to a single bucket.
+/// The leading bytes of a memo key carry little entropy (shared-prefix addresses;
+/// small big-endian slot numbers are zero in their first 24 bytes), so fold the
+/// head with the tail and avalanche through `primitives.mix64`. Keep its
+/// two-multiply form: single-multiply mixes collapsed some real key shapes
+/// (sequential, shared CREATE2 prefix, small slot numbers) into one bucket.
 inline fn kmemoIndex(data: []const u8) usize {
     const head = std.mem.readInt(u64, data[0..8], .little);
     const tail = std.mem.readInt(u64, data[data.len - 8 ..][0..8], .little);
@@ -99,7 +85,7 @@ pub inline fn keccak256(data: []const u8, output: *Hash32) void {
         output.* = primitives.KECCAK_EMPTY;
         return;
     }
-    if (data.len == 20 or data.len == 32) {
+    if (build_options.keccak_memo and (data.len == 20 or data.len == 32)) {
         const idx = kmemoIndex(data);
         if (kmemo_len[idx] == data.len and std.mem.eql(u8, kmemo_key[idx][0..data.len], data)) {
             output.* = kmemo_val[idx];
@@ -226,7 +212,7 @@ pub inline fn bls12_map_fp2_to_g2(field_element: *const Bytes96, result: *Bytes1
     return impl.bls12_map_fp2_to_g2(field_element, result);
 }
 
-/// secp256r1 (P-256) signature verification (precompile 0x100, EIP-7212).
+/// secp256r1 (P-256) signature verification (precompile 0x100, EIP-7951).
 pub inline fn secp256r1_verify(
     msg: *const Hash32,
     sig: *const Bytes64,
@@ -234,4 +220,8 @@ pub inline fn secp256r1_verify(
     verified: *bool,
 ) void {
     impl.secp256r1_verify(msg, sig, pubkey, verified);
+}
+
+test {
+    _ = @import("accelerators_tests.zig");
 }

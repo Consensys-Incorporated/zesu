@@ -1,7 +1,6 @@
-/// RLP encoding primitives for transaction hashing.
-///
-/// Supports encoding individual values and lists. All encoded items are
-/// heap-allocated slices; callers own the memory (use an arena for easy cleanup).
+//! RLP encoders. The allocating `encode*` helpers return a fresh allocation per call and
+//! never free intermediates, so pass them an arena. Hot paths instead size the whole
+//! encoding with `listLen`/`strLen`/`uintLen`, allocate once, and fill it with `Writer`.
 const std = @import("std");
 const accel = @import("accelerators");
 
@@ -10,7 +9,6 @@ const accel = @import("accelerators");
 /// Encode a byte slice as an RLP byte-string.
 pub fn encodeBytes(alloc: std.mem.Allocator, data: []const u8) ![]u8 {
     if (data.len == 1 and data[0] < 0x80) {
-        // Single byte < 0x80: self-encoded
         return alloc.dupe(u8, data);
     } else if (data.len == 0) {
         return alloc.dupe(u8, &.{0x80});
@@ -102,6 +100,81 @@ pub fn concat(alloc: std.mem.Allocator, parts: []const []const u8) ![]u8 {
     return out;
 }
 
+// ─── Sized single-buffer encoding ─────────────────────────────────────────────
+
+/// Bytes in the minimal big-endian form of a non-zero length.
+pub fn lenBytes(n: usize) usize {
+    return (64 - @as(usize, @clz(@as(u64, n))) + 7) / 8;
+}
+
+/// Encoded size of a list with this payload.
+pub fn listLen(payload: usize) usize {
+    return (if (payload <= 55) 1 else 1 + lenBytes(payload)) + payload;
+}
+
+/// Encoded size of a byte string.
+pub fn strLen(data: []const u8) usize {
+    if (data.len == 1 and data[0] < 0x80) return 1;
+    if (data.len <= 55) return 1 + data.len;
+    return 1 + lenBytes(data.len) + data.len;
+}
+
+/// Encoded size of an unsigned integer: its minimal big-endian bytes as a string.
+pub fn uintLen(comptime T: type, v: T) usize {
+    if (v < 0x80) return 1;
+    return 1 + (@bitSizeOf(T) - @as(usize, @clz(v)) + 7) / 8;
+}
+
+/// Writes RLP into a buffer pre-sized with the `*Len` functions above. Writes past the
+/// end are a sizing bug; callers check `pos == buf.len` with a runtime test, not an
+/// assert, since release builds are ReleaseFast.
+pub const Writer = struct {
+    buf: []u8,
+    pos: usize = 0,
+
+    pub fn byte(w: *Writer, b: u8) void {
+        w.buf[w.pos] = b;
+        w.pos += 1;
+    }
+
+    fn lenField(w: *Writer, n: usize) void {
+        const k = lenBytes(n);
+        var i = k;
+        while (i > 0) {
+            i -= 1;
+            w.byte(@truncate(n >> @intCast(i * 8)));
+        }
+    }
+
+    pub fn listHeader(w: *Writer, payload: usize) void {
+        if (payload <= 55) {
+            w.byte(@intCast(0xc0 + payload));
+        } else {
+            w.byte(@intCast(0xf7 + lenBytes(payload)));
+            w.lenField(payload);
+        }
+    }
+
+    pub fn str(w: *Writer, data: []const u8) void {
+        if (data.len == 1 and data[0] < 0x80) return w.byte(data[0]);
+        if (data.len <= 55) {
+            w.byte(@intCast(0x80 + data.len));
+        } else {
+            w.byte(@intCast(0xb7 + lenBytes(data.len)));
+            w.lenField(data.len);
+        }
+        @memcpy(w.buf[w.pos..][0..data.len], data);
+        w.pos += data.len;
+    }
+
+    pub fn uint(w: *Writer, comptime T: type, v: T) void {
+        var be: [@sizeOf(T)]u8 = undefined;
+        std.mem.writeInt(T, &be, v, .big);
+        const skip = if (v == 0) be.len else @as(usize, @clz(v)) / 8;
+        w.str(be[skip..]);
+    }
+};
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn trimLeadingZero(buf: []const u8) []const u8 {
@@ -111,7 +184,7 @@ fn trimLeadingZero(buf: []const u8) []const u8 {
 }
 
 /// Write `n` as a minimal big-endian byte sequence into buf.
-/// Returns the written slice (right-aligned in buf).
+/// Returns the written slice, `buf[0..len]`.
 fn bigEndianLength(n: usize, buf: *[8]u8) []const u8 {
     var v = n;
     var len: usize = 0;
@@ -123,9 +196,7 @@ fn bigEndianLength(n: usize, buf: *[8]u8) []const u8 {
         if (v == 0) break;
         i -= 1;
     }
-    // Return left-aligned in buf using temporary shift
     const start = 8 - len;
-    // Shift to front of buffer so caller gets buf[0..len]
     if (start > 0) {
         for (0..len) |j| buf[j] = buf[start + j];
     }

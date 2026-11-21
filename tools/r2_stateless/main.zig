@@ -1,7 +1,7 @@
 //! r2-stateless — fetch the latest stateless-input batches from a public R2
 //! devnet catalog and execute each block natively, in-process, through the
-//! same path the zkVM guest uses (executor.executeStatelessInput — see
-//! src/stateless/stateless/run.zig).
+//! same decode → executeStatelessInput → ssz_output.serialize path the zkVM
+//! guest runs (src/stateless/stateless/run.zig).
 //!
 //! No external tools required: HTTPS fetch (std.http), zstd decompression
 //! (std.compress.zstd), tar parsing (std.tar), SHA-256 (std.crypto) and JSON
@@ -23,9 +23,8 @@
 //!       { "params": [ { "blockNumber", .. } ], "statelessInputBytes", "statelessOutputBytes" }
 //!   ], "_info" } }
 //! `statelessOutputBytes` is the authoritative expected SSZ output. A block
-//! "passes" iff execution succeeds AND the computed SSZ output matches it
-//! byte-for-byte (executeStatelessInput itself validates the post-state/
-//! receipts roots against the payload as part of producing that output).
+//! passes iff the computed SSZ output matches it byte-for-byte — so an
+//! expected-invalid block passes when execution rejects it.
 //!
 //! Usage:
 //!   r2-stateless [--catalog URL] [--batches N] [--strict]
@@ -43,7 +42,7 @@ const executor_exceptions = @import("executor").executor_exceptions;
 const build_options = @import("build_options");
 const zstd = std.compress.zstd;
 
-/// Default catalog, baked in at build time (see `-Dr2-catalog` in build.zig).
+/// Default catalog, baked in at build time (`r2_catalog_url` in build.zig).
 /// Overridable at runtime with `--catalog`.
 const default_catalog = build_options.catalog_url;
 
@@ -107,7 +106,6 @@ pub fn main(init: std.process.Init) !void {
     };
     defer gpa.free(batches_jsonl);
 
-    // Batch index is ordered oldest → newest, one JSON object per line.
     var lines = std.ArrayList([]const u8).empty;
     defer lines.deinit(gpa);
     var line_it = std.mem.tokenizeScalar(u8, batches_jsonl, '\n');
@@ -120,7 +118,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
 
-    // Latest N batches = last N lines (catalog is ordered oldest → newest).
+    // Latest N batches = last N lines.
     const start_idx = if (lines.items.len > batch_count) lines.items.len - batch_count else 0;
     const selected = lines.items[start_idx..];
 
@@ -288,11 +286,8 @@ fn runBlock(gpa: std.mem.Allocator, alloc: std.mem.Allocator, block: std.json.Ob
     const out_hex = out_val.string;
     const out_stripped = if (std.mem.startsWith(u8, out_hex, "0x")) out_hex[2..] else out_hex;
 
-    // EIP-8025 (optional proofs): when the stateless input cannot be decoded, the guest
-    // emits the "default failed" result (root=0, successful_validation=false, chain_id=0,
-    // schema_id=0) — reference stateless_guest run_stateless_guest /
-    // _default_failed_stateless_output. The decode attempt must come before any length
-    // check on statelessOutputBytes.
+    // EIP-8025: an undecodable input yields the all-zero "default failed" output (as in
+    // run.zig), so decode before any length check on statelessOutputBytes.
     const si = ssz_decode.decode(alloc, input_bytes) catch {
         const failed_hex = std.fmt.bytesToHex(ssz_output.DEFAULT_FAILED_OUTPUT, .lower);
         const ok = std.ascii.eqlIgnoreCase(out_stripped, &failed_hex);
@@ -315,18 +310,16 @@ fn runBlock(gpa: std.mem.Allocator, alloc: std.mem.Allocator, block: std.json.Ob
         return;
     };
 
-    // Execute via the same entry point the zkVM guest wraps (run.zig →
-    // executeStatelessInput). The executor validates the block — including the
-    // post-state/receipts roots and logs bloom against the payload (StateRootMismatch /
-    // ReceiptsRootMismatch / InvalidLogsBloom) alongside its gas/blob/BAL checks.
+    // Same entry point run.zig wraps; it fails on any validation error, including
+    // state/receipts root and logs-bloom mismatches against the payload.
     var exec_err: anyerror = error.Success;
     const validated = if (executor.executeStatelessInput(alloc, si, si.chain_config.fork_name)) |_| true else |err| blk: {
         exec_err = err;
         break :blk false;
     };
 
-    // Serialize the SSZ output (the guest's public commitment): 32-byte
-    // new_payload_request root + 1-byte success + chain_id + schema_id.
+    // The guest's public commitment: 32-byte new_payload_request root, 1-byte success,
+    // u64 chain_id, u16 schema_id. Byte 32 is the success flag read below.
     const computed = try ssz_output.serialize(alloc, si.chain_config, si.new_payload_request, validated);
     const computed_hex = std.fmt.bytesToHex(computed, .lower);
 

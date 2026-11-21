@@ -1,8 +1,7 @@
 //! Tests for the MPT module.
 //!
 //! Integration tests (first half) drive the public API with synthetic vectors built
-//! using the same RLP rules the verifier decodes; the flat node pool replaces the old
-//! ordered-proof-array: put the node(s) in a slice and the verifier finds them by hash.
+//! using the same RLP rules the verifier decodes; the verifier finds pool nodes by hash.
 //!
 //! Internal tests (second half) exercise the private update functions through
 //! `mpt.testing`, which re-exports them for this file.
@@ -128,11 +127,7 @@ fn buildLeafNode(buf: []u8, key_hash: primitives.Hash, value: []const u8) usize 
     return encList(buf, 0, payload[0..pl]);
 }
 
-fn buildEmptyBranchNode(buf: []u8) usize {
-    buf[0] = 0xd1;
-    @memset(buf[1..18], 0x80);
-    return 18;
-}
+const buildBranchMissingKey = mpt.testing.buildBranchMissingKey;
 
 // ─── Test 1: account inclusion — single-leaf pool ─────────────────────────────
 
@@ -178,30 +173,30 @@ test "verifyStorage inclusion — single-leaf pool" {
     try std.testing.expectEqual(@as(u256, 0xdeadbeef), value);
 }
 
-// ─── Test 3: account non-inclusion — empty branch root ────────────────────────
+// ─── Test 3: account non-inclusion — empty branch slot ────────────────────────
 
-test "verifyAccount non-inclusion — empty branch root" {
-    var branch: [18]u8 = undefined;
-    const branch_len = buildEmptyBranchNode(&branch);
-    const root = mpt.keccak256(branch[0..branch_len]);
-
+test "verifyAccount non-inclusion — empty branch slot" {
     var address: primitives.Address = @splat(0x00);
     address[0] = 0xab;
+
+    var branch: [83]u8 = undefined;
+    const branch_len = buildBranchMissingKey(&branch, mpt.keccak256(&address));
+    const root = mpt.keccak256(branch[0..branch_len]);
 
     const pool = &[_][]const u8{branch[0..branch_len]};
     const result = try mpt.verifyAccount(root, address, pool);
     try std.testing.expect(result == null);
 }
 
-// ─── Test 4: storage non-inclusion — empty branch root ────────────────────────
+// ─── Test 4: storage non-inclusion — empty branch slot ────────────────────────
 
-test "verifyStorage non-inclusion — empty branch root" {
-    var branch: [18]u8 = undefined;
-    const branch_len = buildEmptyBranchNode(&branch);
-    const storage_root = mpt.keccak256(branch[0..branch_len]);
-
+test "verifyStorage non-inclusion — empty branch slot" {
     var slot: primitives.Hash = @splat(0x00);
     slot[31] = 0x99;
+
+    var branch: [83]u8 = undefined;
+    const branch_len = buildBranchMissingKey(&branch, mpt.keccak256(&slot));
+    const storage_root = mpt.keccak256(branch[0..branch_len]);
 
     const pool = &[_][]const u8{branch[0..branch_len]};
     const value = try mpt.verifyStorage(storage_root, slot, pool);
@@ -680,17 +675,24 @@ fn buildPathTestTrie(alloc: std.mem.Allocator, index: *NodeIndex, len_1: usize, 
     return keccak256(root);
 }
 
-test "validateSecuredTriePaths: leaves ending at the key length pass" {
+/// The key whose path runs through child `nib` of the root and then all zero nibbles.
+fn pathTestKey(nib: u8) [32]u8 {
+    var key: [32]u8 = @splat(0);
+    key[0] = nib << 4;
+    return key;
+}
+
+test "verifyProofIndexed: leaves ending at the key length pass" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var index = NodeIndex.init(arena.allocator());
     const root = try buildPathTestTrie(arena.allocator(), &index, 63, 63);
-    try mpt.validateSecuredTriePaths(root, &index, &try mpt.PathCheck.init(arena.allocator(), &index));
+    try std.testing.expectEqualStrings("value", (try mpt.verifyProofIndexed(root, pathTestKey(1), &index)).?);
+    try std.testing.expectEqualStrings("value", (try mpt.verifyProofIndexed(root, pathTestKey(2), &index)).?);
 }
 
-// The reference checks only that a branch has key nibbles left, not its value slot: a
-// 64-nibble lookup always descends into a child, so the value is never read.
-test "validateSecuredTriePaths: a branch value is not checked" {
+// No secured key ends at a branch, so a branch value is malformed.
+test "verifyProofIndexed: a branch value is rejected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -704,20 +706,51 @@ test "validateSecuredTriePaths: a branch value is not checked" {
     }
     const root = try updEncodeBranch(alloc, &enc, "branch-value");
     try index.put(keccak256(root), root);
-    try mpt.validateSecuredTriePaths(keccak256(root), &index, &try mpt.PathCheck.init(arena.allocator(), &index));
+    try std.testing.expectError(error.InvalidProof, mpt.verifyProofIndexed(keccak256(root), pathTestKey(1), &index));
 }
 
-test "validateSecuredTriePaths: a leaf past or short of the key length is rejected" {
+test "verifyProofIndexed: an extension whose child is a leaf is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const leaf = try updMakeLeaf(alloc, &(@as([63]u8, @splat(0))), "value");
+    try index.put(keccak256(leaf), leaf);
+    const ext = try updMakeExtension(alloc, &[_]u8{0}, try updRlpBytes(alloc, &keccak256(leaf)));
+    try index.put(keccak256(ext), ext);
+    try std.testing.expectError(error.InvalidNode, mpt.verifyProofIndexed(keccak256(ext), pathTestKey(0), &index));
+}
+
+// The reference decodes every child reference of a node it reaches, so the rule holds for
+// a slot the lookup does not follow too.
+test "verifyProofIndexed: an embedded child as long as a hash is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const path: [63]u8 = @splat(0);
+    const leaf = try updMakeLeaf(alloc, &path, "value");
+    try index.put(keccak256(leaf), leaf);
+    try std.testing.expect(leaf.len >= 32);
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    enc[0] = leaf;
+    enc[1] = try updHashOrEmbed(alloc, leaf);
+    const root = try updEncodeBranch(alloc, &enc, "");
+    try index.put(keccak256(root), root);
+    try std.testing.expectError(error.InvalidNode, mpt.verifyProofIndexed(keccak256(root), pathTestKey(1), &index));
+}
+
+test "verifyProofIndexed: a leaf past or short of the key length is rejected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     for ([_]usize{ 64, 66, 62 }) |len| {
         var index = NodeIndex.init(arena.allocator());
         const root = try buildPathTestTrie(arena.allocator(), &index, 63, len);
-        try std.testing.expectError(error.InvalidProof, mpt.validateSecuredTriePaths(root, &index, &try mpt.PathCheck.init(arena.allocator(), &index)));
+        try std.testing.expectError(error.InvalidProof, mpt.verifyProofIndexed(root, pathTestKey(2), &index));
     }
 }
 
-test "validateSecuredTriePaths: an extension reaching the key length is rejected" {
+test "verifyProofIndexed: an extension reaching the key length is rejected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -726,22 +759,161 @@ test "validateSecuredTriePaths: an extension reaching the key length is rejected
     const path: [64]u8 = @splat(0);
     const ext = try updMakeExtension(alloc, &path, try updRlpBytes(alloc, &branch_hash));
     try index.put(keccak256(ext), ext);
-    try std.testing.expectError(error.InvalidProof, mpt.validateSecuredTriePaths(keccak256(ext), &index, &try mpt.PathCheck.init(arena.allocator(), &index)));
+    try std.testing.expectError(error.InvalidProof, mpt.verifyProofIndexed(keccak256(ext), pathTestKey(0), &index));
 }
 
-test "validateSecuredTriePaths: nodes absent from the witness are not walked" {
+// The reference checks a witness node only when a trie operation reaches it.
+test "verifyProofIndexed: a malformed node no lookup reaches is not checked" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var index = NodeIndex.init(arena.allocator());
+    const root = try buildPathTestTrie(arena.allocator(), &index, 63, 66);
+    try std.testing.expectEqualStrings("value", (try mpt.verifyProofIndexed(root, pathTestKey(1), &index)).?);
+}
+
+// A deletion that collapses a branch resolves the sole remaining child, which no read reached.
+test "batchUpdateIndexed: a collapse onto a malformed sibling is rejected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     var index = NodeIndex.init(alloc);
-    const root = try buildPathTestTrie(alloc, &index, 63, 66);
-    // Drop the over-length leaf: only its hash remains, in the root.
-    const leaf = try updMakeLeaf(alloc, &(@as([66]u8, @splat(0))), "value");
-    try std.testing.expect(index.remove(keccak256(leaf)));
-    try mpt.validateSecuredTriePaths(root, &index, &try mpt.PathCheck.init(arena.allocator(), &index));
-    // An empty root, or a root absent from the witness, has nothing to walk.
-    try mpt.validateSecuredTriePaths(EMPTY_TRIE_HASH, &index, &try mpt.PathCheck.init(arena.allocator(), &index));
-    try mpt.validateSecuredTriePaths(@splat(0x11), &index, &try mpt.PathCheck.init(arena.allocator(), &index));
+    const root = try buildPathTestTrie(alloc, &index, 63, 62);
+    const changes = [_]mpt.BatchChange{.{ .key = pathTestKey(1), .value = null }};
+    try std.testing.expectError(error.InvalidProof, mpt.batchUpdateIndexed(alloc, root, &changes, &index));
+    // A well-formed sibling collapses into a leaf.
+    var ok_index = NodeIndex.init(alloc);
+    const ok_root = try buildPathTestTrie(alloc, &ok_index, 63, 63);
+    _ = try mpt.batchUpdateIndexed(alloc, ok_root, &changes, &ok_index);
+}
+
+// The reference's witness-node shape rules, checked when a lookup reaches the node.
+
+test "verifyProofIndexed: an extension with an empty path is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const branch = try buildPathTestTrie(alloc, &index, 63, 63);
+    const ext = try updMakeExtension(alloc, &[_]u8{}, try updRlpBytes(alloc, &branch));
+    try index.put(keccak256(ext), ext);
+    try std.testing.expectError(error.InvalidNode, mpt.verifyProofIndexed(keccak256(ext), pathTestKey(1), &index));
+}
+
+test "verifyProofIndexed: a branch with one child is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const leaf = try updMakeLeaf(alloc, &(@as([63]u8, @splat(0))), "value");
+    try index.put(keccak256(leaf), leaf);
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    enc[1] = try updHashOrEmbed(alloc, leaf);
+    const root = try updEncodeBranch(alloc, &enc, &.{});
+    try index.put(keccak256(root), root);
+    try std.testing.expectError(error.InvalidNode, mpt.verifyProofIndexed(keccak256(root), pathTestKey(1), &index));
+}
+
+// The reference decodes the child reference with the node, so the key need not follow it.
+test "verifyProofIndexed: an extension with an empty child is rejected off its path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const ext = try updMakeExtension(alloc, &(@as([40]u8, @splat(5))), &EMPTY_NODE_RLP);
+    try index.put(keccak256(ext), ext);
+    try std.testing.expectError(error.InvalidNode, mpt.verifyProofIndexed(keccak256(ext), pathTestKey(1), &index));
+}
+
+test "verifyProofIndexed: a leaf whose value is a list is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    // [hp(0x20 ++ 32 zero bytes), [0x01]]: a 64-nibble path at the root.
+    var leaf: [1 + 34 + 2]u8 = undefined;
+    leaf[0] = 0xc0 + 36;
+    leaf[1] = 0xa1;
+    leaf[2] = 0x20;
+    @memset(leaf[3..35], 0);
+    leaf[35] = 0xc1;
+    leaf[36] = 0x01;
+    try index.put(keccak256(&leaf), &leaf);
+    try std.testing.expectError(error.InvalidNode, mpt.verifyProofIndexed(keccak256(&leaf), @splat(0), &index));
+}
+
+test "verifyProofIndexed: a node with trailing bytes is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    for ([_]bool{ false, true }) |full| {
+        var index = NodeIndex.init(alloc);
+        var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+        // A branch of 16 hashed leaves takes the fixed-layout fast path; two take the scan.
+        for (0..if (full) 16 else 2) |i| {
+            var path: [63]u8 = @splat(0);
+            path[0] = @intCast(i);
+            const leaf = try updMakeLeaf(alloc, &path, "value");
+            try index.put(keccak256(leaf), leaf);
+            enc[i] = try updHashOrEmbed(alloc, leaf);
+        }
+        const branch = try updEncodeBranch(alloc, &enc, &.{});
+        const padded = try std.mem.concat(alloc, u8, &.{ branch, &[_]u8{0x00} });
+        try index.put(keccak256(padded), padded);
+        try std.testing.expectError(error.InvalidNode, mpt.verifyProofIndexed(keccak256(padded), pathTestKey(1), &index));
+    }
+}
+
+test "hpDecode: a path longer than the output buffer is rejected" {
+    var out: [4]u8 = undefined;
+    // Even path of 4 nibbles fits exactly; odd 5 and even 6 do not.
+    try std.testing.expectEqual(4, (try nibbles.hpDecode(&.{ 0x00, 0x12, 0x34 }, &out)).len);
+    try std.testing.expectError(error.InvalidHp, nibbles.hpDecode(&.{ 0x11, 0x23, 0x45 }, &out));
+    try std.testing.expectError(error.InvalidHp, nibbles.hpDecode(&.{ 0x00, 0x12, 0x34, 0x56 }, &out));
+}
+
+/// A hash-referenced node `[hp(flag ++ zeros), tail]` whose path is `path_bytes` long,
+/// more nibbles than any decode buffer holds. Built by hand: hpEncode can't encode it.
+fn longPathNode(alloc: std.mem.Allocator, flag: u8, comptime path_bytes: u8, tail: []const u8) ![]u8 {
+    const payload = 2 + path_bytes + tail.len;
+    const b = try alloc.alloc(u8, 2 + payload);
+    b[0] = 0xf8;
+    b[1] = @intCast(payload);
+    b[2] = 0xb8;
+    b[3] = path_bytes;
+    b[4] = flag;
+    @memset(b[5 .. 4 + path_bytes], 0);
+    @memcpy(b[4 + path_bytes ..], tail);
+    return b;
+}
+
+test "verifyProofIndexed: an extension path longer than the decode buffer is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    // 200 nibbles, then a 32-byte child hash.
+    const ext = try longPathNode(alloc, 0x00, 101, &([_]u8{0xa0} ++ [_]u8{0x11} ** 32));
+    try index.put(keccak256(ext), ext);
+    try std.testing.expectError(error.InvalidHp, mpt.verifyProofIndexed(keccak256(ext), pathTestKey(0), &index));
+}
+
+test "batchUpdateIndexed: a collapse onto a leaf path longer than the decode buffer is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+    const leaf = try updMakeLeaf(alloc, &(@as([63]u8, @splat(0))), "value");
+    try index.put(keccak256(leaf), leaf);
+    // Sibling leaf of 160 nibbles, which only the collapse reaches.
+    const long_leaf = try longPathNode(alloc, 0x20, 81, "\x85value");
+    try index.put(keccak256(long_leaf), long_leaf);
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    enc[1] = try updHashOrEmbed(alloc, leaf);
+    enc[2] = try updHashOrEmbed(alloc, long_leaf);
+    const root = try updEncodeBranch(alloc, &enc, &.{});
+    try index.put(keccak256(root), root);
+    const changes = [_]mpt.BatchChange{.{ .key = pathTestKey(1), .value = null }};
+    try std.testing.expectError(error.InvalidHp, mpt.batchUpdateIndexed(alloc, keccak256(root), &changes, &index));
 }
 
 test "batchUpdateIndexed: random inserts and updates match a rebuilt trie" {
@@ -859,6 +1031,9 @@ test "BranchSlots.ofScan: rejects what updEncodeBranch would not reproduce" {
 
     var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
     enc[4] = try updMakeLeaf(alloc, &.{}, "a");
+    // A branch with one child would be a leaf or an extension.
+    try std.testing.expect(BranchSlots.of(try testBranch(alloc, &enc)) == null);
+    enc[5] = enc[4];
     const good = try testBranch(alloc, &enc);
     try std.testing.expect(BranchSlots.of(good) != null);
 
@@ -866,10 +1041,8 @@ test "BranchSlots.ofScan: rejects what updEncodeBranch would not reproduce" {
     try std.testing.expect(BranchSlots.of(try updEncodeBranch(alloc, &enc, "v")) == null);
     // Truncated.
     try std.testing.expect(BranchSlots.of(good[0 .. good.len - 1]) == null);
-    // Bytes after the list are ignored, as decodeNode ignores them: the splice and a
-    // re-encode both drop them.
-    const trailing = try std.mem.concat(alloc, u8, &.{ good, &.{0x00} });
-    try std.testing.expectEqual(good.len, BranchSlots.of(trailing).?.at[17]);
+    // Bytes after the list, which the reference's RLP decode rejects.
+    try std.testing.expect(BranchSlots.of(try std.mem.concat(alloc, u8, &.{ good, &.{0x00} })) == null);
     // Non-canonical headers for a payload that fits a short list.
     const payload = good[1..];
     try std.testing.expect(BranchSlots.of(try std.mem.concat(alloc, u8, &.{ &.{ 0xf8, @intCast(payload.len) }, payload })) == null);
@@ -888,18 +1061,21 @@ test "BranchSlots: replaceChild and replaceChildren match re-encoding across hea
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // Payload grows from 17 to 17 + 32 * 16 bytes: the list header goes from one byte to
-    // 0xf8 to 0xf9, and back down as the children are removed.
+    // Two inline children keep every step a valid branch. The payload grows from 23 to
+    // 23 + 32 * 14 bytes: the list header goes from one byte to 0xf8 to 0xf9, and back
+    // down as the hashed children are removed.
     var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    enc[14] = try updMakeLeaf(alloc, &.{}, "a");
+    enc[15] = enc[14];
     var cur = try testBranch(alloc, &enc);
-    for (0..16) |i| {
+    for (0..14) |i| {
         var h: [32]u8 = @splat(@intCast(i + 1));
         const ref = try updRlpBytes(alloc, &h);
         cur = try BranchSlots.of(cur).?.replaceChild(alloc, cur, @intCast(i), ref);
         enc[i] = ref;
         try std.testing.expectEqualSlices(u8, try testBranch(alloc, &enc), cur);
     }
-    for (0..16) |i| {
+    for (0..14) |i| {
         cur = try BranchSlots.of(cur).?.replaceChild(alloc, cur, @intCast(i), &EMPTY_NODE_RLP);
         enc[i] = &EMPTY_NODE_RLP;
         try std.testing.expectEqualSlices(u8, try testBranch(alloc, &enc), cur);
@@ -1043,4 +1219,74 @@ test "verifyProofIndexed agrees with verifyProof on random tries" {
             }
         }
     }
+}
+
+// An extension over a branch {a, b}; the batch deletes a and inserts c under the same
+// branch, and a sorts before c. Applying the insert first, as the reference does for
+// storage, keeps the branch at two children, so b is never read and a witness built
+// from the reference leaves it out.
+test "batchUpdateIndexed: an insert next to a delete below an extension does not read the sibling" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var key_a: [32]u8 = @splat(0x11);
+    key_a[0] = 0x41;
+    var key_b: [32]u8 = @splat(0x22);
+    key_b[0] = 0x42;
+    var key_c: [32]u8 = @splat(0x33);
+    key_c[0] = 0x43;
+
+    const leafBelowSecondNibble = struct {
+        fn f(a: std.mem.Allocator, key: [32]u8, val: []const u8) ![]const u8 {
+            var nibs: [64]u8 = undefined;
+            nibbles.bytesToNibbles(&key, &nibs);
+            return updMakeLeaf(a, nibs[2..], val);
+        }
+    }.f;
+    const leaf_a = try leafBelowSecondNibble(alloc, key_a, "va");
+    const leaf_b = try leafBelowSecondNibble(alloc, key_b, "vb");
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    enc[1] = try updHashOrEmbed(alloc, leaf_a);
+    enc[2] = try updHashOrEmbed(alloc, leaf_b);
+    const branch = try updEncodeBranch(alloc, &enc, &.{});
+    const root = try updMakeExtension(alloc, &.{4}, try updHashOrEmbed(alloc, branch));
+
+    // No leaf_b: nothing on the reference's update path reads it.
+    var index = try buildNodeIndex(alloc, &.{ root, branch, leaf_a });
+    defer index.deinit();
+
+    const changes = [_]BatchChange{ .{ .key = key_a, .value = null }, .{ .key = key_c, .value = "vc" } };
+    const got = try batchUpdateIndexed(alloc, keccak256(root), &changes, &index);
+
+    var kv = [_]builder.KV{ .{ .key = &key_b, .value = "vb" }, .{ .key = &key_c, .value = "vc" } };
+    try std.testing.expectEqual(try builder.trieRoot(alloc, &kv), got);
+}
+
+// The reference decodes a reached node whole, so a malformed embedded child fails the
+// lookup even when the key's path goes through another slot.
+test "verifyProofIndexed: a branch with a malformed off-path embedded child is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var index = NodeIndex.init(alloc);
+
+    const path: [63]u8 = @splat(0);
+    const leaf = try updMakeLeaf(alloc, &path, "value");
+    try index.put(keccak256(leaf), leaf);
+    var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+    enc[1] = try updHashOrEmbed(alloc, leaf);
+    enc[2] = &.{ 0xc1, 0x81 };
+    const root = try updEncodeBranch(alloc, &enc, &.{});
+    try index.put(keccak256(root), root);
+
+    if (mpt.verifyProofIndexed(keccak256(root), pathTestKey(1), &index)) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
+
+    // The same branch with a well-formed embedded child serves the lookup.
+    enc[2] = &.{ 0xc2, 0x80, 0x80 };
+    const ok_root = try updEncodeBranch(alloc, &enc, &.{});
+    try index.put(keccak256(ok_root), ok_root);
+    try std.testing.expectEqualStrings("value", (try mpt.verifyProofIndexed(keccak256(ok_root), pathTestKey(1), &index)).?);
 }

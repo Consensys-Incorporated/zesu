@@ -2,7 +2,8 @@
 ///
 /// Listens on :8545. Handles only:
 ///   eth_blockNumber          → hex block number (liveness probe)
-///   eth_getBlockByNumber     → { "hash", "number", "coinbase", "stateRoot", "gasLimit", "timestamp", "extraData" }
+///   eth_getBlockByNumber     → header subset (hash, number, coinbase, stateRoot, gasLimit,
+///                              timestamp, extraData, plus fork-specific fields when present)
 const std = @import("std");
 const Chain = @import("chain.zig").Chain;
 
@@ -40,10 +41,8 @@ fn handleConn(io: std.Io, chain: *Chain, stream: std.Io.net.Stream) !void {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // Use a large reader buffer so the first netRead captures the full HTTP
-    // request in one syscall. peekDelimiterInclusive reads one line at a time
-    // without looping on netRead — it only calls fillMore (one netRead) when
-    // the internal buffer is empty, then scans what arrived.
+    // Large enough that the request headers arrive in one read; peekDelimiterInclusive
+    // refills only when the buffer is empty.
     var rbuf: [8192]u8 = undefined;
     var reader = stream.reader(io, &rbuf);
 
@@ -68,7 +67,6 @@ fn handleConn(io: std.Io, chain: *Chain, stream: std.Io.net.Stream) !void {
 
     const response_body = processRpc(chain, alloc, body);
 
-    // Write HTTP 200 response
     var resp_buf: [4096]u8 = undefined;
     const resp = std.fmt.bufPrint(
         &resp_buf,
@@ -165,7 +163,6 @@ fn resolveBlock(chain: *Chain, tag: []const u8) ?@import("chain.zig").StoredHead
     if (std.mem.eql(u8, tag, "earliest"))
         return chain.getByNumber(0);
 
-    // Hex block number
     const s = if (std.mem.startsWith(u8, tag, "0x") or std.mem.startsWith(u8, tag, "0X"))
         tag[2..]
     else
@@ -196,7 +193,6 @@ fn nullResponse(alloc: std.mem.Allocator, id: []const u8) []const u8 {
 }
 
 fn errorResponse(code: []const u8, message: []const u8) []const u8 {
-    // Static buffer for error responses (no alloc needed)
     const S = struct {
         var buf: [256]u8 = undefined;
     };

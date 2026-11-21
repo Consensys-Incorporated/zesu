@@ -2,7 +2,7 @@
 
 This directory contains the Hive client implementation for `zesu` using the `ethereum/eels/consume-rlp` simulator.
 
-The client (`hive-rlp`) reads a genesis JSON and a sequence of RLP-encoded blocks injected by Hive, executes them, and serves `eth_getBlockByNumber` on `:8545`.
+The client (`hive-rlp`) reads a genesis JSON and a sequence of RLP-encoded blocks injected by Hive, executes them, and serves `eth_blockNumber` and `eth_getBlockByNumber` on `:8545`.
 
 ## Prerequisites
 
@@ -17,7 +17,7 @@ Run from the `zesu` repo root:
 docker build -t zesu:latest -f ./tools/hive/Dockerfile .
 ```
 
-The first build takes ~5 minutes (downloads and compiles Zig, blst, mcl). Subsequent builds with only source changes are ~30s due to Docker layer caching.
+The first build takes ~5 minutes (downloads Zig, compiles blst and mcl from source). Subsequent builds with only source changes are ~30s due to Docker layer caching.
 
 ## 2. Run the Hive tests
 
@@ -30,7 +30,7 @@ From the Hive repo root:
   --client.checktimelimit=300s \
   --docker.buildoutput \
   --sim.parallelism=6 \
-  --sim.buildarg fixtures=https://github.com/ethereum/execution-specs/releases/download/tests%40v21.0.1/fixtures.tar.gz \
+  --sim.buildarg fixtures=https://github.com/ethereum/execution-specs/releases/download/tests%40v21.0.2/fixtures.tar.gz \
   --sim.buildarg branch=devnets/glamsterdam/8 \
   --sim.loglevel=3
 ```
@@ -44,7 +44,7 @@ To run a subset of tests (e.g. specific EIPs), add `--sim.limit` with a regex:
   --client.checktimelimit=300s \
   --docker.buildoutput \
   --sim.parallelism=6 \
-  --sim.buildarg fixtures=https://github.com/ethereum/execution-specs/releases/download/tests%40v21.0.1/fixtures.tar.gz \
+  --sim.buildarg fixtures=https://github.com/ethereum/execution-specs/releases/download/tests%40v21.0.2/fixtures.tar.gz \
   --sim.buildarg branch=devnets/glamsterdam/8 \
   --sim.limit=".*(8024|7708|7778|7843|7928|7954|8037).*" \
   --sim.loglevel=3
@@ -79,6 +79,7 @@ Then re-run the Hive command.
 | `fork_env.zig` | Reads `HIVE_*` env vars to build the fork schedule |
 | `rpc.zig` | Minimal HTTP/JSON-RPC server on `:8545` (`eth_blockNumber`, `eth_getBlockByNumber`) |
 | `Dockerfile` | Multi-stage build: Zig 0.16.0 + blst + mcl (shared lib) |
+| `Dockerfile.dockerignore` | Excludes `spec-tests/`, `zig-out/`, `.zig-cache/`, `.git/` from the build context |
 
 ## Known issues / notes
 

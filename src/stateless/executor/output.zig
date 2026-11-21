@@ -1,8 +1,5 @@
-/// Trie root computations for EVM state transition output.
-///
-/// Provides computeStateRootDelta() (stateless delta mode), computeStateRoot()
-/// (full-state scratch mode), computeReceiptsRoot(), computeLogsHash(),
-/// and computeTxRoot() for post-execution state and receipt verification.
+//! Post-execution commitments: state root (witness delta via computeStateRootDelta, or
+//! from scratch via computeStateRoot), receipts/transactions roots and the logs hash.
 const std = @import("std");
 
 const types = @import("executor_types");
@@ -91,8 +88,8 @@ pub fn computeReceiptsRoot(
 /// stateRoot for stateless execution: batch-applies all account changes in one sorted pass,
 /// visiting each shared branch node exactly once instead of once per account update.
 ///
-/// `pre_storage_roots` is the WitnessDatabase, used to look up pre-state storage roots
-/// for accounts that had storage before this block (avoids redundant trie walks).
+/// `pre_storage_roots` is the WitnessDatabase: it supplies pre-state storage roots and the
+/// witness-proven original accounts, so accounts the block left unchanged are skipped.
 pub fn computeStateRootDelta(
     alloc: std.mem.Allocator,
     pre_state_root: [32]u8,
@@ -104,11 +101,8 @@ pub fn computeStateRootDelta(
     const total = alloc_map.count() + deleted_accounts.len;
     if (total == 0) return pre_state_root;
 
-    // Every RLP encoding and intermediate trie-node byte string produced while
-    // batch-applying these changes is scratch: only the returned root hash
-    // outlives this call, and batchUpdateIndexed never writes to `index`. Scope
-    // them to an arena so the whole batch is reclaimed in one free instead of
-    // leaking one allocation per touched trie node into the caller's allocator.
+    // Every encoding and trie node built here is scratch: only the root hash outlives this
+    // call, and batchUpdateIndexed never writes to `index`. One arena reclaims them all.
     var scratch_arena = ScratchArena.init(alloc);
     defer scratch_arena.deinit();
     const scratch = scratch_arena.allocator();
@@ -234,7 +228,6 @@ pub fn computeStateRoot(
 }
 
 /// Batch storage root update: sorts all slot changes and applies them in one pass.
-/// Replaces the old two-pass (inserts-then-deletes) sequential approach.
 /// `alloc` must be an arena-like scratch allocator (see sortChanges): nothing allocated here is freed.
 fn computeStorageRootBatch(
     alloc: std.mem.Allocator,
@@ -286,7 +279,8 @@ fn computeStorageRootScratch(alloc: std.mem.Allocator, account: types.AllocAccou
     return mpt_builder.trieRoot(alloc, items[0..i]);
 }
 
-/// Pool-based storage root: delta-updates via witness node pool (for legacy callers).
+/// Storage root for computeStateRoot: delta-updates `pre_storage_root` through the
+/// witness node pool when set, else builds from scratch.
 fn computeStorageRoot(
     alloc: std.mem.Allocator,
     account: types.AllocAccount,
@@ -369,37 +363,47 @@ fn writeUintRlp(out: []u8, n: u256) usize {
     return 1 + len;
 }
 
-fn encodeReceiptRlp(alloc: std.mem.Allocator, receipt: types.Receipt) ![]u8 {
-    // Encode logs
-    var log_items = std.ArrayListUnmanaged([]const u8).empty;
-    for (receipt.logs) |log| {
-        var topic_items = std.ArrayListUnmanaged([]const u8).empty;
-        for (log.topics) |t| try topic_items.append(alloc, try rlp.encodeBytes(alloc, &t));
-        const log_parts = [_][]const u8{
-            try rlp.encodeBytes(alloc, &log.address),
-            try rlp.encodeList(alloc, topic_items.items),
-            try rlp.encodeBytes(alloc, log.data),
-        };
-        try log_items.append(alloc, try rlp.encodeList(alloc, &log_parts));
+/// Typed receipt RLP (`type ++ rlp(body)` for typed, `rlp(body)` for legacy), sized up
+/// front and written in one pass, as the generic rlp helpers would encode it.
+pub fn encodeReceiptRlp(alloc: std.mem.Allocator, receipt: types.Receipt) ![]u8 {
+    var logs_payload: usize = 0;
+    for (receipt.logs) |log| logs_payload += rlp.listLen(logPayloadLen(log));
+    // Pre-Byzantium (EIP-658): first field is the 32-byte stateRoot. Post-Byzantium: the
+    // status byte, 0x01 for success and the empty string for failure; both are 1 byte.
+    const first_len: usize = if (receipt.state_root != null) hash_rlp_len else 1;
+    const payload = first_len + rlp.uintLen(u64, receipt.cumulative_gas_used) +
+        rlp.strLen(&receipt.logs_bloom) + rlp.listLen(logs_payload);
+    const type_len: usize = @intFromBool(receipt.type != 0);
+    const out = try alloc.alloc(u8, type_len + rlp.listLen(payload));
+    errdefer alloc.free(out);
+
+    var w = rlp.Writer{ .buf = out };
+    if (type_len != 0) w.byte(receipt.type);
+    w.listHeader(payload);
+    if (receipt.state_root) |sr| {
+        w.str(&sr);
+    } else {
+        w.str(if (receipt.status == 1) &.{0x01} else &.{});
     }
-    const bloom_bytes: []const u8 = &receipt.logs_bloom;
-    // Pre-Byzantium (EIP-658): first field is 32-byte stateRoot.
-    // Post-Byzantium: first field is 1-byte status (0x01 = success, 0x00 = failure).
-    const first_field = if (receipt.state_root) |sr|
-        try rlp.encodeBytes(alloc, &sr)
-    else
-        try rlp.encodeBytes(alloc, if (receipt.status == 1) &.{0x01} else &.{});
-    const parts = [_][]const u8{
-        first_field,
-        try rlp.encodeU64(alloc, receipt.cumulative_gas_used),
-        try rlp.encodeBytes(alloc, bloom_bytes),
-        try rlp.encodeList(alloc, log_items.items),
-    };
-    const body = try rlp.encodeList(alloc, &parts);
-    return if (receipt.type == 0)
-        body
-    else
-        rlp.concat(alloc, &.{ &.{receipt.type}, body });
+    w.uint(u64, receipt.cumulative_gas_used);
+    w.str(&receipt.logs_bloom);
+    w.listHeader(logs_payload);
+    for (receipt.logs) |log| {
+        // [address, [topic, ...], data]
+        w.listHeader(logPayloadLen(log));
+        w.str(&log.address);
+        w.listHeader(log.topics.len * hash_rlp_len);
+        for (log.topics) |*t| w.str(t);
+        w.str(log.data);
+    }
+    // Not an assert: release builds are ReleaseFast, where a sizing/write mismatch would
+    // otherwise leave part of the receipt uninitialised.
+    if (w.pos != out.len) return error.ReceiptSizeMismatch;
+    return out;
+}
+
+fn logPayloadLen(log: types.Log) usize {
+    return rlp.strLen(&log.address) + rlp.listLen(log.topics.len * hash_rlp_len) + rlp.strLen(log.data);
 }
 
 /// RLP-encode a transaction index as the trie key.
@@ -408,7 +412,7 @@ fn rlpIndex(alloc: std.mem.Allocator, i: usize) ![]u8 {
 }
 
 /// Encode a signed transaction to its wire bytes (type_byte ++ rlp for typed).
-/// Falls back to empty on error.
+/// Types 0-2 only; computeTxRoot substitutes empty bytes on error.
 fn encodeTxBytes(
     alloc: std.mem.Allocator,
     tx: *const types.TxInput,

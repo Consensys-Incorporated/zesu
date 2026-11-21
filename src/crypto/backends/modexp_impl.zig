@@ -1,15 +1,12 @@
-/// Modular exponentiation — standalone pure-Zig implementation.
-/// Extracted from zevm precompile/modexp.zig.
-///
-/// Computes base^exp % modulus for arbitrary-precision integers.
-/// Implements the raw crypto primitive; gas/ABI handling lives in the
-/// precompile dispatch layer (src/evm/precompile/).
+/// Modular exponentiation (base^exp % modulus, arbitrary precision) in pure Zig.
+/// Gas/ABI handling lives in src/evm/precompile/.
 const std = @import("std");
 const alloc_mod = @import("zesu_allocator");
+const modexp_mont = @import("modexp_mont.zig");
 
 /// Compute base^exp % modulus and write the result into `output`.
-/// `output` must be pre-zeroed and exactly `modulus.len` bytes.
-/// Returns false only if a catastrophic allocation failure occurs.
+/// `output` must be exactly `modulus.len` bytes (it is zeroed here).
+/// Returns false only on allocation failure.
 pub fn modexp(
     base: []const u8,
     exp: []const u8,
@@ -58,7 +55,10 @@ pub fn modexp(
         return true;
     }
 
-    // Big-integer path
+    // Odd moduli of up to 128 limbs: fixed-width Montgomery, no allocation or division.
+    if (modexp_mont.modexp(base, exp, mod_trimmed, output)) return true;
+
+    // Big-integer path (even or larger moduli)
     modexpBigInt(alloc_mod.get(), base, exp, modulus, output) catch return false;
     return true;
 }

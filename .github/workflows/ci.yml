@@ -59,6 +59,11 @@ jobs:
           DYLD_LIBRARY_PATH: /opt/homebrew/lib:/usr/local/lib
         run: zig build test
 
+      - name: Run keccak tests without keccak memo
+        env:
+          DYLD_LIBRARY_PATH: /opt/homebrew/lib:/usr/local/lib
+        run: zig build test-accelerators -Dkeccak-memo=false
+
   zkevm-tests:
     name: zkEVM Tests
     runs-on: ubuntu-latest
@@ -197,7 +202,7 @@ jobs:
       # Its zisk build compiles this checkout's zesu through addGuestObject.
       # Bump when the guest ABI or memory map changes. The ZisK version is read
       # from that commit's own workflow, so the two cannot drift apart.
-      ZKVM_REF: "ab5bffcce224a8a211ac03a1e3c29940c62da7c7"
+      ZKVM_REF: "b54c6019e5c744e42abebf78ea97aed7551dfb18"
       # Host Rust, and the ZisK guest toolchain (0xPolygonHermez/rust tag). ziskup installs the
       # newest `zisk-<major>.x.y` toolchain for the pinned ZisK; the toolchain step below then
       # re-installs this exact tag. Keep the major in step with ZisK's TOOLCHAIN_MAJOR
@@ -292,17 +297,16 @@ jobs:
 
       # Executes a real mainnet block inside the emulator. This is the only
       # coverage for guest-only failures: code can compile, pass every native
-      # suite, and still abort here (see #97). ZESU_SOURCE builds this checkout
-      # (zig build --fork) for riscv64-freestanding with no atomics, no libc and
-      # a bump allocator — a target no other job in this workflow exercises.
+      # suite, and still abort here. ZESU_SOURCE builds this checkout (via
+      # addGuestObject) for riscv64-freestanding with no atomics, no libc and
+      # the alt_fl_alloc free-list heap — a target no other job exercises.
       - name: Run guest vectors (rv64im)
         working-directory: zesu-zkvm/zisk
         run: make test ZESU_SOURCE=$GITHUB_WORKSPACE/zesu ISA=rv64im
 
-      # Same guest logic, plus the Zbb/Zbs bitmanip extensions ZisK's
-      # transpiler and cost model support natively (see PRs #117, #119).
-      # Exercised separately from rv64im above so a Zbb/Zbs-specific
-      # correctness regression can't hide behind the baseline build's pass.
+      # Same guest logic plus the Zbb/Zbs bitmanip extensions ZisK supports
+      # natively, run separately so a Zbb/Zbs-specific regression can't hide
+      # behind the baseline build's pass.
       - name: Run guest vectors (rv64im + Zbb + Zbs)
         working-directory: zesu-zkvm/zisk
         run: make test ZESU_SOURCE=$GITHUB_WORKSPACE/zesu ISA=zisk

@@ -1,9 +1,5 @@
-/// Decode raw RLP-encoded transaction bytes → []TxInput, or map input.Transaction → []TxInput.
-///
-/// Raw RLP path: delegates to rlp_decode.decodeSingleTx(), then maps to TxInput via mapInputTx().
-/// Input path:   maps pre-decoded input.Transaction directly to TxInput via mapInputTx().
-///
-/// ECDSA sender recovery is NOT done here — transition() handles it internally.
+//! Map transactions (raw wire bytes or decoded input.Transaction) to executor TxInput.
+//! Sender recovery is not done here; transition() does it.
 const std = @import("std");
 const types = @import("executor_types");
 const input = @import("input");
@@ -27,11 +23,7 @@ pub fn decodeTxs(
     return result;
 }
 
-/// Map decoded input.Transaction structs (from io.zig / deserialize.zig) to
-/// executor TxInput structs. This is the path used by the block executor when
-/// StatelessInput carries fully decoded transactions.
-///
-/// ECDSA sender recovery is NOT done here — transition() handles it.
+/// Map decoded input.Transaction structs to TxInput (the block executor's path).
 pub fn decodeTxsFromInput(
     alloc: std.mem.Allocator,
     txs: []const input.Transaction,

@@ -63,7 +63,8 @@ pub fn hpEncode(nibbles: []const u8, is_leaf: bool, out: []u8) []u8 {
 /// Decode a hex-prefix (compact) encoded path into nibbles written to `out`.
 ///
 /// Returns `{ is_leaf, len }` where `len` is the number of nibbles written.
-/// `out` must have length >= bytes.len * 2.
+/// A path with more nibbles than `out` holds is error.InvalidHp: witness paths are
+/// untrusted, and callers decode into fixed stack buffers.
 pub fn hpDecode(
     bytes: []const u8,
     out: []u8,
@@ -75,6 +76,7 @@ pub fn hpDecode(
 
     const is_leaf = (flag & 0x02) != 0;
     const is_odd = (flag & 0x01) != 0;
+    if (2 * (bytes.len - 1) + @intFromBool(is_odd) > out.len) return error.InvalidHp;
 
     var out_len: usize = 0;
 
@@ -121,7 +123,7 @@ test "commonPrefixLen empty" {
 }
 
 test "hpDecode extension even (flag=0)" {
-    // compactEncode([], is_leaf=false) → [0x00]
+    // hpEncode([], is_leaf=false) → [0x00]
     var out: [16]u8 = undefined;
     const r = try hpDecode(&.{0x00}, &out);
     try std.testing.expect(!r.is_leaf);
@@ -129,7 +131,7 @@ test "hpDecode extension even (flag=0)" {
 }
 
 test "hpDecode extension odd (flag=1)" {
-    // compactEncode([0x01], is_leaf=false) → [0x11]
+    // hpEncode([0x01], is_leaf=false) → [0x11]
     var out: [16]u8 = undefined;
     const r = try hpDecode(&.{0x11}, &out);
     try std.testing.expect(!r.is_leaf);
@@ -138,7 +140,7 @@ test "hpDecode extension odd (flag=1)" {
 }
 
 test "hpDecode leaf even (flag=2)" {
-    // compactEncode([0x01, 0x02], is_leaf=true) → [0x20, 0x12]
+    // hpEncode([0x01, 0x02], is_leaf=true) → [0x20, 0x12]
     var out: [16]u8 = undefined;
     const r = try hpDecode(&.{ 0x20, 0x12 }, &out);
     try std.testing.expect(r.is_leaf);
@@ -147,7 +149,7 @@ test "hpDecode leaf even (flag=2)" {
 }
 
 test "hpDecode leaf odd (flag=3)" {
-    // compactEncode([0x0a, 0x01, 0x02], is_leaf=true) → [0x3a, 0x12]
+    // hpEncode([0x0a, 0x01, 0x02], is_leaf=true) → [0x3a, 0x12]
     // Flag nibble = 3 (leaf, odd), low nibble of first byte = 0xa = nibble[0]
     // Then bytes[1] = 0x12 → nibbles 0x01, 0x02
     var out: [16]u8 = undefined;
@@ -158,7 +160,7 @@ test "hpDecode leaf odd (flag=3)" {
 }
 
 test "hpDecode empty path leaf even" {
-    // compactEncode([], is_leaf=true) → [0x20]
+    // hpEncode([], is_leaf=true) → [0x20]
     var out: [16]u8 = undefined;
     const r = try hpDecode(&.{0x20}, &out);
     try std.testing.expect(r.is_leaf);

@@ -94,9 +94,10 @@ pub const G_CODEDEPOSIT = 200; // Per byte of deployed code
 pub const G_TRANSACTION = 21000;
 pub const G_TXCREATE = 32000;
 pub const G_TXDATAZERO = 4;
-pub const G_TXDATANONZERO = 16; // Pre-Istanbul
-pub const G_TXDATANONZERO_ISTANBUL = 16; // Actually same
-pub const G_TXDATANONZERO_EIP2028 = 16; // After EIP-2028
+// EIP-2028 (Istanbul) value; pre-Istanbul non-zero calldata cost 68.
+pub const G_TXDATANONZERO = 16;
+pub const G_TXDATANONZERO_ISTANBUL = 16;
+pub const G_TXDATANONZERO_EIP2028 = 16;
 
 // Memory expansion cost
 pub const G_MEMORY = 3; // Per word
@@ -140,9 +141,8 @@ fn memoryCost(num_words: usize) u64 {
     return std.math.add(u64, linear, quadratic) catch std.math.maxInt(u64);
 }
 
-// Calculate memory size in words (rounded up).
-// Uses divCeil rather than (size + 31) / 32: a huge size must saturate, not
-// overflow-panic, on the intermediate +31.
+/// Memory size in words, rounded up. divCeil rather than (size + 31) / 32 so a huge
+/// size saturates instead of overflow-panicking on the +31.
 pub fn toWordSize(size: usize) usize {
     return std.math.divCeil(usize, size, 32) catch std.math.maxInt(usize);
 }
@@ -159,7 +159,7 @@ pub fn getSloadCost(spec: primitives.SpecId, is_cold: bool) u64 {
         .merge, .shanghai, .cancun, .prague, .osaka => {
             return if (is_cold) G_SLOAD_BERLIN_COLD else G_SLOAD_BERLIN_WARM;
         },
-        // EIP-8037 (Amsterdam+): cold storage access repriced to 3000.
+        // EIP-8037 (Amsterdam+): COLD_STORAGE_ACCESS_AMSTERDAM (still 2100).
         .amsterdam => {
             return if (is_cold) COLD_STORAGE_ACCESS_AMSTERDAM else G_SLOAD_BERLIN_WARM;
         },
@@ -299,10 +299,10 @@ pub fn getSstoreCost(
 }
 
 /// EIP-8037 (Amsterdam+) SSTORE gas. Mirrors amsterdam/vm/instructions/storage.py:
-///   access:  cold 3000 / warm 100 (always)
+///   access:  cold 2100 / warm 100 (always)
 ///   write:   +STORAGE_WRITE (10000) regular, only on first change this tx
 ///   set:     +STORAGE_SET state gas (64*cpsb) when creating a slot from zero
-///   refunds: REFUND_STORAGE_CLEAR (12480) on clear; STORAGE_WRITE on restore-to-original;
+///   refunds: REFUND_STORAGE_CLEAR (11616) on clear; STORAGE_WRITE on restore-to-original;
 ///            STORAGE_SET state-gas credit when a same-tx-set slot is cleared again.
 fn getSstoreCostAmsterdam(
     original: primitives.U256,

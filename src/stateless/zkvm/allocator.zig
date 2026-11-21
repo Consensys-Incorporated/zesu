@@ -1,14 +1,6 @@
-/// Default allocator for the zevm_stateless main binary.
-///
-/// Returns std.heap.c_allocator for native builds.
-/// Override at build time by injecting a different "main_allocator" module:
-///
-///   exe.root_module.addImport("main_allocator", your_module)
-///
-/// The replacement module must export:
-///   pub fn get() std.mem.Allocator { ... }
-///
-/// See zevm-stateless-zisk for an example that injects the Zisk bump allocator.
+//! Native c_allocator shim. Not wired into any build.zig module: binaries get their allocator
+//! from the `zesu_allocator` singleton (src/evm/allocator.zig).
+
 const std = @import("std");
 
 pub fn get() std.mem.Allocator {

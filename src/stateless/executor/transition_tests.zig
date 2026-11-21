@@ -1,5 +1,5 @@
-//! Integration tests: a database error surfaced during block execution must mark
-//! the block invalid rather than complete as if a failure were legitimate.
+//! Block-level transition tests: a witness that cannot serve a read must mark the
+//! block invalid, plus per-chain system-contract and deposit-contract addresses.
 
 const std = @import("std");
 const primitives = @import("primitives");
@@ -213,7 +213,6 @@ test "a transaction to a delegated account whose delegate code is in the witness
 fn depositReceipt(log: *input.Log) input.Receipt {
     return .{
         .type = 2,
-        .tx_hash = @splat(0),
         .tx_index = 0,
         .block_hash = @splat(0),
         .block_number = 0,
@@ -239,7 +238,6 @@ test "deposit requests come from the chain's own deposit contract" {
         .topics = &topics,
         .data = &data,
         .block_number = 0,
-        .tx_hash = @splat(0),
         .tx_index = 0,
         .block_hash = @splat(0),
         .log_index = 0,
@@ -268,7 +266,6 @@ test "a configured deposit contract replaces the chain-id default" {
         .topics = &topics,
         .data = &data,
         .block_number = 0,
-        .tx_hash = @splat(0),
         .tx_index = 0,
         .block_hash = @splat(0),
         .log_index = 0,
@@ -440,4 +437,61 @@ test "a post-block system call that reads unprovable storage fails as an incompl
 
 test "a post-block system call whose reads are provable succeeds" {
     try runEmptyPragueBlock(.{ .slot_known = true });
+}
+
+// A witness holding an empty account (impossible after EIP-7523, but a witness can
+// carry one) and a recipient whose code reads its balance: BALANCE(EMPTY) POP STOP.
+const EmptyAccountDb = struct {
+    const EMPTY: input.Address = @splat(0x44);
+    const CODE = [_]u8{0x73} ++ EMPTY ++ [_]u8{ 0x31, 0x50, 0x00 };
+
+    pub fn basic(_: *@This(), address: input.Address) !?state_mod.AccountInfo {
+        var info = state_mod.AccountInfo.default();
+        if (std.mem.eql(u8, &address, &TEST_SENDER) or std.mem.eql(u8, &address, &TEST_COINBASE)) {
+            info.balance = 1_000_000_000_000;
+        } else if (std.mem.eql(u8, &address, &TEST_RECIPIENT)) {
+            std.crypto.hash.sha3.Keccak256.hash(&CODE, &info.code_hash, .{});
+            info.code = bytecode_mod.Bytecode.newLegacy(&CODE);
+        } else if (!std.mem.eql(u8, &address, &EMPTY)) return null;
+        return info;
+    }
+
+    pub fn codeByHash(_: *@This(), _: primitives.Hash) !bytecode_mod.Bytecode {
+        return bytecode_mod.Bytecode.newLegacy(&CODE);
+    }
+
+    pub fn storage(_: *@This(), _: primitives.Address, _: primitives.StorageKey) !primitives.StorageValue {
+        return 0;
+    }
+
+    pub fn blockHash(_: *@This(), _: u64) !primitives.Hash {
+        return @splat(0);
+    }
+};
+
+fn deletesEmptyAccount(withdrawals: []const input.Withdrawal) !bool {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var txs = [_]input.TxInput{.{ .from = TEST_SENDER, .to = TEST_RECIPIENT, .nonce = 0, .gas = 100_000, .gas_price = 1 }};
+    var env = testEnv();
+    env.withdrawals = @constCast(withdrawals);
+    var ctx = context_mod.Context(EmptyAccountDb).new(.{}, primitives.SpecId.shanghai);
+    defer ctx.journaled_state.deinit();
+    ctx.block = transition_mod.buildBlockEnv(env, primitives.SpecId.shanghai);
+    const result = try transitionWithContext(arena_state.allocator(), &ctx, .{}, env, &txs, primitives.SpecId.shanghai, 1, SystemContracts.forChainId(1), 0);
+    try std.testing.expectEqual(context_mod.ContextError.ok, ctx.ctx_error);
+    for (result.deleted_accounts) |a| {
+        if (std.mem.eql(u8, &a, &EmptyAccountDb.EMPTY)) return true;
+    }
+    return false;
+}
+
+test "an empty account the block only reads keeps its leaf" {
+    try std.testing.expect(!try deletesEmptyAccount(&.{}));
+}
+
+test "an empty account touched by a zero-amount withdrawal is deleted" {
+    const wd = [_]input.Withdrawal{.{ .index = 0, .validator_index = 0, .address = EmptyAccountDb.EMPTY, .amount = 0 }};
+    try std.testing.expect(try deletesEmptyAccount(&wd));
 }

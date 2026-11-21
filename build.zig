@@ -8,9 +8,9 @@ const CryptoBackend = enum {
     @"extern",
 };
 
-/// The set of modules produced by `buildModules`. The exposable ones are registered
-/// via `addModule` (retrievable by dependents through `dep.module(name)`) when
-/// `expose` is true; `accel_impl`, `executor_types`, `zkvm_io` and `zkvm_root` stay private.
+/// The set of modules produced by `buildModules`. When `expose` is true the public ones are
+/// registered via `addModule` (dependents get them through `dep.module(name)`); `zkvm_io` and
+/// `zkvm_root` (and the internal `accel_impl` / `executor_types`) always stay private.
 const ModuleSet = struct {
     zesu_allocator: *std.Build.Module,
     primitives: *std.Build.Module,
@@ -43,6 +43,14 @@ const ModuleSet = struct {
 /// What the zkVM a guest object is built for provides beyond the rv64im baseline. Every field
 /// defaults to false: the portable guest, and every native build. Each one only selects code at
 /// comptime; the zkVM project that links the object must provide what it enables.
+///
+/// Deliberate exception to "zkVM-specific code lives in the zkVM build": these paths are
+/// compiled into zesu because they must be inlined into zesu's own hot code. `dma` replaces
+/// 32-byte stack copies with a two-instruction asm pair; behind an extern call the call
+/// overhead would cost more than it saves. `jump_dest` and `arith256_mod` would tolerate a
+/// call, but neither is in the zkvm-standards accelerator interface yet, so they sit here
+/// too. Move them to the accelerator interface once standardized (arith256_mod: eth-act
+/// zkvm-standards PR #22).
 pub const GuestFeatures = struct {
     /// Fixed-size copy accelerator, used by `primitives.dma`
     /// (currently: the ZisK DMA chip).
@@ -60,10 +68,10 @@ pub const GuestFeatures = struct {
 /// Two independent axes select implementations, one per caller-supplied parameter:
 ///   accel_impl = crypto_backend == extern ? extern_bridge.zig : default.zig
 ///   zkvm_io    = guest                    ? extern_io.zig     : io/interface.zig
-/// `guest` is true only for the rv64im-object build
+/// `guest` is true only for the guest-object build (`addGuestObject`).
 ///
 /// The allocator root is supplied by the caller (`allocator.zig` settable singleton for the
-/// exposed graph; `alt_fl_alloc.zig` for the standalone rv64im object).
+/// exposed graph; the `alt_fl_alloc.zig` free-list for the guest object).
 fn buildModules(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -74,6 +82,7 @@ fn buildModules(
     crypto_backend: CryptoBackend,
     guest: bool,
     features: GuestFeatures,
+    keccak_memo: bool,
 ) ModuleSet {
     const use_extern = crypto_backend == .@"extern";
 
@@ -111,11 +120,9 @@ fn buildModules(
     });
     if (!use_extern) {
         accel_impl.addImport("zesu_allocator", zesu_allocator);
-        // default.zig @cImports system crypto headers (e.g. secp256k1.h). C include paths are
-        // per-module and don't cross the dependency boundary, so set it on the accel_impl module
-        // itself — that way dependents (and our own apps/tests) resolve the @cImport without each
-        // consumer re-adding an include path to a module they can't see. `crypto_prefix` is the
-        // caller-provided prefix (overridable via -Dcrypto-prefix; see build()).
+        // default.zig @cImports system crypto headers. C include paths are per-module and don't
+        // cross the dependency boundary, so set it here so dependents resolve the @cImport
+        // without re-adding an include path to a module they can't see.
         accel_impl.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{crypto_prefix}) });
     }
 
@@ -128,6 +135,9 @@ fn buildModules(
     // For primitives.mix64 — the keccak memo indexes on the same non-uniform key
     // material as the address maps and needs the identical mixer, so both share one.
     accelerators.addImport("primitives", primitives);
+    const accel_opts = b.addOptions();
+    accel_opts.addOption(bool, "keccak_memo", keccak_memo);
+    accelerators.addOptions("build_options", accel_opts);
 
     const precompile_types = mkmod(b, expose, "precompile_types", .{
         .root_source_file = b.path("src/evm/precompile/types.zig"),
@@ -325,7 +335,7 @@ fn buildModules(
     executor.addImport("accelerators", accelerators);
 
     // zkvm_io is private: native stdin/env (io/interface.zig) or the extern C-ABI refs
-    // (zkvm/extern_io.zig) the zkVM host resolves at link. Selected by the `guest` parameter
+    // (zkvm/extern_io.zig) the zkVM host resolves at link.
     const zkvm_io = b.createModule(.{
         .root_source_file = b.path(if (guest) "src/zkvm/extern_io.zig" else "src/io/interface.zig"),
         .target = target,
@@ -344,13 +354,11 @@ fn buildModules(
 
     var zkvm_root: ?*std.Build.Module = null;
     if (guest) {
-        // zkvm_root stays PRIVATE (never addModule'd). It wires the full turnkey object
-        // (runner + extern IO + allocator) and exports main(). It must NOT be exposed: the
-        // exposed graph roots `zesu_allocator` on the settable singleton, and a consumer
-        // building this as an object gets no chance to call set() before main() runs (get()
-        // would panic on a freestanding default). The turnkey object is instead produced by the
-        // `rv64im-object` step (which wires the bump allocator over ZKVM_HEAP_POS/TOP) and
-        // published as zesu.rv64im.o. Module consumers import the leaf modules and call set().
+        // zkvm_root must stay private: it exports main(), and on the exposed graph
+        // `zesu_allocator` is the settable singleton, which nothing would set() before main()
+        // runs. The guest object (addGuestObject) instead roots `zesu_allocator` on the
+        // alt_fl_alloc.zig free-list over ZKVM_HEAP_POS/TOP. Module consumers import the leaf
+        // modules and call set() themselves.
         const root = b.createModule(.{
             .root_source_file = b.path("src/zkvm/root.zig"),
             .target = target,
@@ -436,7 +444,7 @@ fn addRunStep(
 /// tests-zkevm-benchmark ships one tarball per gas value, so fetch and run one tier at a time:
 ///   zig build zkevm-benchmark -Dbench-gas=60M
 fn addZkevmBenchmarkSteps(b: *std.Build, runner: *std.Build.Step.Compile) void {
-    const version = "tests-zkevm-benchmark@v21.0.5";
+    const version = "tests-zkevm-benchmark@v21.0.7";
     const gas = b.option([]const u8, "bench-gas", "zkevm benchmark gas tier: 30M, 60M, 100M, 150M or 200M (default 30M)") orelse "30M";
     const fetch = b.step("fetch-zkevm-benchmark-fixtures", "Download one " ++ version ++ " gas tier (-Dbench-gas)");
     const run = b.step("zkevm-benchmark", "Run one " ++ version ++ " gas tier (-Dbench-gas)");
@@ -462,7 +470,7 @@ fn addZkevmBenchmarkSteps(b: *std.Build, runner: *std.Build.Step.Compile) void {
             "touch \"$marker\"", .{
             .dir = dir,
             .version = version,
-            .encoded = "tests-zkevm-benchmark%40v21.0.5",
+            .encoded = "tests-zkevm-benchmark%40v21.0.7",
             .tier = tier,
         }),
     });
@@ -481,12 +489,11 @@ fn addZkevmBenchmarkSteps(b: *std.Build, runner: *std.Build.Step.Compile) void {
 ///
 /// This is zesu's public build API for zkVM projects: a dependent (e.g. zesu-zkvm) imports this
 /// build.zig, passes the same resolved target it uses for its own host object, and links the
-/// returned object. The target's ISA extensions are the caller's; `GuestFeatures` only names the
-/// zkVM capabilities zesu may compile in, and each is off unless the caller enables it.
+/// returned object. The target's ISA extensions are the caller's; `features` names the zkVM
+/// capabilities zesu may compile in (all off by default).
 ///
 /// `b` must be zesu's own builder (`dep.builder` from `b.dependency("zesu", .{})`), because the
-/// module graph resolves its sources relative to it. `features` names the zkVM-specific
-/// capabilities to compile in (all off by default).
+/// module graph resolves its sources relative to it.
 pub fn addGuestObject(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -494,7 +501,7 @@ pub fn addGuestObject(
     features: GuestFeatures,
 ) *std.Build.Step.Compile {
     // The extern crypto backend ignores crypto_prefix (it only locates native libraries).
-    const obj_mods = buildModules(b, target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), "", .@"extern", true, features);
+    const obj_mods = buildModules(b, target, optimize, false, b.path("src/zkvm/alt_fl_alloc.zig"), "", .@"extern", true, features, true);
 
     const obj = b.addObject(.{
         .name = "zesu",
@@ -507,8 +514,7 @@ pub fn addGuestObject(
 
 /// Build a relocatable rv64im ELF guest object on the freestanding riscv64 baseline plus
 /// `extra_features`, and wire an install step named `step_name` that publishes it to
-/// `install_name` under zig-out. Backs the published `rv64im-object` (and, for now,
-/// `zisk-object`) release artifacts.
+/// `install_name` under zig-out. Backs the published `rv64im-object` release artifact.
 fn addRv64imObjectStep(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
@@ -559,16 +565,19 @@ pub fn build(b: *std.Build) void {
         "Native crypto dependency prefix (default: /opt/homebrew on macOS, /usr/local on Linux)",
     ) orelse (if (is_linux) "/usr/local" else "/opt/homebrew");
     const crypto_include = b.fmt("{s}/include", .{crypto_prefix});
-    // HACK: unlike secp256k1/OpenSSL (resolved via linkSystemLibrary → pkg-config/system search),
-    // mcl and blst ship no pkg-config metadata, so the linker can't locate them on its own —
-    // addCryptoLibraries hands it the static archives by explicit path. We presume both live under
-    // `<crypto_prefix>/lib` (libblst.a, libmcl.a). Assuming they share one directory is itself a bit
-    // of a hack
+    // HACK: blst and mcl ship no pkg-config metadata, so addCryptoLibraries passes the static
+    // archives by explicit path, presumed to live under `<crypto_prefix>/lib`. (On Linux mcl is
+    // instead linked dynamically from /usr/local/lib and libmcl_path is unused.)
     const libblst_path = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
     const libmcl_path = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
+    const keccak_memo = b.option(
+        bool,
+        "keccak-memo",
+        "Memoize keccak256 of 20/32-byte inputs in an unsynchronized global; disable to hash from several threads (default: true)",
+    ) orelse true;
 
     // ── Module graph (exposed via addModule; backend selected by option) ──────
-    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend, false, .{});
+    const mods = buildModules(b, target, optimize, true, b.path("src/evm/allocator.zig"), crypto_prefix, crypto_backend, false, .{}, keccak_memo);
     const block_rlp_size_test_step = b.step("test-block-rlp-size", "Run block RLP size unit tests");
     const block_rlp_size_test = b.addTest(.{ .root_module = mods.block_rlp_size });
     const run_block_rlp_size_test = b.addRunArtifact(block_rlp_size_test);
@@ -752,6 +761,13 @@ pub fn build(b: *std.Build) void {
         const test_step = b.step("test", "Run all unit tests");
         test_step.dependOn(&run_block_rlp_size_test.step);
 
+        // Standalone so CI can run them cheaply with -Dkeccak-memo=false.
+        const accel_test = b.addTest(.{ .root_module = mods.accelerators });
+        addCryptoLibraries(accel_test, crypto_backend, crypto_include, libblst_path, libmcl_path, is_linux);
+        const run_accel_test = b.addRunArtifact(accel_test);
+        b.step("test-accelerators", "Run crypto accelerator (keccak256) unit tests").dependOn(&run_accel_test.step);
+        test_step.dependOn(&run_accel_test.step);
+
         for ([_]struct { m: *std.Build.Module, name: []const u8 }{
             .{ .m = mods.precompile, .name = "precompile" },
             .{ .m = mods.interpreter, .name = "interpreter" },
@@ -777,22 +793,18 @@ pub fn build(b: *std.Build) void {
     // Produces a relocatable rv64im ELF with all EVM and stateless execution logic
     // compiled in, but IO, crypto accelerators, heap and logging left as unresolved
     // extern references per zkvm-standards. Built from a private graph wired with the
-    // bump allocator (over ZKVM_HEAP_POS/TOP) so the standalone object needs no set() call.
+    // alt_fl_alloc.zig free-list allocator (over ZKVM_HEAP_POS/TOP), so it needs no set() call.
     //
     // `rv64im-object` targets the zkvm-standards baseline (M + Zicclsm + unaligned scalar
-    // mem) shared across zkVM backends. `zisk-object` is the same graph on the same base
-    // ISA, plus the Zbb and Zbs bit-manipulation extensions that ZisK's transpiler and cost
-    // model support natively (see PRs #117, #119) — bitmanip instructions ZisK implements
-    // as single ops but other zkVM backends may not, so they stay off the shared default
-    // and are opt-in via this separate target instead of widening every consumer's ISA.
+    // mem) shared across zkVM backends. zkVM-specific ISA extensions and GuestFeatures are
+    // left to each zkVM's own build, which calls addGuestObject with its own target.
     //
-    // Build with: zig build rv64im-object | zig build zisk-object
+    // Build with: zig build rv64im-object
     // Verify undefined refs: llvm-nm zig-out/lib/<name> | grep ' U '
     addRv64imObjectStep(b, optimize, &.{ .m, .zicclsm, .unaligned_scalar_mem }, "rv64im-object", "Build relocatable rv64im ELF object (zesu.o)", "lib/zesu.o", .{});
-    addRv64imObjectStep(b, optimize, &.{ .m, .zicclsm, .unaligned_scalar_mem, .zbb, .zbs }, "zisk-object", "Build relocatable rv64im+Zbb+Zbs ELF object for the ZisK guest (zesu-zisk.o)", "lib/zesu-zisk.o", .{ .dma = true });
 
     // ── Fixture fetch steps ───────────────────────────────────────────────────
-    const spec_test_version = "tests@v21.0.1";
+    const spec_test_version = "tests@v21.0.2";
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-specs " ++ spec_test_version ++ " fixtures");
     fetch_fixtures_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
@@ -807,7 +819,7 @@ pub fn build(b: *std.Build) void {
             "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
     }).step);
 
-    const zkevm_version = "tests-zkevm@v21.0.6";
+    const zkevm_version = "tests-zkevm@v21.0.7";
     const fetch_zkevm_step = b.step("fetch-zkevm-fixtures", "Download " ++ zkevm_version ++ " execution-specs fixtures");
     fetch_zkevm_step.dependOn(&b.addSystemCommand(&.{
         "sh", "-c",
