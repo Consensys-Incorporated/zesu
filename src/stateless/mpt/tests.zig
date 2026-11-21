@@ -1056,6 +1056,49 @@ test "BranchSlots.ofScan: rejects what updEncodeBranch would not reproduce" {
     try std.testing.expect(BranchSlots.of(&.{}) == null);
 }
 
+test "BranchSlots.childAt: the offset of() gives, for every child, on valid and damaged branches" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const check = struct {
+        fn f(node_rlp: []const u8) !void {
+            const slots = BranchSlots.of(node_rlp);
+            for (0..16) |nib| {
+                const want: ?usize = if (slots) |sl| sl.at[nib] else null;
+                try std.testing.expectEqual(want, BranchSlots.childAt(node_rlp, @intCast(nib)));
+            }
+        }
+    }.f;
+
+    var prng = std.Random.DefaultPrng.init(0x51075);
+    const rand = prng.random();
+    const hash_child = try updHashOrEmbed(alloc, try updMakeLeaf(alloc, &(.{5} ** 40), "x" ** 40));
+    var accepted: usize = 0;
+    for (0..400) |round| {
+        var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
+        for (&enc) |*e| switch (rand.uintLessThan(u8, if (round < 20) 1 else 4)) {
+            0 => e.* = hash_child,
+            1 => e.* = try updMakeLeaf(alloc, &.{ 3, 4 }, "bc"),
+            else => {},
+        };
+        const good = try testBranch(alloc, &enc);
+        accepted += @intFromBool(BranchSlots.of(good) != null);
+        try check(good);
+        // One damaged byte, then a cut node.
+        const bad = try alloc.dupe(u8, good);
+        bad[rand.uintLessThan(usize, bad.len)] ^= @as(u8, 1) << rand.int(u3);
+        try check(bad);
+        try check(good[0..rand.uintLessThan(usize, good.len)]);
+    }
+    // The fixed 16-hash layout and the scanned ones are both exercised.
+    try std.testing.expect(accepted > 300);
+    try check(try updEncodeBranch(alloc, &@as([16][]const u8, @splat(hash_child)), "v"));
+    try check(try updMakeLeaf(alloc, &.{1}, "a"));
+    try check(&EMPTY_NODE_RLP);
+    try check(&.{});
+}
+
 test "BranchSlots: replaceChild and replaceChildren match re-encoding across header sizes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
