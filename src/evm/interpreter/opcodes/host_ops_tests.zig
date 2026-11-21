@@ -472,6 +472,86 @@ test "EXTCODESIZE: stack underflow halts" {
 }
 
 // ---------------------------------------------------------------------------
+// EXTCODECOPY tests
+// ---------------------------------------------------------------------------
+
+const EXT_CODE = [_]u8{ 0x60, 0x2A, 0x60, 0x00, 0x55 }; // PUSH1 42 PUSH1 0 SSTORE
+const EXT_COPY_GAS_LIMIT: u64 = 100_000;
+/// Copying 32 bytes to offset 0: one word of copy cost plus one word of memory expansion.
+const EXT_COPY_32_GAS: u64 = gas_costs.G_COPY + 3;
+
+/// A DB holding OTHER with EXT_CODE. With `code_in_info`, the code rides on the account info
+/// (loading the account loads its code); without it, only codeByHash serves the code.
+fn extCodeDb(code_in_info: bool) !database_mod.InMemoryDB {
+    var hash: primitives.Hash = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(&EXT_CODE, &hash, .{});
+    var db = database_mod.InMemoryDB.init(ALLOC);
+    var info = state_mod.AccountInfo.new(0, 1, hash, bytecode_mod.Bytecode.newRaw(&EXT_CODE));
+    if (!code_in_info) {
+        info.code = null;
+        try db.insertCode(hash, bytecode_mod.Bytecode.newRaw(&EXT_CODE));
+    }
+    try db.insertAccount(OTHER, info);
+    return db;
+}
+
+/// Run EXTCODECOPY(OTHER, mem 0, code 0, 32) and check the copy and the gas charged.
+fn expectExtcodecopy32(ctx: *context_mod.DefaultContext, access_gas: u64) !void {
+    var interp = makeInterp();
+    interp.gas = Gas.new(EXT_COPY_GAS_LIMIT);
+    interp.stack.pushUnsafe(32); // size
+    interp.stack.pushUnsafe(0); // code offset
+    interp.stack.pushUnsafe(0); // memory offset
+    interp.stack.pushUnsafe(host_module.addressToU256(OTHER));
+
+    var host = Host.fromCtx(ctx, null);
+    var ic = InstructionContext{ .interpreter = &interp, .host = &host };
+
+    host_ops.opExtcodecopy(&ic);
+
+    try expect(interp.bytecode.continue_execution);
+    try expectEqual(EXT_COPY_GAS_LIMIT - access_gas - EXT_COPY_32_GAS, interp.gas.remaining);
+    var want = [_]u8{0} ** 32;
+    @memcpy(want[0..EXT_CODE.len], &EXT_CODE);
+    try std.testing.expectEqualSlices(u8, &want, interp.memory.buffer.items[0..32]);
+}
+
+test "EXTCODECOPY: cold account copies its code and charges cold access" {
+    var ctx = makeCtx(try extCodeDb(true));
+    try expectExtcodecopy32(&ctx, gas_costs.COLD_ACCOUNT_ACCESS);
+}
+
+test "EXTCODECOPY: warm account with code loaded copies it and charges warm access" {
+    var ctx = makeCtx(try extCodeDb(false));
+    _ = try ctx.journaled_state.loadAccountWithCode(OTHER);
+    try expectExtcodecopy32(&ctx, gas_costs.WARM_ACCOUNT_ACCESS);
+}
+
+test "EXTCODECOPY: warm account without code loaded still copies it and charges warm access" {
+    var ctx = makeCtx(try extCodeDb(false));
+    _ = try ctx.journaled_state.loadAccount(OTHER);
+    try expect(ctx.journaled_state.codeProbe(OTHER).code == null);
+    try expectExtcodecopy32(&ctx, gas_costs.WARM_ACCOUNT_ACCESS);
+}
+
+test "EXTCODECOPY: address warm but not loaded (coinbase) charges warm access" {
+    var ctx = makeCtx(try extCodeDb(true));
+    ctx.journaled_state.warmCoinbaseAccount(OTHER);
+    const probe = ctx.journaled_state.codeProbe(OTHER);
+    try expect(!probe.is_cold);
+    try expect(probe.code == null);
+    try expectExtcodecopy32(&ctx, gas_costs.WARM_ACCOUNT_ACCESS);
+}
+
+test "EXTCODECOPY: account warmed in a reverted call is charged cold access again" {
+    var ctx = makeCtx(try extCodeDb(true));
+    const checkpoint = ctx.journaled_state.getCheckpoint();
+    _ = try ctx.journaled_state.loadAccountWithCode(OTHER);
+    ctx.journaled_state.checkpointRevert(checkpoint);
+    try expectExtcodecopy32(&ctx, gas_costs.COLD_ACCOUNT_ACCESS);
+}
+
+// ---------------------------------------------------------------------------
 // EXTCODEHASH tests
 // ---------------------------------------------------------------------------
 
