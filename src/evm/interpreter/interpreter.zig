@@ -672,6 +672,15 @@ const ops = struct {
     fn shr(shift: primitives.U256, value: primitives.U256) primitives.U256 {
         return if (shift < 256) value >> @intCast(shift) else 0;
     }
+    /// EIP-145: a shift of 256 or more leaves only the sign fill.
+    fn sar(shift: primitives.U256, value: primitives.U256) primitives.U256 {
+        if (shift >= 256) {
+            const top: i64 = @bitCast(@as(u64, @truncate(value >> 192)));
+            const fill: u64 = @bitCast(top >> 63);
+            return @bitCast([4]u64{ fill, fill, fill, fill });
+        }
+        return @bitCast(@as(i256, @bitCast(value)) >> @as(u8, @intCast(shift)));
+    }
     fn slt(a: primitives.U256, b: primitives.U256) primitives.U256 {
         return @intFromBool(@as(i256, @bitCast(a)) < @as(i256, @bitCast(b)));
     }
@@ -856,7 +865,7 @@ fn runDispatch(
         0x1D => { // SAR
             r.pc += 1;
             if (has_shifts) {
-                if (!viaSelf(self, &r, gas_costs.G_VERYLOW, opcodes.opSar, .{ctx})) return;
+                if (!binop(self, &r, gas_costs.G_VERYLOW, ops.sar)) return;
             } else if (!coldReg(self, table, ctx, 0x1D, &r)) return;
             continue :sw opcodeAt(code, r.pc);
         },
