@@ -50,6 +50,7 @@ test {
     _ = @import("./main_tests.zig");
     _ = @import("./tx_signing_tests.zig");
     _ = @import("./output_tests.zig");
+    _ = @import("./scratch_arena_tests.zig");
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
