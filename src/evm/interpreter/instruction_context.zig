@@ -20,6 +20,6 @@ pub const InstructionFn = *const fn (ctx: *InstructionContext) void;
 /// Shared memory-expansion helper for opcode handlers: grows memory to `new_size`
 /// bytes, charging the expansion gas cost. Returns false (OOG) without mutating
 /// memory if gas or the resize fails.
-pub fn expandMemory(ctx: *InstructionContext, new_size: usize) bool {
+pub inline fn expandMemory(ctx: *InstructionContext, new_size: usize) bool {
     return ctx.interpreter.memory.expandWithGas(&ctx.interpreter.gas, new_size);
 }

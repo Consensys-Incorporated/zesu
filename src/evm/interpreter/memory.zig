@@ -5,8 +5,11 @@ const gas_costs = @import("gas_costs.zig");
 const Gas = @import("gas.zig").Gas;
 
 /// EVM memory for one interpreter. The opcode path grows it only through
-/// `expandWithGas` (word-aligned, zero-filled); the buffer's capacity is kept across
-/// frames by `Interpreter.clearReusingMemory`.
+/// `expandWithGas` (word-aligned, zero-filled).
+///
+/// Invariant: every byte of the buffer's capacity past `items.len` is zero, so growing
+/// within the capacity is a length change. Anything that changes the length or the
+/// allocation must go through `growZeroed` or `clear`.
 pub const Memory = struct {
     buffer: std.ArrayList(u8),
     /// Vestigial: always 0 (no shared-buffer checkpoints).
@@ -19,15 +22,6 @@ pub const Memory = struct {
     pub fn new() Memory {
         return Memory{
             .buffer = std.ArrayList(u8){ .items = &[_]u8{}, .capacity = 0 },
-            .checkpoint = 0,
-            .child_checkpoint = null,
-            .memory_limit = (1 << 32) - 1,
-        };
-    }
-
-    pub fn newWithBuffer(buffer: std.ArrayList(u8)) Memory {
-        return Memory{
-            .buffer = buffer,
             .checkpoint = 0,
             .child_checkpoint = null,
             .memory_limit = (1 << 32) - 1,
@@ -56,7 +50,7 @@ pub const Memory = struct {
         }
 
         if (end_offset > self.buffer.items.len) {
-            try self.buffer.resize(alloc_mod.get(), end_offset);
+            try self.growZeroed(end_offset);
         }
 
         @memcpy(self.buffer.items[offset..end_offset], data);
@@ -71,7 +65,7 @@ pub const Memory = struct {
         }
 
         if (end_offset > self.buffer.items.len) {
-            try self.buffer.resize(alloc_mod.get(), end_offset);
+            try self.growZeroed(end_offset);
         }
 
         @memcpy(self.buffer.items[memory_offset..end_offset], data[data_offset .. data_offset + len]);
@@ -87,7 +81,7 @@ pub const Memory = struct {
         }
 
         if (end_dest > self.buffer.items.len) {
-            try self.buffer.resize(end_dest);
+            try self.growZeroed(end_dest);
         }
 
         @memcpy(self.buffer.items[destination..end_dest], self.buffer.items[source..end_src]);
@@ -124,7 +118,7 @@ pub const Memory = struct {
         }
 
         if (end_offset > self.buffer.items.len) {
-            try self.buffer.resize(alloc_mod.get(), end_offset);
+            try self.growZeroed(end_offset);
         }
 
         // Copy data from global memory
@@ -281,33 +275,51 @@ pub const Memory = struct {
     /// charging the expansion cost against `gas`. Returns false if gas runs out, the
     /// rounding overflows, or the resize fails; gas already spent is not returned, which
     /// is moot since the caller halts with all gas consumed.
-    pub fn expandWithGas(self: *Memory, gas: *Gas, new_size: usize) bool {
-        if (new_size == 0 or new_size <= self.buffer.items.len) return true;
+    pub inline fn expandWithGas(self: *Memory, gas: *Gas, new_size: usize) bool {
+        if (new_size <= self.buffer.items.len) return true;
+        return self.growWithGas(gas, new_size);
+    }
 
+    /// `expandWithGas` when `new_size` is past the current length. Kept free of calls
+    /// (the reallocation is a tail call) so it needs no stack frame.
+    noinline fn growWithGas(self: *Memory, gas: *Gas, new_size: usize) bool {
         const cost = self.expansionCost(new_size);
         if (!gas.spend(cost)) return false;
 
         // expansionCost saturates on a huge new_size; words * 32 can still overflow here.
         const new_words = std.math.divCeil(usize, new_size, 32) catch return false;
         const aligned_size = std.math.mul(usize, new_words, 32) catch return false;
-        const old_size = self.buffer.items.len;
-        self.buffer.resize(alloc_mod.get(), aligned_size) catch return false;
-        @memset(self.buffer.items[old_size..aligned_size], 0);
+        if (aligned_size > self.buffer.capacity) return self.reallocZeroed(aligned_size);
+        self.buffer.items.len = aligned_size;
         return true;
     }
 
-    /// Resize memory to a new size
+    noinline fn reallocZeroed(self: *Memory, new_len: usize) bool {
+        self.growZeroed(new_len) catch return false;
+        return true;
+    }
+
+    /// Set the length to `new_len` (not below the current one), keeping the invariant.
+    fn growZeroed(self: *Memory, new_len: usize) !void {
+        if (new_len > self.buffer.capacity) {
+            try self.buffer.ensureTotalCapacity(alloc_mod.get(), new_len);
+            @memset(self.buffer.unusedCapacitySlice(), 0);
+        }
+        self.buffer.items.len = new_len;
+    }
+
+    /// Grow memory to `new_size` bytes, zero-filled, without charging gas.
     pub fn resize(self: *Memory, new_size: usize) !void {
         if (new_size > self.memory_limit) {
             return error.MemoryLimitExceeded;
         }
-
-        try self.buffer.resize(new_size);
+        if (new_size > self.buffer.items.len) try self.growZeroed(new_size);
     }
 
     /// Empty the memory, keeping the buffer's capacity.
     pub fn clear(self: *Memory) void {
-        self.buffer.clearRetainingCapacity();
+        @memset(self.buffer.items, 0);
+        self.buffer.items.len = 0;
         self.checkpoint = 0;
         self.child_checkpoint = null;
     }
