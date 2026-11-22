@@ -198,3 +198,42 @@ test "inlined env arm: out of gas and stack overflow match the table path" {
         try expectDispatchMatchesTable(&flood, .amsterdam, 1_000_000);
     }
 }
+
+// EELS `jump`: the target must be in `valid_jump_destinations`, i.e. a JUMPDEST
+// opcode inside the code that is not PUSH data.
+test "jump targets: last code byte is valid, past the end and PUSH data are not" {
+    const table = protocol_schedule.makeInstructionTable(.amsterdam);
+
+    // 0: PUSH1 3   2: JUMP   3: JUMPDEST (last byte)
+    var last = newInterp(&.{ 0x60, 0x03, 0x56, 0x5B }, .amsterdam);
+    defer last.deinit();
+    try expectEqual(.stop, last.run(&table));
+
+    // Nine bytes of code, so position 9 is the first bit past the code in the bitmap.
+    // 0: PUSH1 9   2: JUMP   3..8: JUMPDEST
+    var past = newInterp(&.{ 0x60, 0x09, 0x56, 0x5B, 0x5B, 0x5B, 0x5B, 0x5B, 0x5B }, .amsterdam);
+    defer past.deinit();
+    try expectEqual(.invalid_jump, past.run(&table));
+
+    // 0: PUSH1 4   2: JUMP   3: PUSH1 0x5B (data at 4)
+    var data = newInterp(&.{ 0x60, 0x04, 0x56, 0x60, 0x5B }, .amsterdam);
+    defer data.deinit();
+    try expectEqual(.invalid_jump, data.run(&table));
+
+    // A target that does not fit a machine word.
+    // 0: PUSH9 2^64 + 12   10: JUMP   11: INVALID   12: JUMPDEST
+    var wide = newInterp(&.{ 0x68, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x0C, 0x56, 0xFE, 0x5B }, .amsterdam);
+    defer wide.deinit();
+    try expectEqual(.invalid_jump, wide.run(&table));
+}
+
+// EIP-7702: a designator `0xef0100 || address` has no JUMPDEST analysis; an address
+// made of 0x5b bytes must not create jump targets.
+test "jump targets: a delegation designator has none" {
+    const designator = bytecode_mod.Bytecode{ .eip7702 = bytecode_mod.Eip7702Bytecode.new([_]u8{0x5B} ** 20) };
+    const ext = ExtBytecode.new(designator);
+    for (0..64) |pc| try expectEqual(false, ext.isValidJump(pc));
+
+    const empty = ExtBytecode.default();
+    for (0..64) |pc| try expectEqual(false, empty.isValidJump(pc));
+}
