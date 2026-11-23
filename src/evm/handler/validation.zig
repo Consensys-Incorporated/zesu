@@ -146,12 +146,15 @@ pub const Validation = struct {
             }
         }
 
+        // One calldata scan serves both the intrinsic and the floor.
+        const zero_bytes: u64 = if (tx.data) |d| countZeroBytes(d.items) else 0;
+
         // Calculate initial gas cost
-        const initial_gas = calculateInitialGas(tx, spec, ctx.block.gas_limit);
+        const initial_gas = calculateInitialGas(tx, spec, ctx.block.gas_limit, zero_bytes);
 
         // Calculate floor gas exec-portion (EIP-7623: tokens * 10, only calldata tokens).
         // Returns 0 if EIP-7623 is disabled via cfg flag.
-        const floor_gas = if (!ctx.cfg.disable_eip7623) calculateFloorGas(tx, spec) else 0;
+        const floor_gas = if (!ctx.cfg.disable_eip7623) calculateFloorGas(tx, spec, zero_bytes) else 0;
 
         // Validate gas limit covers intrinsic gas
         if (tx.gas_limit < initial_gas) {
@@ -332,10 +335,10 @@ pub const Validation = struct {
     /// + 2,400 per access-list address, 1,900 per access-list storage slot
     /// + 25,000 per EIP-7702 authorization
     /// Blob gas is a separate fee market and is not included.
-    pub fn calculateInitialGas(tx: *const context.TxEnv, spec: primitives.SpecId, block_gas_limit: u64) u64 {
+    pub fn calculateInitialGas(tx: *const context.TxEnv, spec: primitives.SpecId, block_gas_limit: u64, zero_bytes: u64) u64 {
         // EIP-2780 (Amsterdam+): decomposed intrinsic gas model.
         if (primitives.isEnabledIn(spec, .amsterdam)) {
-            return calculateInitialGasAmsterdam(tx, block_gas_limit);
+            return calculateInitialGasAmsterdam(tx, block_gas_limit, zero_bytes);
         }
 
         const gas_costs = interpreter_mod.gas_costs;
@@ -362,8 +365,7 @@ pub const Validation = struct {
         else
             68; // pre-EIP-2028 (Frontier through Petersburg)
         if (tx.data) |data| {
-            const zeros = countZeroBytes(data.items);
-            gas += zeros * CALLDATA_ZERO_BYTE_COST + (data.items.len - zeros) * calldata_nonzero_cost;
+            gas += zero_bytes * CALLDATA_ZERO_BYTE_COST + (data.items.len - zero_bytes) * calldata_nonzero_cost;
         }
 
         // EIP-3860 (Shanghai+): initcode word gas for CREATE transactions
@@ -428,7 +430,7 @@ pub const Validation = struct {
     /// EIP-2780 (Amsterdam+) decomposed intrinsic gas. Regular gas only: the state gas
     /// is charged at the top frame. Mirrors execution-specs amsterdam/transactions.py
     /// calculate_intrinsic_cost.
-    pub fn calculateInitialGasAmsterdam(tx: *const context.TxEnv, block_gas_limit: u64) u64 {
+    pub fn calculateInitialGasAmsterdam(tx: *const context.TxEnv, block_gas_limit: u64, zero_bytes: u64) u64 {
         _ = block_gas_limit;
 
         var regular: u64 = AM_TX_BASE;
@@ -437,8 +439,7 @@ pub const Validation = struct {
         var tokens_in_calldata: u64 = 0;
         const calldata_len: u64 = if (tx.data) |d| @intCast(d.items.len) else 0;
         if (tx.data) |data| {
-            const zeros = countZeroBytes(data.items);
-            tokens_in_calldata = zeros + (data.items.len - zeros) * AM_TX_DATA_TOKEN_STANDARD;
+            tokens_in_calldata = zero_bytes + (data.items.len - zero_bytes) * AM_TX_DATA_TOKEN_STANDARD;
         }
         regular += tokens_in_calldata * AM_TX_DATA_TOKEN_STANDARD;
 
@@ -566,7 +567,7 @@ pub const Validation = struct {
     /// Prague (EIP-7623): floor_tokens = sum(1 per zero byte, 4 per nonzero byte) over calldata; gas = tokens * 10.
     /// Amsterdam (EIP-7976): all calldata bytes count uniformly as 4 floor tokens; gas = tokens * 16.
     /// Amsterdam (EIP-7981): access list bytes also contribute floor tokens (20*4 per address, 32*4 per key).
-    pub fn calculateFloorGas(tx: *const context.TxEnv, spec: primitives.SpecId) u64 {
+    pub fn calculateFloorGas(tx: *const context.TxEnv, spec: primitives.SpecId, zero_bytes: u64) u64 {
         if (!primitives.isEnabledIn(spec, .prague)) {
             return 0;
         }
@@ -578,8 +579,7 @@ pub const Validation = struct {
             if (is_amsterdam) {
                 tokens += @as(u64, data.items.len) * FLOOR_NONZERO_TOKEN_COST;
             } else {
-                const zeros = countZeroBytes(data.items);
-                tokens += zeros * FLOOR_ZERO_TOKEN_COST + (data.items.len - zeros) * FLOOR_NONZERO_TOKEN_COST;
+                tokens += zero_bytes * FLOOR_ZERO_TOKEN_COST + (data.items.len - zero_bytes) * FLOOR_NONZERO_TOKEN_COST;
             }
         }
 

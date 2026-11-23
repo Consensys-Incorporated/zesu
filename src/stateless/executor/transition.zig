@@ -1047,6 +1047,8 @@ pub fn transitionWithContext(
         // 3c. Pre-check intrinsic gas and initcode size — validateInitialTxGas() runs
         // inside ExecuteEvm.execute() but errors are swallowed there (returned as Fail(0)).
         // We replicate the checks here so violations reject the block instead of producing a receipt.
+        // The intrinsic gas computed here is handed to execute, which would otherwise recompute it.
+        var intrinsic: handler_mod.InitialAndFloorGas = undefined;
         {
             // EIP-3860 / EIP-7954: reject CREATE txs with oversized initcode.
             if (tx.to == null and primitives.isEnabledIn(spec, .shanghai)) {
@@ -1067,7 +1069,7 @@ pub fn transitionWithContext(
             // Intrinsic gas check: call validateInitialTxGas via a temporary EVM instance.
             // ctx.tx is fully populated at this point (kind, data, access_list, etc.).
             var evm_pre = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType).init(ctx, null, &instructions, &precompiles);
-            _ = handler_mod.Validation.validateInitialTxGas(&evm_pre) catch |err| {
+            intrinsic = handler_mod.Validation.validateInitialTxGas(&evm_pre) catch |err| {
                 ctx.journaled_state.discardTx();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
@@ -1122,7 +1124,7 @@ pub fn transitionWithContext(
         // 4. Execute
         var evm = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType).init(ctx, null, &instructions, &precompiles);
 
-        var exec_result = handler_mod.ExecuteEvm.execute(&evm) catch |err| {
+        var exec_result = handler_mod.ExecuteEvm.executeWithIntrinsic(&evm, intrinsic) catch |err| {
             ctx.journaled_state.discardTx();
             if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
             ctx.tx.data = null;
