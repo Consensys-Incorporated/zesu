@@ -495,3 +495,66 @@ test "an empty account touched by a zero-amount withdrawal is deleted" {
     const wd = [_]input.Withdrawal{.{ .index = 0, .validator_index = 0, .address = EmptyAccountDb.EMPTY, .amount = 0 }};
     try std.testing.expect(try deletesEmptyAccount(&wd));
 }
+
+// A witness in which every account is funded and sits at `nonce`.
+const NonceWitnessDb = struct {
+    nonce: u64,
+
+    pub fn basic(self: *@This(), _: input.Address) !?state_mod.AccountInfo {
+        var info = state_mod.AccountInfo.default();
+        info.balance = 1_000_000_000_000;
+        info.nonce = self.nonce;
+        return info;
+    }
+
+    pub fn codeByHash(_: *@This(), _: primitives.Hash) !bytecode_mod.Bytecode {
+        return bytecode_mod.Bytecode.newLegacy(&.{});
+    }
+
+    pub fn storage(_: *@This(), _: primitives.Address, _: primitives.StorageKey) !primitives.StorageValue {
+        return 0;
+    }
+
+    pub fn blockHash(_: *@This(), _: u64) !primitives.Hash {
+        return @splat(0);
+    }
+};
+
+fn runTransferAtNonce(sender_nonce: u64, tx_nonce: u64) !TransitionResult {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var txs = [_]input.TxInput{.{
+        .from = TEST_SENDER,
+        .to = TEST_RECIPIENT,
+        .nonce = tx_nonce,
+        .gas = 100_000,
+        .gas_price = 1,
+    }};
+    var ctx = context_mod.Context(NonceWitnessDb).new(.{ .nonce = sender_nonce }, primitives.SpecId.shanghai);
+    ctx.block = transition_mod.buildBlockEnv(testEnv(), primitives.SpecId.shanghai);
+    const pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) = .{};
+    return transitionWithContext(arena_state.allocator(), &ctx, pre_alloc, testEnv(), &txs, primitives.SpecId.shanghai, 1, SystemContracts.forChainId(1), 0);
+}
+
+// EIP-2681, reference validate_transaction (transactions.py): `tx.nonce >= 2**64 - 1`
+// raises NonceOverflowError for every transaction, not only a CREATE, and
+// check_transaction (fork.py) runs it before check_nonce compares with the sender.
+test "a call transaction with nonce 2^64-1 is rejected as a nonce overflow" {
+    const max_nonce = std.math.maxInt(u64);
+    try std.testing.expectError(error.NonceIsMax, runTransferAtNonce(5, max_nonce));
+}
+
+// Control: 2^64-2 is the last usable nonce, so only the sender comparison rejects it.
+test "a call transaction with nonce 2^64-2 is compared with the sender nonce" {
+    const max_nonce = std.math.maxInt(u64);
+    try std.testing.expectError(error.NonceMismatchTooHigh, runTransferAtNonce(5, max_nonce - 1));
+    _ = try runTransferAtNonce(max_nonce - 1, max_nonce - 1);
+}
+
+// The shape of the spec test tests/frontier/validation/test_transaction.py::test_tx_max_nonce:
+// the sender sits at 2^64-1 too, so the nonce comparison passes.
+test "a call transaction with nonce 2^64-1 is rejected when the sender is at 2^64-1" {
+    const max_nonce = std.math.maxInt(u64);
+    try std.testing.expectError(error.NonceIsMax, runTransferAtNonce(max_nonce, max_nonce));
+}
