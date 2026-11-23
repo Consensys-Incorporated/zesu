@@ -19,8 +19,6 @@ const Chunk = struct {
     next: ?*Chunk,
     /// Total bytes of the child allocation, header included — needed to free it.
     cap: usize,
-    /// Bytes consumed so far, header included.
-    used: usize,
 };
 
 /// Chunks are allocated with this alignment and must be freed with it.
@@ -32,6 +30,10 @@ child: std.mem.Allocator,
 chunks: ?*Chunk = null,
 /// Size of the most recently allocated chunk, for geometric growth.
 last_chunk_size: usize = 0,
+/// Bump window of the newest chunk: address of its next free byte, and one past its
+/// last byte. Both zero while there is no chunk.
+cur: usize = 0,
+end: usize = 0,
 
 pub fn init(child: std.mem.Allocator) ScratchArena {
     return .{ .child = child };
@@ -48,6 +50,8 @@ pub fn deinit(self: *ScratchArena) void {
     }
     self.chunks = null;
     self.last_chunk_size = 0;
+    self.cur = 0;
+    self.end = 0;
 }
 
 pub fn allocator(self: *ScratchArena) std.mem.Allocator {
@@ -61,36 +65,42 @@ const vtable: std.mem.Allocator.VTable = .{
     .free = free,
 };
 
-/// Bump `chunk` if the aligned request fits, else null.
-fn bump(chunk: *Chunk, len: usize, alignment: std.mem.Alignment) ?[*]u8 {
-    const base = @intFromPtr(chunk);
-    const start = alignment.forward(base + chunk.used);
-    const end = start + len;
-    if (end > base + chunk.cap) return null;
-    chunk.used = end - base;
+/// Bump the newest chunk if the request, aligned to `1 << align_log2`, fits; else null.
+/// With no chunk the window is empty at address 0: a request with bytes does not fit,
+/// and an empty one gets address 0, which is null.
+inline fn bump(self: *ScratchArena, len: usize, align_log2: usize) ?[*]u8 {
+    const mask = (@as(usize, 1) << @intCast(align_log2)) - 1;
+    const start = (self.cur + mask) & ~mask;
+    const new_cur = start + len;
+    if (new_cur > self.end) return null;
+    self.cur = new_cur;
     return @ptrFromInt(start);
 }
 
 fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
     const self: *ScratchArena = @ptrCast(@alignCast(ctx));
+    const align_log2: usize = @intFromEnum(alignment);
+    if (self.bump(len, align_log2)) |p| return p;
+    // Out of line, so the bump path above needs no stack frame.
+    return @call(.never_inline, allocInNewChunk, .{ self, len, align_log2, ret_addr });
+}
 
-    if (self.chunks) |chunk| {
-        if (bump(chunk, len, alignment)) |p| return p;
-    }
-
+fn allocInNewChunk(self: *ScratchArena, len: usize, align_log2: usize, ret_addr: usize) ?[*]u8 {
     // Size the new chunk so the request always fits: header, plus the worst-case
     // alignment padding, plus the request itself.
-    const need = @sizeOf(Chunk) + alignment.toByteUnits() - 1 + len;
+    const need = @sizeOf(Chunk) + (@as(usize, 1) << @intCast(align_log2)) - 1 + len;
     var size = if (self.last_chunk_size == 0) first_chunk else self.last_chunk_size *| 2;
     if (size < need) size = need;
 
     const raw = self.child.rawAlloc(size, chunk_align, ret_addr) orelse return null;
     const chunk: *Chunk = @ptrCast(@alignCast(raw));
-    chunk.* = .{ .next = self.chunks, .cap = size, .used = @sizeOf(Chunk) };
+    chunk.* = .{ .next = self.chunks, .cap = size };
     self.chunks = chunk;
     self.last_chunk_size = size;
+    self.cur = @intFromPtr(raw) + @sizeOf(Chunk);
+    self.end = @intFromPtr(raw) + size;
 
-    return bump(chunk, len, alignment);
+    return self.bump(len, align_log2);
 }
 
 /// Only the most recent allocation can grow or shrink in place.
@@ -98,18 +108,11 @@ fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usi
     _ = alignment;
     _ = ret_addr;
     const self: *ScratchArena = @ptrCast(@alignCast(ctx));
-    const chunk = self.chunks orelse return false;
-
-    const base = @intFromPtr(chunk);
     const buf_start = @intFromPtr(buf.ptr);
-    if (buf_start + buf.len != base + chunk.used) return new_len <= buf.len;
+    if (buf_start + buf.len != self.cur) return new_len <= buf.len;
 
-    if (new_len <= buf.len) {
-        chunk.used = buf_start + new_len - base;
-        return true;
-    }
-    if (buf_start + new_len > base + chunk.cap) return false;
-    chunk.used = buf_start + new_len - base;
+    if (new_len > buf.len and buf_start + new_len > self.end) return false;
+    self.cur = buf_start + new_len;
     return true;
 }
 
@@ -121,11 +124,9 @@ fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ret_addr: usiz
     _ = alignment;
     _ = ret_addr;
     const self: *ScratchArena = @ptrCast(@alignCast(ctx));
-    const chunk = self.chunks orelse return;
-    const base = @intFromPtr(chunk);
     const buf_start = @intFromPtr(buf.ptr);
     // Reclaim only a trailing free, matching ArenaAllocator's behaviour.
-    if (buf_start + buf.len == base + chunk.used) chunk.used = buf_start - base;
+    if (buf_start + buf.len == self.cur) self.cur = buf_start;
 }
 
 test "bump, grow across chunks, and reclaim on deinit" {
