@@ -589,14 +589,6 @@ pub const Bytecode = union(enum) {
         return self.len() == 0;
     }
 
-    /// Returns true if the given position is a valid JUMPDEST.
-    pub fn isValidJump(self: Self, dest: usize) bool {
-        return switch (self) {
-            .legacy_analyzed => |analyzed| analyzed.jump_table.isValid(dest),
-            .eip7702 => false,
-        };
-    }
-
     /// Creates a new legacy Bytecode from raw bytes (alias for newLegacy).
     pub fn newRaw(raw: []const u8) Self {
         return Self.newLegacy(raw);
@@ -705,6 +697,7 @@ pub const Eip7702Bytecode = struct {
 };
 
 /// Valid JUMP destinations: one bit per code byte, LSB-first within each byte.
+/// Invariant: `bit_len <= 8 * data.len`, so a position below `bit_len` is in `data`.
 pub const JumpTable = struct {
     data: []const u8,
     /// Code length (number of meaningful bits).
@@ -717,15 +710,13 @@ pub const JumpTable = struct {
     }
 
     pub fn fromBytes(data: []const u8, bit_len: usize) Self {
+        std.debug.assert(bit_len <= data.len * 8);
         return Self{ .data = data, .bit_len = bit_len };
     }
 
     pub fn isValid(self: Self, pc: usize) bool {
         if (pc >= self.bit_len) return false;
-        const byte_idx = pc >> 3;
-        const bit_idx = pc & 7;
-        if (byte_idx >= self.data.len) return false;
-        return (self.data[byte_idx] & (@as(u8, 1) << @intCast(bit_idx))) != 0;
+        return (self.data.ptr[pc >> 3] & (@as(u8, 1) << @intCast(pc & 7))) != 0;
     }
 
     pub fn len(self: Self) usize {

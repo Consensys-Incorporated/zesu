@@ -193,14 +193,18 @@ pub const ExtBytecode = struct {
     /// CALL frames share bytecode with account state (DB) and must NOT free it.
     /// CREATE init-code frames and test frames own their bytecode.
     owns_bytecode: bool,
+    /// `inner`'s JUMPDEST bitmap, resolved once so a jump reads it without the union
+    /// tag. Empty for a delegation designator: no jump into it is valid.
+    jumps: bytecode.JumpTable,
 
     /// Borrow semantics: bytecode is shared with account state, will NOT be freed on deinit.
-    pub fn new(bytecode_data: bytecode.Bytecode) ExtBytecode {
+    pub inline fn new(bytecode_data: bytecode.Bytecode) ExtBytecode {
         return ExtBytecode{
             .inner = bytecode_data,
             .pc = 0,
             .continue_execution = true,
             .owns_bytecode = false,
+            .jumps = jumpsOf(bytecode_data),
         };
     }
 
@@ -212,15 +216,18 @@ pub const ExtBytecode = struct {
             .pc = 0,
             .continue_execution = true,
             .owns_bytecode = true,
+            .jumps = jumpsOf(bytecode_data),
         };
     }
 
     pub fn default() ExtBytecode {
-        return ExtBytecode{
-            .inner = bytecode.Bytecode.new(),
-            .pc = 0,
-            .continue_execution = true,
-            .owns_bytecode = false,
+        return new(bytecode.Bytecode.new());
+    }
+
+    inline fn jumpsOf(code: bytecode.Bytecode) bytecode.JumpTable {
+        return switch (code) {
+            .legacy_analyzed => |a| a.jump_table,
+            .eip7702 => .init(),
         };
     }
 
@@ -249,7 +256,7 @@ pub const ExtBytecode = struct {
 
     /// Check if jump destination is a valid JUMPDEST
     pub fn isValidJump(self: *const ExtBytecode, dest: usize) bool {
-        return self.inner.isValidJump(dest);
+        return self.jumps.isValid(dest);
     }
 
     /// Read a single immediate byte at current PC (returns 0 if past end of code)
@@ -265,10 +272,6 @@ pub const ExtBytecode = struct {
 
     pub fn getBytecode(self: ExtBytecode) bytecode.Bytecode {
         return self.inner;
-    }
-
-    pub fn setBytecode(self: *ExtBytecode, bytecode_data: bytecode.Bytecode) void {
-        self.inner = bytecode_data;
     }
 
     pub fn bytes(self: *const ExtBytecode) []const u8 {
