@@ -589,14 +589,6 @@ pub const Bytecode = union(enum) {
         return self.len() == 0;
     }
 
-    /// Returns true if the given position is a valid JUMPDEST.
-    pub fn isValidJump(self: Self, dest: usize) bool {
-        return switch (self) {
-            .legacy_analyzed => |analyzed| analyzed.jump_table.isValid(dest),
-            .eip7702 => false,
-        };
-    }
-
     /// Creates a new legacy Bytecode from raw bytes (alias for newLegacy).
     pub fn newRaw(raw: []const u8) Self {
         return Self.newLegacy(raw);
