@@ -46,6 +46,51 @@ pub const DecodedNode = union(enum) {
 ///   17 items → branch
 ///   other   → error.InvalidNode
 pub fn decodeNode(bytes: []const u8) error{ InvalidRlp, InvalidNode }!DecodedNode {
+    // A leaf, or an extension to a hashed child, in the encodings nearly all of them have:
+    // read from the prefix bytes. Whatever does not fit goes to decodeNodeGeneric, which
+    // defines the result for every input.
+    fast: {
+        const payload = shortListPayload(bytes) orelse break :fast;
+        const key = shortString(payload) orelse break :fast;
+        const second = shortString(payload[key.consumed..]) orelse break :fast;
+        if (key.consumed + second.consumed != payload.len or key.bytes.len == 0) break :fast;
+        // Bit 5 of the first byte signals leaf (1) vs extension (0).
+        if (key.bytes[0] & 0x20 != 0) return .{ .leaf = .{ .key_end = key.bytes, .value = second.bytes } };
+        if (second.bytes.len != 32 or (key.bytes.len == 1 and key.bytes[0] & 0x10 == 0)) break :fast;
+        return .{ .extension = .{ .prefix = key.bytes, .child = .{ .hash = second.bytes[0..32] } } };
+    }
+    return @call(.never_inline, decodeNodeGeneric, .{bytes});
+}
+
+/// The payload of a list that is all of `bytes`, if its length is in the prefix byte or in
+/// the one byte after it.
+inline fn shortListPayload(bytes: []const u8) ?[]const u8 {
+    if (bytes.len < 2) return null;
+    const hdr: usize = switch (bytes[0]) {
+        0xc0...0xf7 => |b| if (@as(usize, b) - 0xbf == bytes.len) 1 else return null,
+        0xf8 => if (@as(usize, bytes[1]) + 2 == bytes.len) 2 else return null,
+        else => return null,
+    };
+    return bytes[hdr..];
+}
+
+const ShortString = struct { bytes: []const u8, consumed: usize };
+
+/// The string at the start of `input`, if it is a single byte or has its length in the
+/// prefix byte or in the one byte after it.
+inline fn shortString(input: []const u8) ?ShortString {
+    if (input.len == 0) return null;
+    const first = input[0];
+    if (first < 0x80) return .{ .bytes = input[0..1], .consumed = 1 };
+    if (first > 0xb8) return null;
+    const start: usize = if (first == 0xb8) 2 else 1;
+    if (input.len < start) return null;
+    const len: usize = if (first == 0xb8) input[1] else first - 0x80;
+    if (len > input.len - start) return null;
+    return .{ .bytes = input[start .. start + len], .consumed = start + len };
+}
+
+fn decodeNodeGeneric(bytes: []const u8) error{ InvalidRlp, InvalidNode }!DecodedNode {
     const outer = try rlp.decodeItem(bytes);
     // A node is one RLP item: trailing bytes would change its hash, not its meaning.
     if (outer.consumed != bytes.len) return error.InvalidNode;
