@@ -371,16 +371,15 @@ pub fn verifyProofIndexed(
 
         // A well-formed branch: every child empty, a hash or embedded, and no value,
         // since no secured key ends at a branch. Read only the child the key selects.
-        if (BranchSlots.of(node_rlp)) |slots| {
+        const key_nib: u8 = if (pos < 64) nibbleAt(&key_hash, pos) else 0;
+        if (BranchSlots.childAt(node_rlp, key_nib)) |at| {
             if (pos >= 64) return error.InvalidProof;
-            const nib = nibbleAt(&key_hash, pos);
-            const slot = node_rlp[slots.at[nib]..slots.at[nib + 1]];
             pos += 1;
             branch_only = false;
-            switch (slot[0]) {
+            switch (node_rlp[at]) {
                 0x80 => return null,
-                0xa0 => expected = .{ .hash = slot[1..33] },
-                else => expected = .{ .inline_node = slot },
+                0xa0 => expected = .{ .hash = node_rlp[at + 1 ..][0..32] },
+                else => |b| expected = .{ .inline_node = node_rlp[at..][0 .. 1 + @as(usize, b - 0xc0)] },
             }
             continue;
         }
@@ -877,24 +876,36 @@ const BranchSlots = struct {
         break :blk s;
     };
 
+    /// Sixteen hash children and no value: a fixed 532-byte layout, so only the 17 item
+    /// prefixes need checking. One load covers the list header 0xf9 0x02 0x11 and the first
+    /// child's 0xa0.
+    inline fn isFull(node_rlp: []const u8) bool {
+        if (node_rlp.len != full_len or std.mem.readInt(u32, node_rlp[0..4], .little) != 0xa01102f9 or
+            node_rlp[full_len - 1] != 0x80) return false;
+        inline for (1..16) |i| {
+            if (node_rlp[3 + 33 * i] != 0xa0) return false;
+        }
+        return true;
+    }
+
     /// Null for anything else, including a leaf, an extension or malformed bytes, which
     /// the caller decodes as before.
     pub inline fn of(node_rlp: []const u8) ?BranchSlots {
-        // Sixteen hash children and no value: a fixed 532-byte layout, so the slots are a
-        // constant and only the 17 item prefixes need checking. One load covers the list
-        // header 0xf9 0x02 0x11 and the first child's 0xa0.
-        if (node_rlp.len == full_len and std.mem.readInt(u32, node_rlp[0..4], .little) == 0xa01102f9 and
-            node_rlp[full_len - 1] == 0x80)
-        {
-            const all_hashes = inline for (1..16) |i| {
-                if (node_rlp[3 + 33 * i] != 0xa0) break false;
-            } else true;
-            if (all_hashes) return full;
-        }
+        if (isFull(node_rlp)) return full;
         return ofScan(node_rlp);
     }
 
-    pub fn ofScan(node_rlp: []const u8) ?BranchSlots {
+    /// Where child `nib`'s item starts, for exactly the nodes `of` accepts. For a lookup,
+    /// which reads one child and needs no other slot.
+    pub inline fn childAt(node_rlp: []const u8, nib: u8) ?usize {
+        if (isFull(node_rlp)) return 3 + 33 * @as(usize, nib);
+        return childAtScan(node_rlp, nib);
+    }
+
+    const Payload = struct { pos: usize, end: usize };
+
+    /// The payload of a canonical list header that spans the whole node.
+    inline fn payloadOf(node_rlp: []const u8) ?Payload {
         if (node_rlp.len < 3) return null;
         var pos: usize = undefined;
         var payload: usize = undefined;
@@ -917,29 +928,59 @@ const BranchSlots = struct {
         }
         const end = pos + payload;
         if (end != node_rlp.len) return null;
-        var slots: BranchSlots = undefined;
-        // A branch needs two children: its value slot is always empty here.
-        var occupied: usize = 0;
-        for (0..17) |i| {
+        return .{ .pos = pos, .end = end };
+    }
+
+    /// Steps over `n` children from `start`, each empty, a hash or embedded, and returns
+    /// where the next item starts. Writes each child's start to `at` when given. A hash
+    /// may run past `end`: the caller's check of the value slot then fails.
+    inline fn skipChildren(node_rlp: []const u8, start: usize, end: usize, n: usize, occupied: *usize, at: ?[*]u32) ?usize {
+        var pos = start;
+        for (0..n) |i| {
             if (pos >= end) return null;
-            slots.at[i] = @intCast(pos);
+            if (at) |a| a[i] = @intCast(pos);
             const b = node_rlp[pos];
-            const n: usize = switch (b) {
-                0x80 => 1,
-                0xa0 => 33,
-                // An embedded child is shorter than a hash.
-                0xc0...0xde => 1 + @as(usize, b - 0xc0),
-                else => return null,
-            };
-            if (i == 16 and b != 0x80) return null;
-            if (n > end - pos) return null;
-            if (b >= 0xc0 and !rlp.isWellFormed(node_rlp[pos..][0..n])) return null;
-            occupied += @intFromBool(b != 0x80);
-            pos += n;
+            if (b == 0x80) {
+                pos += 1;
+                continue;
+            }
+            occupied.* += 1;
+            if (b == 0xa0) {
+                pos += 33;
+                continue;
+            }
+            // An embedded child is shorter than a hash.
+            if (b < 0xc0 or b > 0xde) return null;
+            const len = 1 + @as(usize, b - 0xc0);
+            if (len > end - pos or !rlp.isWellFormed(node_rlp[pos..][0..len])) return null;
+            pos += len;
         }
-        if (pos != end or occupied < 2) return null;
-        slots.at[17] = @intCast(end);
+        return pos;
+    }
+
+    /// A branch needs two children, and its value, the last item, is always empty here.
+    inline fn endsWell(node_rlp: []const u8, pos: usize, end: usize, occupied: usize) bool {
+        return pos + 1 == end and node_rlp[pos] == 0x80 and occupied >= 2;
+    }
+
+    pub fn ofScan(node_rlp: []const u8) ?BranchSlots {
+        const p = payloadOf(node_rlp) orelse return null;
+        var slots: BranchSlots = undefined;
+        var occupied: usize = 0;
+        const value_at = skipChildren(node_rlp, p.pos, p.end, 16, &occupied, &slots.at) orelse return null;
+        if (!endsWell(node_rlp, value_at, p.end, occupied)) return null;
+        slots.at[16] = @intCast(value_at);
+        slots.at[17] = @intCast(p.end);
         return slots;
+    }
+
+    fn childAtScan(node_rlp: []const u8, nib: u8) ?usize {
+        const p = payloadOf(node_rlp) orelse return null;
+        var occupied: usize = 0;
+        const child_at = skipChildren(node_rlp, p.pos, p.end, nib, &occupied, null) orelse return null;
+        const value_at = skipChildren(node_rlp, child_at, p.end, 16 - @as(usize, nib), &occupied, null) orelse return null;
+        if (!endsWell(node_rlp, value_at, p.end, occupied)) return null;
+        return child_at;
     }
 
     /// The node child `nib` refers to: its witness or created node, its inline bytes, or
