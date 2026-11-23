@@ -779,6 +779,7 @@ pub fn build(b: *std.Build) void {
             .{ .m = mods.rlp_decode, .name = "rlp_decode" },
             .{ .m = mods.executor, .name = "executor" },
             .{ .m = mods.hardfork, .name = "hardfork" },
+            .{ .m = mods.ssz_output, .name = "ssz_output" },
         }) |t| {
             const tst = b.addTest(.{ .root_module = t.m });
             _ = t.name;

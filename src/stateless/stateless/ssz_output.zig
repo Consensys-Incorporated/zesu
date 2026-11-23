@@ -108,7 +108,7 @@ fn mixInLength(root: [32]u8, length: u64) [32]u8 {
 /// Merkle root of `2^depth` leaves: `nodes` followed by zero chunks.
 /// Reduces `nodes` in place one level at a time, hashing each sibling pair where it
 /// lies, so the contents of `nodes` are clobbered.
-fn sparseRoot(nodes: [][32]u8, depth: u8) [32]u8 {
+pub fn sparseRoot(nodes: [][32]u8, depth: u8) [32]u8 {
     if (nodes.len == 0) return zeroHash(depth);
     var len = nodes.len;
     for (0..depth) |level| {
@@ -152,7 +152,7 @@ fn merkleizeExact(chunks: []const [32]u8) [32]u8 {
 /// instead of a fixed capacity.
 /// Clobbers `nodes`: each subtree is reduced in place (see `sparseRoot`) and its root
 /// kept in the leading slots until the spine is folded from the far end.
-fn progressiveRoot(nodes: [][32]u8) [32]u8 {
+pub fn progressiveRoot(nodes: [][32]u8) [32]u8 {
     var subtrees: usize = 0;
     var start: usize = 0;
     var depth: u8 = 0;
@@ -487,4 +487,8 @@ pub fn serialize(
     std.mem.writeInt(u64, out[33..41], chain_config.chain_id, .little);
     std.mem.writeInt(u16, out[41..43], chain_config.schema_id, .little);
     return out;
+}
+
+test {
+    _ = @import("ssz_output_tests.zig");
 }
