@@ -103,3 +103,103 @@ test "code a CREATE deployed earlier in the tx is readable by hash until that CR
     j.checkpointRevert(checkpoint);
     try std.testing.expectError(error.InvalidWitness, j.loadAccountWithCode(NoCodeDb.Z));
 }
+
+// Storage reads come back as (first address byte << 8 | key), so a slot served from the wrong
+// account is visible.
+const SlotDb = struct {
+    pub fn basic(_: *@This(), _: primitives.Address) !?state.AccountInfo {
+        var info = state.AccountInfo.default();
+        info.nonce = 1;
+        return info;
+    }
+
+    pub fn codeByHash(_: *@This(), _: primitives.Hash) !bytecode.Bytecode {
+        return error.InvalidWitness;
+    }
+
+    pub fn storage(_: *@This(), address: primitives.Address, key: primitives.StorageKey) !primitives.StorageValue {
+        return (@as(primitives.StorageValue, address[0]) << 8) | key;
+    }
+};
+
+fn numberedAddress(n: u16) primitives.Address {
+    var address: primitives.Address = @splat(0);
+    std.mem.writeInt(u16, address[18..20], n, .big);
+    return address;
+}
+
+test "storage accesses alternate between accounts and survive the state map growing" {
+    var j = Journal(SlotDb).new(.{});
+    defer j.deinit();
+
+    const a: primitives.Address = @splat(0xA1);
+    const b: primitives.Address = @splat(0xB2);
+    _ = try j.loadAccount(a);
+    _ = try j.loadAccount(b);
+
+    try std.testing.expectEqual(@as(?primitives.StorageValue, null), j.sloadProbe(a, 1).value);
+    try std.testing.expectEqual(@as(primitives.StorageValue, 0xA101), (try j.sload(a, 1)).data);
+    const first = try j.sstore(a, 1, 11);
+    try std.testing.expectEqual(@as(primitives.StorageValue, 0xA101), first.data.original_value);
+    try std.testing.expectEqual(@as(primitives.StorageValue, 0xB201), (try j.sload(b, 1)).data);
+    try std.testing.expectEqual(@as(?primitives.StorageValue, 11), j.sloadProbe(a, 1).value);
+    try std.testing.expectEqual(@as(?primitives.StorageValue, 0xB201), j.sloadProbe(b, 1).value);
+    try std.testing.expect(!j.isStorageCold(b, 1));
+    try std.testing.expect(j.isStorageCold(b, 2));
+
+    // Each load inserts an account; several of them reallocate the map under `a`.
+    const capacity_before = j.inner.evm_state.capacity();
+    var n: u16 = 0;
+    while (n < 300) : (n += 1) {
+        _ = try j.loadAccount(numberedAddress(n));
+        try std.testing.expectEqual(@as(?primitives.StorageValue, 11), j.sloadProbe(a, 1).value);
+    }
+    try std.testing.expect(j.inner.evm_state.capacity() > capacity_before);
+
+    const second = try j.sstore(a, 2, 22);
+    try std.testing.expectEqual(@as(primitives.StorageValue, 0xA102), second.data.present_value);
+    try std.testing.expectEqual(@as(primitives.StorageValue, 22), j.inner.evm_state.get(a).?.storage.get(2).?.present_value);
+    try std.testing.expectEqual(@as(primitives.StorageValue, 0xB201), j.inner.evm_state.get(b).?.storage.get(1).?.present_value);
+    try std.testing.expect(j.inner.evm_state.get(b).?.storage.get(2) == null);
+}
+
+test "a removed account's storage is not served after it is loaded again" {
+    var j = Journal(SlotDb).new(.{});
+    defer j.deinit();
+
+    const a: primitives.Address = @splat(0xA1);
+    _ = try j.loadAccount(a);
+    _ = try j.sstore(a, 1, 11);
+    try std.testing.expectEqual(@as(?primitives.StorageValue, 11), j.sloadProbe(a, 1).value);
+
+    j.inner.removeAccount(a);
+    try std.testing.expect(!j.inner.evm_state.contains(a));
+    try std.testing.expectEqual(@as(?primitives.StorageValue, null), j.sloadProbe(a, 1).value);
+    try std.testing.expect(j.isStorageCold(a, 1));
+
+    _ = try j.loadAccount(a);
+    try std.testing.expectEqual(@as(?primitives.StorageValue, null), j.sloadProbe(a, 1).value);
+    try std.testing.expectEqual(@as(primitives.StorageValue, 0xA101), (try j.sload(a, 1)).data);
+}
+
+test "finalize hands the state over and later storage accesses use the new map" {
+    var j = Journal(SlotDb).new(.{});
+    defer j.deinit();
+
+    const a: primitives.Address = @splat(0xA1);
+    _ = try j.loadAccount(a);
+    _ = try j.sstore(a, 1, 11);
+
+    var taken = j.finalize();
+    defer {
+        var it = taken.valueIterator();
+        while (it.next()) |account| account.storage.deinit();
+        taken.deinit();
+    }
+    try std.testing.expectEqual(@as(?primitives.StorageValue, null), j.sloadProbe(a, 1).value);
+
+    try j.inner.reserveAccounts(64);
+    _ = try j.loadAccount(a);
+    try std.testing.expectEqual(@as(primitives.StorageValue, 0xA101), (try j.sload(a, 1)).data);
+    try std.testing.expectEqual(@as(primitives.StorageValue, 11), taken.get(a).?.storage.get(1).?.present_value);
+}
