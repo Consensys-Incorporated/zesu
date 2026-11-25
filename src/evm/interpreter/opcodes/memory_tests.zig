@@ -20,7 +20,7 @@ const U = primitives.U256;
 test "MLOAD: load from offset 0" {
     var interp = Interpreter.defaultExt();
     defer interp.memory.deinit();
-    try interp.memory.buffer.resize(std.heap.c_allocator, 64);
+    try interp.memory.resize(64);
     @memset(interp.memory.buffer.items[0..32], 0x42);
     interp.stack.pushUnsafe(@as(U, 0));
     var ctx = InstructionContext{ .interpreter = &interp };
@@ -169,7 +169,7 @@ test "MSIZE: empty memory = 0" {
 test "MSIZE: after expansion" {
     var interp = Interpreter.defaultExt();
     defer interp.memory.deinit();
-    try interp.memory.buffer.resize(std.heap.c_allocator, 128);
+    try interp.memory.resize(128);
     var ctx = InstructionContext{ .interpreter = &interp };
     opMsize(&ctx);
     try expectEqual(@as(U, 128), interp.stack.popUnsafe());
@@ -190,7 +190,7 @@ test "MSIZE: stack overflow" {
 test "MCOPY: basic copy" {
     var interp = Interpreter.defaultExt();
     defer interp.memory.deinit();
-    try interp.memory.buffer.resize(std.heap.c_allocator, 64);
+    try interp.memory.resize(64);
     @memset(interp.memory.buffer.items[0..32], 0xAB);
     @memset(interp.memory.buffer.items[32..64], 0x00);
     // Copy 32 bytes from offset 0 to offset 32
@@ -207,7 +207,7 @@ test "MCOPY: basic copy" {
 test "MCOPY: overlapping regions (forward)" {
     var interp = Interpreter.defaultExt();
     defer interp.memory.deinit();
-    try interp.memory.buffer.resize(std.heap.c_allocator, 64);
+    try interp.memory.resize(64);
     for (interp.memory.buffer.items, 0..) |*b, i| b.* = @as(u8, @intCast(i & 0xFF));
     // Copy 10 bytes from offset 5 to offset 0 (overlapping)
     interp.stack.pushUnsafe(@as(U, 10)); // length

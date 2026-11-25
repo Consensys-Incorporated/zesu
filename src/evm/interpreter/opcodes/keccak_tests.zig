@@ -28,7 +28,7 @@ test "KECCAK256: empty input" {
 test "KECCAK256: single byte" {
     var interp = Interpreter.defaultExt();
     // Pre-fill memory with 0x00 at offset 0
-    try interp.memory.buffer.resize(std.heap.c_allocator, 32);
+    try interp.memory.resize(32);
     interp.memory.buffer.items[0] = 0x00;
     interp.stack.pushUnsafe(@as(U, 1)); // length 1
     interp.stack.pushUnsafe(@as(U, 0)); // offset 0
@@ -42,7 +42,7 @@ test "KECCAK256: single byte" {
 
 test "KECCAK256: hello" {
     var interp = Interpreter.defaultExt();
-    try interp.memory.buffer.resize(std.heap.c_allocator, 32);
+    try interp.memory.resize(32);
     const hello = "hello";
     @memcpy(interp.memory.buffer.items[0..hello.len], hello);
     interp.stack.pushUnsafe(@as(U, 5)); // length 5
@@ -59,7 +59,7 @@ test "KECCAK256: dynamic word gas (64 bytes = 2 words = 12 gas)" {
     // Static G_KECCAK256 = 30 is charged by dispatch, not here
     var interp = Interpreter.defaultExt();
     interp.gas = Gas.new(1000);
-    try interp.memory.buffer.resize(std.heap.c_allocator, 64);
+    try interp.memory.resize(64);
     var i: usize = 0;
     while (i < 64) : (i += 1) interp.memory.buffer.items[i] = @as(u8, @intCast(i));
     interp.stack.pushUnsafe(@as(U, 64)); // length 64
@@ -73,7 +73,7 @@ test "KECCAK256: dynamic word gas (64 bytes = 2 words = 12 gas)" {
 test "KECCAK256: dynamic word gas (100 bytes = ceil(100/32)=4 words = 24 gas)" {
     var interp = Interpreter.defaultExt();
     interp.gas = Gas.new(1000);
-    try interp.memory.buffer.resize(std.heap.c_allocator, 100);
+    try interp.memory.resize(100);
     interp.stack.pushUnsafe(@as(U, 100));
     interp.stack.pushUnsafe(@as(U, 0));
     var ctx = InstructionContext{ .interpreter = &interp };
@@ -99,7 +99,7 @@ test "KECCAK256: out of gas on word cost" {
     // Give less than 1 word cost (6 gas) for a 32-byte hash
     var interp = Interpreter.defaultExt();
     interp.gas = Gas.new(3); // less than G_KECCAK256WORD = 6
-    try interp.memory.buffer.resize(std.heap.c_allocator, 32);
+    try interp.memory.resize(32);
     interp.stack.pushUnsafe(@as(U, 32)); // 1 word
     interp.stack.pushUnsafe(@as(U, 0));
     var ctx = InstructionContext{ .interpreter = &interp };
@@ -119,7 +119,7 @@ test "KECCAK256: stack underflow" {
 test "KECCAK256: deterministic" {
     // Two separate interpreters hashing the same data should produce the same result
     var interp1 = Interpreter.defaultExt();
-    try interp1.memory.buffer.resize(std.heap.c_allocator, 10);
+    try interp1.memory.resize(10);
     const data = "test";
     @memcpy(interp1.memory.buffer.items[0..data.len], data);
     interp1.stack.pushUnsafe(@as(U, 4));
@@ -129,7 +129,7 @@ test "KECCAK256: deterministic" {
     const hash1 = interp1.stack.popUnsafe();
 
     var interp2 = Interpreter.defaultExt();
-    try interp2.memory.buffer.resize(std.heap.c_allocator, 10);
+    try interp2.memory.resize(10);
     @memcpy(interp2.memory.buffer.items[0..data.len], data);
     interp2.stack.pushUnsafe(@as(U, 4));
     interp2.stack.pushUnsafe(@as(U, 0));

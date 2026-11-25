@@ -224,7 +224,7 @@ test "opCreate: STOP init code deploys empty contract, returns non-zero address"
     var interp = makeInterp(CALLER, 500_000);
     defer interp.deinit();
     // Write init code into interpreter memory at offset 0
-    interp.memory.buffer.resize(std.heap.c_allocator, INIT_CODE.len) catch unreachable;
+    interp.memory.resize(INIT_CODE.len) catch unreachable;
     @memcpy(interp.memory.buffer.items[0..INIT_CODE.len], &INIT_CODE);
 
     // Stack layout for CREATE (top to bottom): value, offset, size
@@ -255,7 +255,7 @@ test "opCreate2: same inputs produce same address on stack" {
 
             var interp = makeInterp(CALLER, 500_000);
             defer interp.deinit();
-            interp.memory.buffer.resize(std.heap.c_allocator, INIT_CODE.len) catch unreachable;
+            interp.memory.resize(INIT_CODE.len) catch unreachable;
             @memcpy(interp.memory.buffer.items[0..INIT_CODE.len], &INIT_CODE);
 
             // Stack: salt (top), value, offset, size
@@ -293,7 +293,7 @@ test "opCreate: collision at derived address returns 0" {
     {
         var interp = makeInterp(CALLER, 500_000);
         defer interp.deinit();
-        interp.memory.buffer.resize(std.heap.c_allocator, INIT_CODE.len) catch unreachable;
+        interp.memory.resize(INIT_CODE.len) catch unreachable;
         @memcpy(interp.memory.buffer.items[0..INIT_CODE.len], &INIT_CODE);
         interp.stack.pushUnsafe(0);
         interp.stack.pushUnsafe(0);
@@ -317,7 +317,7 @@ test "opCreate: collision at derived address returns 0" {
     {
         var interp = makeInterp(CALLER, 500_000);
         defer interp.deinit();
-        interp.memory.buffer.resize(std.heap.c_allocator, INIT_CODE.len) catch unreachable;
+        interp.memory.resize(INIT_CODE.len) catch unreachable;
         @memcpy(interp.memory.buffer.items[0..INIT_CODE.len], &INIT_CODE);
         interp.stack.pushUnsafe(0);
         interp.stack.pushUnsafe(0);
@@ -354,7 +354,7 @@ fn amsterdamCreateAt(comptime is_create2: bool, salt: U) !U {
         gas_limit,
     );
     defer interp.deinit();
-    interp.memory.buffer.resize(std.heap.c_allocator, INIT_CODE.len) catch unreachable;
+    interp.memory.resize(INIT_CODE.len) catch unreachable;
     @memcpy(interp.memory.buffer.items[0..INIT_CODE.len], &INIT_CODE);
 
     if (is_create2) interp.stack.pushUnsafe(salt);

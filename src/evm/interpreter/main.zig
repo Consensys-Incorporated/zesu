@@ -53,6 +53,7 @@ test {
     _ = @import("opcodes/host_ops_tests.zig");
     _ = @import("opcodes/environment_tests.zig");
     _ = @import("host_tests.zig");
+    _ = @import("memory_tests.zig");
     // Each *_tests.zig is otherwise imported only by its sibling opcode file, which no
     // test root reaches, so suites not listed here are silently skipped.
     _ = @import("opcodes/bitwise_tests.zig");
