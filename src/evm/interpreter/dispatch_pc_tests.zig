@@ -198,3 +198,71 @@ test "inlined env arm: out of gas and stack overflow match the table path" {
         try expectDispatchMatchesTable(&flood, .amsterdam, 1_000_000);
     }
 }
+
+// ---------------------------------------------------------------------------
+// SAR runs inline in the dispatch loop from Constantinople on.
+// ---------------------------------------------------------------------------
+
+/// PUSH32 value, PUSH32 shift, SAR.
+fn sarProgram(shift: U, value: U) [67]u8 {
+    var code: [67]u8 = undefined;
+    code[0] = 0x7F;
+    std.mem.writeInt(U, code[1..33], value, .big);
+    code[33] = 0x7F;
+    std.mem.writeInt(U, code[34..66], shift, .big);
+    code[66] = 0x1D;
+    return code;
+}
+
+test "inlined SAR: EIP-145 test cases" {
+    const max = std.math.maxInt(U);
+    const min_neg: U = 1 << 255;
+    const max_pos: U = max >> 1;
+    // { value, shift, result }: the SAR table in EIP-145, then shifts that do not fit a word.
+    const cases = [_][3]U{
+        .{ 1, 0x00, 1 },
+        .{ 1, 0x01, 0 },
+        .{ min_neg, 0x01, 0xC0 << 248 },
+        .{ min_neg, 0xFF, max },
+        .{ min_neg, 0x0100, max },
+        .{ min_neg, 0x0101, max },
+        .{ max, 0x00, max },
+        .{ max, 0x01, max },
+        .{ max, 0xFF, max },
+        .{ max, 0x0100, max },
+        .{ 0, 0x01, 0 },
+        .{ 1 << 254, 0xFE, 1 },
+        .{ max_pos, 0xF8, 0x7F },
+        .{ max_pos, 0xFE, 1 },
+        .{ max_pos, 0xFF, 0 },
+        .{ max_pos, 0x0100, 0 },
+        .{ min_neg, 1 << 64, max },
+        .{ max_pos, 1 << 64, 0 },
+        .{ min_neg, (1 << 255) | 1, max },
+        .{ max_pos, max, 0 },
+    };
+    const table = protocol_schedule.makeInstructionTable(.amsterdam);
+    for (cases) |c| {
+        errdefer std.debug.print("value 0x{x} shift 0x{x}\n", .{ c[0], c[1] });
+        const code = sarProgram(c[1], c[0]);
+        var interp = newInterp(&code, .amsterdam);
+        defer interp.deinit();
+        try expectEqual(.stop, interp.run(&table));
+        try expectEqual(@as(usize, 1), interp.stack.len());
+        try expectEqual(c[2], interp.stack.peekUnsafe(0));
+        try expectEqual(@as(u64, 1_000_000 - 3 * gas_costs.G_VERYLOW), interp.gas.remaining);
+    }
+}
+
+test "inlined SAR: underflow, out of gas and the closed fork gate match the table path" {
+    // One operand only.
+    try expectDispatchMatchesTable(&.{ 0x60, 0x01, 0x1D }, .amsterdam, 1_000_000);
+    // Gas for the PUSHes only.
+    try expectDispatchMatchesTable(&.{ 0x60, 0x01, 0x60, 0x01, 0x1D }, .amsterdam, 2 * gas_costs.G_VERYLOW + 2);
+    // Invalid before EIP-145.
+    try expectDispatchMatchesTable(&.{ 0x60, 0x01, 0x60, 0x01, 0x1D }, .byzantium, 1_000_000);
+    for (std.enums.values(primitives.SpecId)) |spec| {
+        errdefer std.debug.print("fork {s}\n", .{primitives.specIdToString(spec)});
+        try expectDispatchMatchesTable(&sarProgram(9, (1 << 255) | 0x1234), spec, 1_000_000);
+    }
+}
