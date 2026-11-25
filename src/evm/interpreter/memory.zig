@@ -272,9 +272,9 @@ pub const Memory = struct {
     }
 
     /// Grow memory to at least `new_size` bytes (rounded up to a word, zero-filled),
-    /// charging the expansion cost against `gas`. Returns false if gas runs out, the
-    /// rounding overflows, or the resize fails; gas already spent is not returned, which
-    /// is moot since the caller halts with all gas consumed.
+    /// charging the expansion cost against `gas`. Returns false if gas runs out or the
+    /// rounding overflows; gas already spent is not returned, which is moot since the
+    /// caller halts with all gas consumed. Running out of host memory panics.
     pub inline fn expandWithGas(self: *Memory, gas: *Gas, new_size: usize) bool {
         if (new_size <= self.buffer.items.len) return true;
         return self.growWithGas(gas, new_size);
@@ -295,7 +295,7 @@ pub const Memory = struct {
     }
 
     noinline fn reallocZeroed(self: *Memory, new_len: usize) bool {
-        self.growZeroed(new_len) catch return false;
+        self.growZeroed(new_len) catch @panic("out of memory");
         return true;
     }
 
