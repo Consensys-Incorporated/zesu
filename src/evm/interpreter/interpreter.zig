@@ -56,8 +56,8 @@ pub const InputsImpl = struct {
 
     pub fn default() InputsImpl {
         return InputsImpl{
-            .caller = [_]u8{0} ** 20,
-            .target = [_]u8{0} ** 20,
+            .caller = @splat(0),
+            .target = @splat(0),
             .value = 0,
             .data = @as(primitives.Bytes, @constCast(&[_]u8{})),
             .gas_limit = 0,
@@ -798,7 +798,7 @@ fn runDispatch(
             }
             const offset = r.sb[r.sp - 1];
             const data = self.input.data;
-            var word: [32]u8 = [_]u8{0} ** 32;
+            var word: [32]u8 = @splat(0);
             if (offset < data.len) {
                 const off: usize = @intCast(offset);
                 const n = @min(data.len - off, 32);
@@ -950,7 +950,7 @@ fn runDispatch(
                 fail(self, &r, .stack_overflow);
                 return;
             }
-            var buf: [32]u8 = .{0} ** 32;
+            var buf: [32]u8 = @splat(0);
             // Immediates past the end read the zero padding.
             @memcpy(buf[32 - n ..], code[r.pc..][0..n]);
             const U = primitives.U256;

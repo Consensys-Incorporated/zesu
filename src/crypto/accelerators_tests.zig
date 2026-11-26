@@ -29,9 +29,9 @@ test "keccak256: empty input" {
 
 test "keccak256: 20- and 32-byte known answers" {
     var out: [32]u8 = undefined;
-    accel.keccak256(&([_]u8{0} ** 20), &out);
+    accel.keccak256(&(@as([20]u8, @splat(0))), &out);
     try std.testing.expectEqual(hash32("5380c7b7ae81a58eb98d9c78de4a1fd7fd9535fc953ed2be602daaa41767312a"), out);
-    accel.keccak256(&([_]u8{0} ** 32), &out);
+    accel.keccak256(&(@as([32]u8, @splat(0))), &out);
     try std.testing.expectEqual(hash32("290decd9548b62a8d60345a988386fc84ba6bc95484008f6362f93160ef3e563"), out);
 }
 

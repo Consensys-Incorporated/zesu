@@ -97,7 +97,7 @@ fn zeroHash(depth: u8) [32]u8 {
 
 /// SSZ: hash_tree_root(list) = sha256(merkle_root || uint256_le(length))
 fn mixInLength(root: [32]u8, length: u64) [32]u8 {
-    var buf: [64]u8 = [_]u8{0} ** 64;
+    var buf: [64]u8 = @splat(0);
     @memcpy(buf[0..32], &root);
     std.mem.writeInt(u64, buf[32..40], length, .little);
     return sha2Bytes(&buf);
@@ -179,7 +179,7 @@ fn htProgressiveByteList(alloc: std.mem.Allocator, data: []const u8) ![32]u8 {
 /// bits *are* the root.
 fn activeFields(comptime n: u8) [32]u8 {
     return comptime blk: {
-        var b: [32]u8 = .{0} ** 32;
+        var b: [32]u8 = @splat(0);
         for (0..n) |i| b[i / 8] |= @as(u8, 1) << @intCast(i % 8);
         break :blk b;
     };
@@ -194,7 +194,7 @@ fn progressiveContainerRoot(fields: []const [32]u8, comptime n_active: u8) [32]u
 // ── Primitive hash_tree_root helpers ─────────────────────────────────────────
 
 fn htU64(v: u64) [32]u8 {
-    var out: [32]u8 = [_]u8{0} ** 32;
+    var out: [32]u8 = @splat(0);
     std.mem.writeInt(u64, out[0..8], v, .little);
     return out;
 }
@@ -209,7 +209,7 @@ fn htBytes32(b: [32]u8) [32]u8 {
 }
 
 fn htBytes20(b: [20]u8) [32]u8 {
-    var out: [32]u8 = [_]u8{0} ** 32;
+    var out: [32]u8 = @splat(0);
     @memcpy(out[0..20], &b);
     return out;
 }
@@ -223,7 +223,7 @@ fn htBytes256(b: [256]u8) [32]u8 {
 
 /// ByteList[32]: max 32 bytes → 1 chunk limit.
 fn htByteList32(data: []const u8) [32]u8 {
-    var chunk: [32]u8 = [_]u8{0} ** 32;
+    var chunk: [32]u8 = @splat(0);
     const n = @min(data.len, 32);
     @memcpy(chunk[0..n], data[0..n]);
     // merkleize([chunk], limit=1) = chunk (single chunk, no reduction needed)
@@ -334,14 +334,14 @@ fn htVersionedHashes(hashes: []const [32]u8) [32]u8 {
 
 /// ByteVector[48]: 2 chunks — sha2(bytes[0..32], bytes[32..48] || 0*16).
 fn htBytes48(b: *const [48]u8) [32]u8 {
-    var c1: [32]u8 = [_]u8{0} ** 32;
+    var c1: [32]u8 = @splat(0);
     @memcpy(c1[0..16], b[32..48]);
     return sha2(b[0..32].*, c1);
 }
 
 /// ByteVector[96]: 3 chunks → merkleize(c0, c1, c2, 0).
 fn htBytes96(b: *const [96]u8) [32]u8 {
-    return sha2(sha2(b[0..32].*, b[32..64].*), sha2(b[64..96].*, [_]u8{0} ** 32));
+    return sha2(sha2(b[0..32].*, b[32..64].*), sha2(b[64..96].*, @as([32]u8, @splat(0))));
 }
 
 fn htDepositRequest(bytes: *const [192]u8) [32]u8 {
@@ -352,9 +352,9 @@ fn htDepositRequest(bytes: *const [192]u8) [32]u8 {
         htU64(std.mem.readInt(u64, bytes[80..88], .little)),
         htBytes96(bytes[88..184]),
         htU64(std.mem.readInt(u64, bytes[184..192], .little)),
-        [_]u8{0} ** 32,
-        [_]u8{0} ** 32,
-        [_]u8{0} ** 32,
+        @as([32]u8, @splat(0)),
+        @as([32]u8, @splat(0)),
+        @as([32]u8, @splat(0)),
     };
     return merkleizeExact(&chunks);
 }
@@ -365,7 +365,7 @@ fn htWithdrawalRequest(bytes: *const [76]u8) [32]u8 {
         htBytes20(bytes[0..20].*),
         htBytes48(bytes[20..68]),
         htU64(std.mem.readInt(u64, bytes[68..76], .little)),
-        [_]u8{0} ** 32,
+        @as([32]u8, @splat(0)),
     };
     return merkleizeExact(&chunks);
 }
@@ -376,7 +376,7 @@ fn htConsolidationRequest(bytes: *const [116]u8) [32]u8 {
         htBytes20(bytes[0..20].*),
         htBytes48(bytes[20..68]),
         htBytes48(bytes[68..116]),
-        [_]u8{0} ** 32,
+        @as([32]u8, @splat(0)),
     };
     return merkleizeExact(&chunks);
 }
@@ -457,7 +457,7 @@ pub const OUTPUT_SIZE: usize = 43;
 
 /// EIP-8025 "default failed" output, committed when the SSZ input cannot be decoded
 /// (reference stateless_guest `_default_failed_stateless_output`): all zeroes.
-pub const DEFAULT_FAILED_OUTPUT: [OUTPUT_SIZE]u8 = .{0} ** OUTPUT_SIZE;
+pub const DEFAULT_FAILED_OUTPUT: [OUTPUT_SIZE]u8 = @splat(0);
 
 /// Serialize SszStatelessValidationResult (layout in the file header).
 pub fn serialize(

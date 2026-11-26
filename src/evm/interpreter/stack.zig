@@ -134,7 +134,7 @@ pub const Stack = struct {
             return error.InvalidSliceLength;
         }
 
-        var bytes: [32]u8 = [_]u8{0} ** 32;
+        var bytes: [32]u8 = @splat(0);
         @memcpy(bytes[32 - slice.len ..], slice);
 
         try self.push(@bitCast(bytes));
@@ -538,7 +538,7 @@ test "dupUnsafe and swapUnsafe at maximum depth keep every word intact" {
 test "copyFixed copies exactly N bytes and leaves neighbours alone" {
     var src: [32]u8 = undefined;
     for (&src, 0..) |*b, i| b.* = @intCast(i * 7 + 1);
-    var buf = [_]u8{0xAA} ** 34;
+    var buf: [34]u8 = @splat(0xAA);
     primitives.dma.copyFixed(32, buf[1..33], &src);
     try std.testing.expectEqual(@as(u8, 0xAA), buf[0]);
     try std.testing.expectEqualSlices(u8, &src, buf[1..33]);

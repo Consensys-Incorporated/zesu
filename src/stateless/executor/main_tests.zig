@@ -16,11 +16,11 @@ fn testHeader(alloc: std.mem.Allocator, parent_hash: [32]u8, state_root: [32]u8,
     return enc.encodeList(alloc, &.{
         try enc.encodeBytes(alloc, &parent_hash),
         try enc.encodeBytes(alloc, &ZERO), // ommers_hash
-        try enc.encodeBytes(alloc, &([_]u8{0} ** 20)), // beneficiary
+        try enc.encodeBytes(alloc, &(@as([20]u8, @splat(0)))), // beneficiary
         try enc.encodeBytes(alloc, &state_root),
         try enc.encodeBytes(alloc, &ZERO), // transactions_root
         try enc.encodeBytes(alloc, &ZERO), // receipts_root
-        try enc.encodeBytes(alloc, &([_]u8{0} ** 256)), // logs_bloom
+        try enc.encodeBytes(alloc, &(@as([256]u8, @splat(0)))), // logs_bloom
         try enc.encodeU64(alloc, 0), // difficulty
         try enc.encodeU64(alloc, number),
         try enc.encodeU64(alloc, 30_000_000), // gas_limit
@@ -34,11 +34,11 @@ fn truncatedHeader(alloc: std.mem.Allocator, fields: usize) ![]u8 {
     const full = [_][]const u8{
         try enc.encodeBytes(alloc, &ZERO),
         try enc.encodeBytes(alloc, &ZERO),
-        try enc.encodeBytes(alloc, &([_]u8{0} ** 20)),
+        try enc.encodeBytes(alloc, &(@as([20]u8, @splat(0)))),
         try enc.encodeBytes(alloc, &ZERO),
         try enc.encodeBytes(alloc, &ZERO),
         try enc.encodeBytes(alloc, &ZERO),
-        try enc.encodeBytes(alloc, &([_]u8{0} ** 256)),
+        try enc.encodeBytes(alloc, &(@as([256]u8, @splat(0)))),
         try enc.encodeU64(alloc, 0),
         try enc.encodeU64(alloc, 10),
         try enc.encodeU64(alloc, 30_000_000),
@@ -182,13 +182,13 @@ test "a header whose hash fields are not 32 bytes is rejected" {
     defer arena.deinit();
     const a = arena.allocator();
     const short_parent_hash = try enc.encodeList(a, &.{
-        try enc.encodeBytes(a, &([_]u8{0} ** 31)),
+        try enc.encodeBytes(a, &(@as([31]u8, @splat(0)))),
         try enc.encodeBytes(a, &ZERO),
-        try enc.encodeBytes(a, &([_]u8{0} ** 20)),
+        try enc.encodeBytes(a, &(@as([20]u8, @splat(0)))),
         try enc.encodeBytes(a, &ZERO),
         try enc.encodeBytes(a, &ZERO),
         try enc.encodeBytes(a, &ZERO),
-        try enc.encodeBytes(a, &([_]u8{0} ** 256)),
+        try enc.encodeBytes(a, &(@as([256]u8, @splat(0)))),
         try enc.encodeU64(a, 0),
         try enc.encodeU64(a, 10),
     });

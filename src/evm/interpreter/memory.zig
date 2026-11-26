@@ -18,7 +18,7 @@ pub const Memory = struct {
 
     pub fn new() Memory {
         return Memory{
-            .buffer = std.ArrayList(u8){ .items = &[_]u8{}, .capacity = 0 },
+            .buffer = std.ArrayList(u8).empty,
             .checkpoint = 0,
             .child_checkpoint = null,
             .memory_limit = (1 << 32) - 1,
@@ -140,7 +140,7 @@ pub const Memory = struct {
     pub fn loadU256(self: Memory, offset: usize) primitives.U256 {
         if (offset + 32 > self.buffer.items.len) {
             // Pad with zeros if beyond memory
-            var bytes: [32]u8 = [_]u8{0} ** 32;
+            var bytes: [32]u8 = @splat(0);
             const available = self.buffer.items.len - offset;
             if (available > 0) {
                 @memcpy(bytes[0..available], self.buffer.items[offset .. offset + available]);
@@ -163,7 +163,7 @@ pub const Memory = struct {
     pub fn loadU128(self: Memory, offset: usize) primitives.U128 {
         if (offset + 16 > self.buffer.items.len) {
             // Pad with zeros if beyond memory
-            var bytes: [16]u8 = [_]u8{0} ** 16;
+            var bytes: [16]u8 = @splat(0);
             const available = self.buffer.items.len - offset;
             if (available > 0) {
                 @memcpy(bytes[0..available], self.buffer.items[offset .. offset + available]);
@@ -186,7 +186,7 @@ pub const Memory = struct {
     pub fn loadU64(self: Memory, offset: usize) primitives.U64 {
         if (offset + 8 > self.buffer.items.len) {
             // Pad with zeros if beyond memory
-            var bytes: [8]u8 = [_]u8{0} ** 8;
+            var bytes: [8]u8 = @splat(0);
             const available = self.buffer.items.len - offset;
             if (available > 0) {
                 @memcpy(bytes[0..available], self.buffer.items[offset .. offset + available]);
@@ -209,7 +209,7 @@ pub const Memory = struct {
     pub fn loadU32(self: Memory, offset: usize) primitives.U32 {
         if (offset + 4 > self.buffer.items.len) {
             // Pad with zeros if beyond memory
-            var bytes: [4]u8 = [_]u8{0} ** 4;
+            var bytes: [4]u8 = @splat(0);
             const available = self.buffer.items.len - offset;
             if (available > 0) {
                 @memcpy(bytes[0..available], self.buffer.items[offset .. offset + available]);
@@ -232,7 +232,7 @@ pub const Memory = struct {
     pub fn loadU16(self: Memory, offset: usize) primitives.U16 {
         if (offset + 2 > self.buffer.items.len) {
             // Pad with zeros if beyond memory
-            var bytes: [2]u8 = [_]u8{0} ** 2;
+            var bytes: [2]u8 = @splat(0);
             const available = self.buffer.items.len - offset;
             if (available > 0) {
                 @memcpy(bytes[0..available], self.buffer.items[offset .. offset + available]);

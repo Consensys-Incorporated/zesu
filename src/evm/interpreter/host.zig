@@ -107,12 +107,12 @@ pub const CreateResult = struct {
 
     /// Pre-execution failure: no sub-interpreter ran, return all forwarded gas.
     pub fn preExecFailure(gas_limit: u64) CreateResult {
-        return .{ .success = false, .is_revert = false, .address = [_]u8{0} ** 20, .gas_remaining = gas_limit, .return_data = &[_]u8{}, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = 0 };
+        return .{ .success = false, .is_revert = false, .address = @splat(0), .gas_remaining = gas_limit, .return_data = &[_]u8{}, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = 0 };
     }
 
     /// Post-execution failure: sub-interpreter ran and consumed gas.
     pub fn failure() CreateResult {
-        return .{ .success = false, .is_revert = false, .address = [_]u8{0} ** 20, .gas_remaining = 0, .return_data = &[_]u8{}, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = 0 };
+        return .{ .success = false, .is_revert = false, .address = @splat(0), .gas_remaining = 0, .return_data = &[_]u8{}, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = 0 };
     }
 };
 
@@ -352,8 +352,8 @@ pub const Host = struct {
 
     pub fn blockHash(self: *Host, number: u64) ?primitives.Hash {
         const current: u64 = @intCast(self.block.number);
-        if (number >= current) return [_]u8{0} ** 32;
-        if (current - number > primitives.BLOCK_HASH_HISTORY) return [_]u8{0} ** 32;
+        if (number >= current) return @as([32]u8, @splat(0));
+        if (current - number > primitives.BLOCK_HASH_HISTORY) return @as([32]u8, @splat(0));
         return self.js_vtable.blockHashDb(self.js, number) catch {
             self.ctx_error.* = context_mod.ContextError.database_error;
             return null;
@@ -992,10 +992,10 @@ fn setupCreateCore(
         deriveCreateAddress(caller, caller_nonce, init_code, is_create2, salt);
 
     // `known_addr` is trusted on the strength of "nothing between recordCreateTarget and
-    // setupCreate can move the nonce or init code". Check that in Debug builds, so a
+    // setupCreate can move the nonce or init code". Check that in safety-checked builds, so a
     // future change that breaks it fails tests instead of silently creating at the wrong address.
-    // Debug only: the comptime-false branch is not compiled into any release build.
-    if (comptime builtin.mode == .Debug) {
+    // The comptime-false branch is not compiled into ReleaseFast/ReleaseSmall.
+    if (comptime std.debug.runtime_safety) {
         if (known_addr) |k| {
             const derived = deriveCreateAddress(caller, caller_nonce, init_code, is_create2, salt);
             std.debug.assert(std.mem.eql(u8, &k, &derived));
@@ -1098,7 +1098,7 @@ fn finalizeCreateCore(
         js.checkpointRevert(checkpoint);
         const gas_rem = if (result == .revert) gas_remaining else @as(u64, 0);
         const rd = if (result == .revert) return_data else &[_]u8{};
-        return .{ .success = false, .is_revert = (result == .revert), .address = [_]u8{0} ** 20, .gas_remaining = gas_rem, .return_data = rd, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = gas_reservoir };
+        return .{ .success = false, .is_revert = (result == .revert), .address = @splat(0), .gas_remaining = gas_rem, .return_data = rd, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = gas_reservoir };
     }
 
     // SELFDESTRUCT in init code: no code is deployed (account is deleted).
@@ -1106,12 +1106,12 @@ fn finalizeCreateCore(
     const deployed_raw: []const u8 = if (result == .selfdestruct) &[_]u8{} else return_data;
     if (deployed_raw.len > MAX_CODE_SIZE) {
         js.checkpointRevert(checkpoint);
-        return .{ .success = false, .is_revert = false, .address = [_]u8{0} ** 20, .gas_remaining = 0, .return_data = &[_]u8{}, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = gas_reservoir };
+        return .{ .success = false, .is_revert = false, .address = @splat(0), .gas_remaining = 0, .return_data = &[_]u8{}, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = gas_reservoir };
     }
     if (primitives.isEnabledIn(spec_id, .london)) {
         if (deployed_raw.len > 0 and deployed_raw[0] == 0xEF) {
             js.checkpointRevert(checkpoint);
-            return .{ .success = false, .is_revert = false, .address = [_]u8{0} ** 20, .gas_remaining = 0, .return_data = &[_]u8{}, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = gas_reservoir };
+            return .{ .success = false, .is_revert = false, .address = @splat(0), .gas_remaining = 0, .return_data = &[_]u8{}, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = gas_reservoir };
         }
     }
 
@@ -1124,7 +1124,7 @@ fn finalizeCreateCore(
         const regular_deposit = gas_costs.G_KECCAK256WORD * @as(u64, code_words);
         if (gas_remaining < regular_deposit) {
             js.checkpointRevert(checkpoint);
-            return .{ .success = false, .is_revert = false, .address = [_]u8{0} ** 20, .gas_remaining = 0, .return_data = &[_]u8{}, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = remaining_reservoir };
+            return .{ .success = false, .is_revert = false, .address = @splat(0), .gas_remaining = 0, .return_data = &[_]u8{}, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = remaining_reservoir };
         }
         var gas_after_regular = gas_remaining - regular_deposit;
         const cpsb = gas_costs.costPerStateByte(host.block.gas_limit);
@@ -1139,7 +1139,7 @@ fn finalizeCreateCore(
                 code_deposit_spilled = spill;
             } else {
                 js.checkpointRevert(checkpoint);
-                return .{ .success = false, .is_revert = false, .address = [_]u8{0} ** 20, .gas_remaining = 0, .return_data = &[_]u8{}, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = remaining_reservoir };
+                return .{ .success = false, .is_revert = false, .address = @splat(0), .gas_remaining = 0, .return_data = &[_]u8{}, .gas_refunded = 0, .state_gas_used = 0, .state_gas_remaining = remaining_reservoir };
             }
         }
         _ = is_opcode_create;

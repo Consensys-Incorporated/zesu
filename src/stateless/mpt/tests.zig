@@ -892,7 +892,7 @@ test "verifyProofIndexed: an extension path longer than the decode buffer is rej
     const alloc = arena.allocator();
     var index = NodeIndex.init(alloc);
     // 200 nibbles, then a 32-byte child hash.
-    const ext = try longPathNode(alloc, 0x00, 101, &([_]u8{0xa0} ++ [_]u8{0x11} ** 32));
+    const ext = try longPathNode(alloc, 0x00, 101, &([_]u8{0xa0} ++ @as([32]u8, @splat(0x11))));
     try index.put(keccak256(ext), ext);
     try std.testing.expectError(error.InvalidHp, mpt.verifyProofIndexed(keccak256(ext), pathTestKey(0), &index));
 }
@@ -1014,7 +1014,7 @@ test "BranchSlots.ofScan: item spans match the children, inline ones included" {
     var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
     enc[1] = try updMakeLeaf(alloc, &.{}, "a"); // inline
     enc[2] = try updMakeLeaf(alloc, &.{ 3, 4 }, "bc"); // inline
-    enc[9] = try updHashOrEmbed(alloc, try updMakeLeaf(alloc, &(.{5} ** 40), "x" ** 40)); // hash
+    enc[9] = try updHashOrEmbed(alloc, try updMakeLeaf(alloc, &@as([40]u8, @splat(5)), "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")); // hash
     const branch = try testBranch(alloc, &enc);
     const slots = BranchSlots.of(branch).?;
     for (enc, 0..) |e, i| {
@@ -1085,12 +1085,12 @@ test "BranchSlots: replaceChild and replaceChildren match re-encoding across hea
     const inline_leaf = try updMakeLeaf(alloc, &.{}, "a");
     var start: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
     for (0..16) |i| if (i % 3 == 0) {
-        start[i] = try updRlpBytes(alloc, &([_]u8{@intCast(i + 1)} ** 32));
+        start[i] = try updRlpBytes(alloc, &(@as([32]u8, @splat(@intCast(i + 1)))));
     };
     const base = try testBranch(alloc, &start);
     var new_enc: [16]?[]const u8 = @splat(null);
     new_enc[0] = inline_leaf;
-    new_enc[1] = try updRlpBytes(alloc, &([_]u8{0xee} ** 32));
+    new_enc[1] = try updRlpBytes(alloc, &(@as([32]u8, @splat(0xee))));
     new_enc[3] = &EMPTY_NODE_RLP;
     new_enc[15] = inline_leaf;
     var want = start;
@@ -1107,7 +1107,7 @@ test "updNodeExRecorded: splicing a branch with inline, hashed and empty childre
     const alloc = arena.allocator();
 
     const big_path: [40]u8 = @splat(5);
-    const big_val = "x" ** 40;
+    const big_val = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
     const big_leaf = try updMakeLeaf(alloc, &big_path, big_val);
     var enc: [16][]const u8 = @splat(&EMPTY_NODE_RLP);
     enc[1] = try updMakeLeaf(alloc, &.{}, "a"); // inline
@@ -1126,7 +1126,7 @@ test "updNodeExRecorded: splicing a branch with inline, hashed and empty childre
         .{ .path = &.{ 2, 3, 4 }, .value = "zz" }, // update an inline leaf with a path
         .{ .path = &.{ 2, 3, 9 }, .value = "zz" }, // split an inline leaf
         .{ .path = &.{ 7, 1 }, .value = "q" }, // insert into an empty slot
-        .{ .path = &(.{3} ++ big_path), .value = "y" ** 40 }, // update the hashed leaf
+        .{ .path = &(.{3} ++ big_path), .value = "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy" }, // update the hashed leaf
         .{ .path = &(.{3} ++ big_path[0..39].* ++ .{6}), .value = "w" }, // split the hashed leaf
     };
     for (cases) |c| {

@@ -85,11 +85,11 @@ test "analyzeLegacy: jump table agrees with a serial reference" {
         &.{JUMPDEST},
         &.{ PUSH1, JUMPDEST }, // JUMPDEST is immediate data, not a target
         &.{ PUSH1 + 31, 0, 0, 0, 0, 0, 0, 0, JUMPDEST }, // inside PUSH32 data
-        &([_]u8{PUSH1 + 31} ** 3), // trailing PUSH runs past the end
-        &([_]u8{JUMPDEST} ** 8),
-        &([_]u8{JUMPDEST} ** 9),
-        &([_]u8{0x00} ** 8 ++ [_]u8{JUMPDEST}), // a skippable word then a target
-        &([_]u8{0x00} ** 16),
+        &(@as([3]u8, @splat(PUSH1 + 31))), // trailing PUSH runs past the end
+        &(@as([8]u8, @splat(JUMPDEST))),
+        &(@as([9]u8, @splat(JUMPDEST))),
+        &(@as([8]u8, @splat(0x00)) ++ [_]u8{JUMPDEST}), // a skippable word then a target
+        &(@as([16]u8, @splat(0x00))),
         &.{ 0x00, PUSH1 + 31 }, // PUSH32 on the last byte
         &.{ PUSH1, 0x00, JUMPDEST }, // target on the last byte
         &.{ PUSH1 + 1, 0x00, JUMPDEST }, // last byte is PUSH2 data

@@ -424,11 +424,11 @@ pub const testing = struct {
         // the shape stops discriminating. `mid_word` is what covers `mid`.
         const Shape = enum { tail, prefixed_tail, lo_high_bits, mid_word, head_only };
         for (std.enums.values(Shape)) |shape| {
-            var seen = [_]bool{false} ** n;
+            var seen: [n]bool = @splat(false);
             var distinct_buckets: usize = 0;
 
             for (0..n) |i| {
-                var addr: Address = [_]u8{0} ** 20;
+                var addr: Address = @splat(0);
                 switch (shape) {
                     // 0x00..00_0001_00000000_00000000_000000XX
                     .tail => {

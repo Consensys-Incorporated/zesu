@@ -239,7 +239,7 @@ test "basic returns null when queried address differs from trie leaf" {
 
 test "codeByHash(KECCAK_EMPTY) returns empty Bytecode" {
     const w = input.StateWitness{
-        .state_root = [_]u8{0} ** 32,
+        .state_root = @splat(0),
         .nodes = &.{},
         .codes = &.{},
         .keys = &.{},
@@ -260,7 +260,7 @@ test "codeByHash returns contract bytecode from witness.codes" {
     const code_hash = mpt.keccak256(contract_code);
 
     const w = input.StateWitness{
-        .state_root = [_]u8{0} ** 32,
+        .state_root = @splat(0),
         .nodes = &.{},
         .codes = &[_][]const u8{contract_code},
         .keys = &.{},
@@ -281,7 +281,7 @@ test "codeByHash serves a delegation designator the block wrote, as a designator
     // shares the hash, and the witness need not carry it. It must come back as a
     // designator, since sender checks and CALL resolution test isEip7702().
     const w = input.StateWitness{
-        .state_root = [_]u8{0} ** 32,
+        .state_root = @splat(0),
         .nodes = &.{},
         .codes = &.{},
         .keys = &.{},
@@ -292,7 +292,7 @@ test "codeByHash serves a delegation designator the block wrote, as a designator
     defer idx.deinit();
     defer wdb.deinit();
 
-    const delegate = [_]u8{0x63} ** 20;
+    const delegate: [20]u8 = @splat(0x63);
     const designator = bytecode.Bytecode{ .eip7702 = bytecode.Eip7702Bytecode.new(delegate) };
     const code_hash = designator.hashSlow();
     try std.testing.expectError(error.InvalidWitness, wdb.codeByHash(code_hash));
@@ -394,7 +394,7 @@ test "storage returns 0 for account with empty storage trie" {
 
 test "blockHash returns InvalidWitness for missing hash" {
     const w = input.StateWitness{
-        .state_root = [_]u8{0} ** 32,
+        .state_root = @splat(0),
         .nodes = &.{},
         .codes = &.{},
         .keys = &.{},

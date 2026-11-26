@@ -6,7 +6,7 @@ const std = @import("std");
 const accel = @import("accelerators");
 
 pub const Bloom = [256]u8;
-pub const ZERO: Bloom = [_]u8{0} ** 256;
+pub const ZERO: Bloom = @splat(0);
 
 /// Add a byte sequence to the bloom filter.
 pub fn add(bloom: *Bloom, data: []const u8) void {

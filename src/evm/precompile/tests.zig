@@ -2030,12 +2030,12 @@ test "ModExp matches square-and-multiply on random operands of every size and pa
     var out: [32]u8 = undefined;
     var one: [32]u8 = @splat(0);
     one[31] = 1;
-    try testing.expect(accel.modexp(&([_]u8{0xff} ** 40), &[_]u8{3}, &one, &out));
-    try testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &out);
+    try testing.expect(accel.modexp(&(@as([40]u8, @splat(0xff))), &[_]u8{3}, &one, &out));
+    try testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &out);
     try testing.expect(accel.modexp(&[_]u8{7}, &.{}, &one, &out));
-    try testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &out);
+    try testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &out);
     var m7: [32]u8 = @splat(0);
     m7[31] = 7;
     try testing.expect(accel.modexp(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 14 }, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 5 }, &m7, &out));
-    try testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &out);
+    try testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0))), &out);
 }

@@ -317,7 +317,7 @@ pub const SELFDESTRUCT: u8 = 0xFF;
 
 /// Maps each opcode to its info.
 pub const OPCODE_INFO: [256]?OpCodeInfo = blk: {
-    var map: [256]?OpCodeInfo = [_]?OpCodeInfo{null} ** 256;
+    var map: [256]?OpCodeInfo = @splat(null);
 
     // Arithmetic operations
     map[STOP] = OpCodeInfo{ .name = "STOP", .inputs = 0, .outputs = 0, .immediate_size = 0, .terminating = true };
@@ -615,7 +615,7 @@ pub const Bytecode = union(enum) {
 /// last byte reads 32 immediates past the end, and the byte after them is a STOP.
 pub const EXEC_PAD: usize = 33;
 
-const empty_exec: [EXEC_PAD]u8 align(8) = [_]u8{STOP} ** EXEC_PAD;
+const empty_exec: [EXEC_PAD]u8 align(8) = @as([EXEC_PAD]u8, @splat(STOP));
 
 /// Only guests with the jump_dest precompile use 8-byte aligned, 64-bit-word bitmaps
 /// (the precompile writes them in full); elsewhere the bitmap stays byte-sized.
@@ -739,7 +739,7 @@ pub const JumpTable = struct {
 
 /// Bytes each opcode occupies: PUSH1..PUSH32 carry 1..32 immediates, everything else is one byte.
 const legacy_step: [256]u8 = blk: {
-    var t = [_]u8{1} ** 256;
+    var t: [256]u8 = @splat(1);
     for (0..32) |n| t[PUSH1 + n] = @intCast(n + 2);
     break :blk t;
 };

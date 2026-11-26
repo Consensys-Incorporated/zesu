@@ -34,11 +34,11 @@ fn stripHexPrefix(s: []const u8) []const u8 {
 
 fn hexToAddr(hex: []const u8) !Address {
     const src = stripHexPrefix(hex);
-    var addr: Address = [_]u8{0} ** 20;
+    var addr: Address = @splat(0);
     if (src.len == 0) return addr;
     if (src.len > 40) return error.InvalidAddress;
     // Pad to 40 hex chars (left-pad with zeros for short addresses)
-    var padded: [40]u8 = [_]u8{'0'} ** 40;
+    var padded: [40]u8 = @splat('0');
     @memcpy(padded[40 - src.len ..], src);
     _ = try std.fmt.hexToBytes(&addr, &padded);
     return addr;
@@ -46,10 +46,10 @@ fn hexToAddr(hex: []const u8) !Address {
 
 fn hexToHash(hex: []const u8) !Hash {
     const src = stripHexPrefix(hex);
-    var hash: Hash = [_]u8{0} ** 32;
+    var hash: Hash = @splat(0);
     if (src.len == 0) return hash;
     if (src.len > 64) return error.InvalidHash;
-    var padded: [64]u8 = [_]u8{'0'} ** 64;
+    var padded: [64]u8 = @splat('0');
     @memcpy(padded[64 - src.len ..], src);
     _ = try std.fmt.hexToBytes(&hash, &padded);
     return hash;
@@ -276,9 +276,9 @@ pub fn parseEnv(alloc: std.mem.Allocator, json_text: []const u8) !Env {
                     else
                         0,
                     .address = if (wo.get("address")) |v|
-                        hexToAddr(jsonStr(v) orelse "") catch [_]u8{0} ** 20
+                        hexToAddr(jsonStr(v) orelse "") catch @as([20]u8, @splat(0))
                     else
-                        [_]u8{0} ** 20,
+                        @as([20]u8, @splat(0)),
                     .amount = if (wo.get("amount")) |v| jsonU64(v) catch 0 else 0,
                 };
                 try wds.append(alloc, wd);
@@ -390,16 +390,16 @@ fn parseTxObject(alloc: std.mem.Allocator, obj: std.json.ObjectMap) !TxInput {
                 if (al_item != .object) continue;
                 const alo = al_item.object;
                 const entry_addr = if (alo.get("address")) |v|
-                    hexToAddr(jsonStr(v) orelse "") catch [_]u8{0} ** 20
+                    hexToAddr(jsonStr(v) orelse "") catch @as([20]u8, @splat(0))
                 else
-                    [_]u8{0} ** 20;
+                    @as([20]u8, @splat(0));
 
                 var keys = std.ArrayListUnmanaged(Hash).empty;
                 if (alo.get("storageKeys")) |skv| {
                     if (skv == .array) {
                         for (skv.array.items) |sk_item| {
                             if (jsonStr(sk_item)) |s| {
-                                const key = hexToHash(s) catch [_]u8{0} ** 32;
+                                const key = hexToHash(s) catch @as([32]u8, @splat(0));
                                 try keys.append(alloc, key);
                             }
                         }
@@ -420,7 +420,7 @@ fn parseTxObject(alloc: std.mem.Allocator, obj: std.json.ObjectMap) !TxInput {
             var hashes = std.ArrayListUnmanaged(Hash).empty;
             for (bvhv.array.items) |h_item| {
                 if (jsonStr(h_item)) |s| {
-                    const hash = hexToHash(s) catch [_]u8{0} ** 32;
+                    const hash = hexToHash(s) catch @as([32]u8, @splat(0));
                     try hashes.append(alloc, hash);
                 }
             }

@@ -86,7 +86,7 @@ fn buildNode(alloc: std.mem.Allocator, items: anytype, depth: usize) ![]const u8
     }
 
     // Branch node: split items by next nibble (0..15), optional value at this path
-    var children: [16]?[]const u8 = [_]?[]const u8{null} ** 16;
+    var children: [16]?[]const u8 = @splat(null);
     var branch_value: ?[]const u8 = null;
 
     // Group items by their nibble at `depth`

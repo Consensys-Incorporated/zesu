@@ -36,7 +36,7 @@ pub const BlockEnv = struct {
     pub fn default() BlockEnv {
         return .{
             .number = @as(primitives.U256, 0),
-            .beneficiary = [_]u8{0} ** 20,
+            .beneficiary = @splat(0),
             .timestamp = @as(primitives.U256, 1),
             .gas_limit = std.math.maxInt(u64),
             .basefee = 0,

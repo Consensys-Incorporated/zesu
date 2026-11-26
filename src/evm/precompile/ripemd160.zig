@@ -89,7 +89,7 @@ const Context = struct {
                 0xC3D2E1F0,
             },
             .total = 0,
-            .buf = [_]u8{0} ** 64,
+            .buf = @splat(0),
             .buflen = 0,
         };
     }

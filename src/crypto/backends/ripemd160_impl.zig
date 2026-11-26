@@ -84,7 +84,7 @@ const Context = struct {
         return Context{
             .h = [_]u32{ 0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0 },
             .total = 0,
-            .buf = [_]u8{0} ** 64,
+            .buf = @splat(0),
             .buflen = 0,
         };
     }

@@ -189,7 +189,7 @@ pub const WarmAddresses = struct {
     pub fn new() WarmAddresses {
         return .{
             .coinbase = null,
-            .precompile_bitset = .{0} ** 5,
+            .precompile_bitset = @splat(0),
             .access_list = std.HashMap(primitives.Address, std.ArrayList(primitives.StorageKey), primitives.AddressContext, 80).init(alloc_mod.get()),
         };
     }
@@ -575,7 +575,7 @@ pub const JournalInner = struct {
     /// the code instead.
     pub fn setCode(self: *JournalInner, address: primitives.Address, code: bytecode.Bytecode) void {
         if (code == .eip7702) {
-            if (std.mem.eql(u8, &code.eip7702.address, &[_]u8{0} ** 20)) {
+            if (std.mem.eql(u8, &code.eip7702.address, &@as([20]u8, @splat(0)))) {
                 self.setCodeWithHash(address, bytecode.Bytecode.new(), primitives.KECCAK_EMPTY);
                 return;
             }

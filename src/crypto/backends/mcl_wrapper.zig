@@ -6,11 +6,7 @@ const std = @import("std");
 // which supports both BLS12-381 and BN254.  Using bn_c256.h would compute
 // MCLBN_COMPILED_TIME_VAR=44, but the library expects 46 (4*10+6), causing
 // mclBn_init to return an error and leave all function pointers null.
-const c = @cImport({
-    @cDefine("MCL_FP_BIT", "384");
-    @cDefine("MCL_FR_BIT", "256");
-    @cInclude("mcl/bn.h");
-});
+const c = @import("c_headers");
 
 var mcl_init_done: std.atomic.Value(bool) = .init(false);
 
@@ -61,8 +57,8 @@ fn g1ToEVM(out: *[64]u8, p: *const c.mclBnG1) void {
     c.mclBnG1_normalize(&normed, p);
 
     // getLittleEndian returns up to 48 bytes for 384-bit Fp; BN254 Fp fits in 32.
-    var xle: [48]u8 = [_]u8{0} ** 48;
-    var yle: [48]u8 = [_]u8{0} ** 48;
+    var xle: [48]u8 = @splat(0);
+    var yle: [48]u8 = @splat(0);
     _ = c.mclBnFp_getLittleEndian(&xle, 48, &normed.x);
     _ = c.mclBnFp_getLittleEndian(&yle, 48, &normed.y);
 

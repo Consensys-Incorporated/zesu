@@ -4,11 +4,11 @@ const state = @import("state");
 const bytecode = @import("bytecode");
 
 // Fixed addresses and balances for tests and benchmarks.
-pub const FFADDRESS: primitives.Address = [_]u8{0xff} ** 20;
+pub const FFADDRESS: primitives.Address = @splat(0xff);
 pub const BENCH_TARGET: primitives.Address = FFADDRESS;
 pub const TEST_BALANCE: primitives.U256 = primitives.U256{10_000_000_000_000_000};
 pub const BENCH_TARGET_BALANCE: primitives.U256 = TEST_BALANCE;
-pub const EEADDRESS: primitives.Address = [_]u8{0xee} ** 20;
+pub const EEADDRESS: primitives.Address = @splat(0xee);
 pub const BENCH_CALLER: primitives.Address = EEADDRESS;
 pub const BENCH_CALLER_BALANCE: primitives.U256 = TEST_BALANCE;
 
@@ -94,7 +94,7 @@ pub const EmptyDB = struct {
     pub fn blockHash(self: *Self, number: u64) !primitives.Hash {
         _ = self;
         _ = number;
-        return [_]u8{0} ** 32;
+        return @as([32]u8, @splat(0));
     }
 
     pub fn basicRef(self: Self, address: primitives.Address) !?state.AccountInfo {
@@ -119,7 +119,7 @@ pub const EmptyDB = struct {
     pub fn blockHashRef(self: Self, number: u64) !primitives.Hash {
         _ = self;
         _ = number;
-        return [_]u8{0} ** 32;
+        return @as([32]u8, @splat(0));
     }
 };
 
@@ -206,7 +206,7 @@ pub const InMemoryDB = struct {
     }
 
     pub fn blockHash(self: *Self, number: u64) !primitives.Hash {
-        return self.block_hashes.get(number) orelse [_]u8{0} ** 32;
+        return self.block_hashes.get(number) orelse @as([32]u8, @splat(0));
     }
 
     /// Returns true if the address has any non-zero storage entry (O(1)).
@@ -228,7 +228,7 @@ pub const InMemoryDB = struct {
     }
 
     pub fn blockHashRef(self: Self, number: u64) !primitives.Hash {
-        return self.block_hashes.get(number) orelse [_]u8{0} ** 32;
+        return self.block_hashes.get(number) orelse @as([32]u8, @splat(0));
     }
 
     pub fn commit(self: *Self, changes: std.HashMap(primitives.Address, state.Account, std.hash_map.default_hash_fn(primitives.Address), std.hash_map.default_eql_fn(primitives.Address))) void {

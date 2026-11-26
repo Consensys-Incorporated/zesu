@@ -35,7 +35,7 @@ fn p256VerifyInner(input: []const u8, gas_limit: u64, gas_cost: u64) T.Precompil
     }
 
     if (verifyImpl(input)) {
-        var result: [32]u8 = [_]u8{0} ** 32;
+        var result: [32]u8 = @splat(0);
         result[31] = 1;
         const heap_out = alloc_mod.get().dupe(u8, &result) catch @panic("out of memory");
         return T.PrecompileResult{ .success = T.PrecompileOutput.new(gas_cost, heap_out) };

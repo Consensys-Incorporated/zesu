@@ -16,7 +16,7 @@ pub fn hexToSlice(alloc: std.mem.Allocator, hex: []const u8) ![]u8 {
 
 pub fn hexToAddr(hex: []const u8) ![20]u8 {
     const s = stripHex(hex);
-    var padded: [40]u8 = [_]u8{'0'} ** 40;
+    var padded: [40]u8 = @splat('0');
     if (s.len > 40) return error.InvalidAddress;
     @memcpy(padded[40 - s.len ..], s);
     var out: [20]u8 = undefined;
@@ -26,7 +26,7 @@ pub fn hexToAddr(hex: []const u8) ![20]u8 {
 
 pub fn hexToHash(hex: []const u8) ![32]u8 {
     const s = stripHex(hex);
-    var padded: [64]u8 = [_]u8{'0'} ** 64;
+    var padded: [64]u8 = @splat('0');
     if (s.len > 64) return error.InvalidHash;
     @memcpy(padded[64 - s.len ..], s);
     var out: [32]u8 = undefined;

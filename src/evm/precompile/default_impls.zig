@@ -44,7 +44,7 @@ const DISCOUNT_TABLE_G2_MSM: [128]u16 = .{
 /// EIP-2537: the leading 16 bytes of each 64-byte field element must be zero.
 fn removeG1Padding(padded: []const u8) T.PrecompileError![2][FP_LENGTH]u8 {
     if (padded.len < PADDED_G1_LENGTH) return T.PrecompileError.Bls12381G1AddInputLength;
-    const zero16 = [_]u8{0} ** 16;
+    const zero16: [16]u8 = @splat(0);
     if (!std.mem.eql(u8, padded[0..16], &zero16) or !std.mem.eql(u8, padded[64..80], &zero16))
         return T.PrecompileError.Bls12381G1AddInputLength;
     var result: [2][FP_LENGTH]u8 = undefined;
@@ -55,7 +55,7 @@ fn removeG1Padding(padded: []const u8) T.PrecompileError![2][FP_LENGTH]u8 {
 
 /// Pad a G1 point (96 bytes → 128 bytes).
 fn padG1Point(unpadded: []const u8) [PADDED_G1_LENGTH]u8 {
-    var result: [PADDED_G1_LENGTH]u8 = [_]u8{0} ** PADDED_G1_LENGTH;
+    var result: [PADDED_G1_LENGTH]u8 = @splat(0);
     @memcpy(result[16..][0..FP_LENGTH], unpadded[0..FP_LENGTH]);
     @memcpy(result[80..][0..FP_LENGTH], unpadded[FP_LENGTH..][0..FP_LENGTH]);
     return result;
@@ -65,7 +65,7 @@ fn padG1Point(unpadded: []const u8) [PADDED_G1_LENGTH]u8 {
 /// EIP-2537: the leading 16 bytes of each 64-byte field element must be zero.
 fn removeG2Padding(padded: []const u8) T.PrecompileError![4][FP_LENGTH]u8 {
     if (padded.len < PADDED_G2_LENGTH) return T.PrecompileError.Bls12381G2AddInputLength;
-    const zero16 = [_]u8{0} ** 16;
+    const zero16: [16]u8 = @splat(0);
     if (!std.mem.eql(u8, padded[0..16], &zero16) or !std.mem.eql(u8, padded[64..80], &zero16) or
         !std.mem.eql(u8, padded[128..144], &zero16) or !std.mem.eql(u8, padded[192..208], &zero16))
         return T.PrecompileError.Bls12381G2AddInputLength;
@@ -79,7 +79,7 @@ fn removeG2Padding(padded: []const u8) T.PrecompileError![4][FP_LENGTH]u8 {
 
 /// Pad a G2 point (192 bytes → 256 bytes).
 fn padG2Point(unpadded: []const u8) [PADDED_G2_LENGTH]u8 {
-    var result: [PADDED_G2_LENGTH]u8 = [_]u8{0} ** PADDED_G2_LENGTH;
+    var result: [PADDED_G2_LENGTH]u8 = @splat(0);
     @memcpy(result[16..][0..FP_LENGTH], unpadded[0..FP_LENGTH]);
     @memcpy(result[80..][0..FP_LENGTH], unpadded[FP_LENGTH..][0..FP_LENGTH]);
     @memcpy(result[144..][0..FP_LENGTH], unpadded[FP2_LENGTH..][0..FP_LENGTH]);
@@ -109,7 +109,7 @@ fn ecRecoverRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
 
     if (input.len < 128) {
         // EVM pads input — treat short input as zero-padded
-        var padded: [128]u8 = [_]u8{0} ** 128;
+        var padded: [128]u8 = @splat(0);
         @memcpy(padded[0..input.len], input);
         return ecRecoverPadded(&padded, GAS_COST);
     }
@@ -137,7 +137,7 @@ fn ecRecoverPadded(input: *const [128]u8, gas_cost: u64) T.PrecompileResult {
     // keccak256(pubkey) → take last 20 bytes as address, zero-pad to 32
     var hash: [32]u8 = undefined;
     accel.keccak256(&pubkey, &hash);
-    var result: [32]u8 = [_]u8{0} ** 32;
+    var result: [32]u8 = @splat(0);
     @memcpy(result[12..], hash[12..]);
 
     const output = alloc_mod.get().dupe(u8, &result) catch @panic("out of memory");
@@ -157,7 +157,7 @@ fn bn254AddByzantiumRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
 }
 
 fn bn254AddImpl(input: []const u8, gas_cost: u64) T.PrecompileResult {
-    var padded: [128]u8 = [_]u8{0} ** 128;
+    var padded: [128]u8 = @splat(0);
     const copy_len = @min(input.len, 128);
     @memcpy(padded[0..copy_len], input[0..copy_len]);
     // EIP-196: reject coordinates >= BN254 field prime.
@@ -180,7 +180,7 @@ fn bn254MulByzantiumRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
 }
 
 fn bn254MulImpl(input: []const u8, gas_cost: u64) T.PrecompileResult {
-    var padded: [96]u8 = [_]u8{0} ** 96;
+    var padded: [96]u8 = @splat(0);
     const copy_len = @min(input.len, 96);
     @memcpy(padded[0..copy_len], input[0..copy_len]);
     // EIP-196: reject coordinates >= BN254 field prime.
@@ -217,7 +217,7 @@ fn bn254PairingImpl(input: []const u8, gas_cost: u64) T.PrecompileResult {
     var verified: bool = false;
     if (!accel.bn254_pairing(pairs, &verified))
         return .{ .err = T.PrecompileError.Bn254FieldPointNotAMember };
-    var result: [32]u8 = [_]u8{0} ** 32;
+    var result: [32]u8 = @splat(0);
     if (verified) result[31] = 1;
     const output = alloc_mod.get().dupe(u8, &result) catch @panic("out of memory");
     return .{ .success = T.PrecompileOutput.new(gas_cost, output) };
@@ -481,7 +481,7 @@ fn bls12PairingRun(input: []const u8, gas_limit: u64) T.PrecompileResult {
     var verified: bool = false;
     if (!accel.bls12_pairing(pairs, &verified))
         return .{ .err = T.PrecompileError.Bls12381G1NotOnCurve };
-    var result: [32]u8 = [_]u8{0} ** 32;
+    var result: [32]u8 = @splat(0);
     if (verified) result[31] = 1;
     const heap_out = alloc_mod.get().dupe(u8, &result) catch @panic("out of memory");
     return .{ .success = T.PrecompileOutput.new(gas_used, heap_out) };
@@ -494,7 +494,7 @@ fn bls12MapFpToG1Run(input: []const u8, gas_limit: u64) T.PrecompileResult {
         return .{ .err = T.PrecompileError.Bls12381MapFpToG1InputLength };
 
     // EIP-2537: top 16 bytes must be zero
-    const zero16 = [_]u8{0} ** 16;
+    const zero16: [16]u8 = @splat(0);
     if (!std.mem.eql(u8, input[0..16], &zero16))
         return .{ .err = T.PrecompileError.Bls12381MapFpToG1InputLength };
 
@@ -515,7 +515,7 @@ fn bls12MapFp2ToG2Run(input: []const u8, gas_limit: u64) T.PrecompileResult {
         return .{ .err = T.PrecompileError.Bls12381MapFp2ToG2InputLength };
 
     // EIP-2537: top 16 bytes of each 64-byte element must be zero
-    const zero16 = [_]u8{0} ** 16;
+    const zero16: [16]u8 = @splat(0);
     if (!std.mem.eql(u8, input[0..16], &zero16) or !std.mem.eql(u8, input[64..80], &zero16))
         return .{ .err = T.PrecompileError.Bls12381MapFp2ToG2InputLength };
 
@@ -555,7 +555,7 @@ fn p256VerifyImpl(input: []const u8, gas_cost: u64) T.PrecompileResult {
     accel.secp256r1_verify(msg, &sig, &pubkey, &verified);
     // EIP-7951: invalid sig → empty return (like ecrecover); valid → 32-byte 0x00..01.
     if (!verified) return .{ .success = T.PrecompileOutput.new(gas_cost, &[_]u8{}) };
-    var result: [32]u8 = [_]u8{0} ** 32;
+    var result: [32]u8 = @splat(0);
     result[31] = 1;
     const output = alloc_mod.get().dupe(u8, &result) catch @panic("out of memory");
     return .{ .success = T.PrecompileOutput.new(gas_cost, output) };

@@ -49,7 +49,7 @@ pub const TransitionResult = struct {
     accepted_txs: []input.TxInput,
     chain_id: u64,
     bal_hash: ?[32]u8 = null,
-    requests_hash: [32]u8 = [_]u8{0} ** 32,
+    requests_hash: [32]u8 = @splat(0),
 };
 
 // ─── Dummy block hash ─────────────────────────────────────────────────────────
@@ -563,7 +563,7 @@ fn buildDb(
             const bc: bytecode_mod.Bytecode = if (acct.code.len == 23 and
                 acct.code[0] == 0xEF and acct.code[1] == 0x01 and acct.code[2] == 0x00)
             blk2: {
-                var delegation_addr: primitives.Address = [_]u8{0} ** 20;
+                var delegation_addr: primitives.Address = @splat(0);
                 @memcpy(&delegation_addr, acct.code[3..23]);
                 break :blk2 bytecode_mod.Bytecode{ .eip7702 = bytecode_mod.Eip7702Bytecode.new(delegation_addr) };
             } else bytecode_mod.Bytecode.newLegacy(acct.code);

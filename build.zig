@@ -120,10 +120,15 @@ fn buildModules(
     });
     if (!use_extern) {
         accel_impl.addImport("zesu_allocator", zesu_allocator);
-        // default.zig @cImports system crypto headers. C include paths are per-module and don't
-        // cross the dependency boundary, so set it here so dependents resolve the @cImport
-        // without re-adding an include path to a module they can't see.
-        accel_impl.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{crypto_prefix}) });
+        // The native backends' system crypto headers, translated once and imported as
+        // `c_headers` (Zig 0.17 removed @cImport).
+        const c_headers = b.addTranslateC(.{
+            .root_source_file = b.path("src/crypto/backends/c.h"),
+            .target = target,
+            .optimize = optimize,
+        });
+        c_headers.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{crypto_prefix}) });
+        accel_impl.addImport("c_headers", c_headers.createModule());
     }
 
     const accelerators = mkmod(b, expose, "accelerators", .{
@@ -437,7 +442,7 @@ fn addRunStep(
     const cmd = bb.addRunArtifact(exe);
     cmd.step.dependOn(bb.getInstallStep());
     cmd.addArgs(fixed_args);
-    if (bb.args) |args| cmd.addArgs(args);
+    passthruArgs(bb, cmd);
     step.dependOn(&cmd.step);
 }
 
@@ -480,7 +485,7 @@ fn addZkevmBenchmarkSteps(b: *std.Build, runner: *std.Build.Step.Compile) void {
     cmd.step.dependOn(b.getInstallStep());
     cmd.step.dependOn(&download.step);
     cmd.addArgs(&.{ "--fixtures", b.fmt("{s}/blockchain_tests", .{dir}) });
-    if (b.args) |args| cmd.addArgs(args);
+    passthruArgs(b, cmd);
     run.dependOn(&cmd.step);
 }
 
@@ -549,9 +554,9 @@ pub fn build(b: *std.Build) void {
         "crypto-backend",
         "Crypto accelerator backend: selects the crypto implementation (default: default)",
     ) orelse CryptoBackend.default;
-    // default.zig @cImports system crypto headers and needs libc; neither exists on a
-    // freestanding target, so this combination can never build. Fail fast with an actionable
-    // message rather than a bare "header not found" three @cImports deep.
+    // default.zig needs the system crypto headers and libc; neither exists on a freestanding
+    // target, so this combination can never build. Fail fast with an actionable message
+    // rather than a bare "header not found" from translate-c.
     if (target.result.os.tag == .freestanding and crypto_backend == .default)
         std.debug.panic("freestanding targets require -Dcrypto-backend=extern (no libc/system crypto headers available)", .{});
 
@@ -856,4 +861,11 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(r2_exe);
         addRunStep(b, "r2-stateless", "Fetch and execute the latest R2 devnet batch", r2_exe, &.{});
     }
+}
+
+/// Forward `zig build <step> -- args`; Zig 0.17 moved this from `b.args` to `addPassthruArgs`.
+fn passthruArgs(b: *std.Build, cmd: *std.Build.Step.Run) void {
+    if (comptime @hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
+        cmd.addPassthruArgs();
+    } else if (b.args) |args| cmd.addArgs(args);
 }

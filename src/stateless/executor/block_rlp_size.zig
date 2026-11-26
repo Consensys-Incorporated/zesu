@@ -169,19 +169,19 @@ fn testPayload(extra_data: []const u8) input.ExecutionPayload {
 test "headerSize: Amsterdam header matches the fixture's 656-byte encoding" {
     // tests/osaka/eip7934_block_rlp_limit — block_at_rlp_size_limit_boundary,
     // whose header RLP is 656 bytes.
-    const ep = testPayload(&([_]u8{0} ** 12));
+    const ep = testPayload(&(@as([12]u8, @splat(0))));
     try std.testing.expectEqual(@as(usize, 656), headerSize(&ep, .amsterdam));
 }
 
 test "headerSize: pre-Amsterdam drops the BAL hash and slot number" {
-    const ep = testPayload(&([_]u8{0} ** 12));
+    const ep = testPayload(&(@as([12]u8, @splat(0))));
     try std.testing.expectEqual(@as(usize, 656 - HASH_SIZE - 1), headerSize(&ep, .osaka));
 }
 
 test "transactionsSize: typed transactions are wrapped, legacy inlined" {
     const typed_single_byte: []const u8 = &.{0x04};
-    const typed: []const u8 = &([_]u8{0x04} ++ [_]u8{0xaa} ** 99); // 100 bytes → 2 + 100
-    const legacy: []const u8 = &([_]u8{0xf8} ++ [_]u8{0xbb} ** 99); // 100 bytes, inlined
+    const typed: []const u8 = &([_]u8{0x04} ++ @as([99]u8, @splat(0xaa))); // 100 bytes → 2 + 100
+    const legacy: []const u8 = &([_]u8{0xf8} ++ @as([99]u8, @splat(0xbb))); // 100 bytes, inlined
     try std.testing.expectEqual(@as(usize, listSize(1 + 102 + 100)), transactionsSize(&.{ typed_single_byte, typed, legacy }));
 }
 
@@ -193,7 +193,7 @@ test "withdrawalsSize: empty list and one entry" {
 }
 
 test "compute: returns null when raw transaction bytes are unavailable" {
-    var ep = testPayload(&([_]u8{0} ** 12));
+    var ep = testPayload(&(@as([12]u8, @splat(0))));
     ep.transactions = &.{undefined};
     try std.testing.expectEqual(@as(?u64, null), compute(&ep, .amsterdam));
 }
