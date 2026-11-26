@@ -30,7 +30,7 @@ test "ADD: 5 + 3 = 8" {
     interp.stack.pushUnsafe(@as(U, 3));
     var ctx = InstructionContext{ .interpreter = &interp };
     opAdd(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 1), interp.stack.len());
     try expectEqual(@as(U, 8), interp.stack.popUnsafe());
 }
@@ -57,7 +57,7 @@ test "ADD: stack underflow" {
     var interp = Interpreter.defaultExt();
     var ctx = InstructionContext{ .interpreter = &interp };
     opAdd(&ctx);
-    try expect(!interp.bytecode.continue_execution);
+    try expect(!interp.bytecode.isNotEnd());
     try expectEqual(.stack_underflow, interp.result);
 }
 
@@ -82,7 +82,7 @@ test "SUB: 8 - 3 = 5" {
     interp.stack.pushUnsafe(@as(U, 8));
     var ctx = InstructionContext{ .interpreter = &interp };
     opSub(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 5), interp.stack.popUnsafe());
 }
 
@@ -394,7 +394,7 @@ test "EXP: 2 ^ 10 = 1024" {
     interp.stack.pushUnsafe(@as(U, 2)); // base
     var ctx = InstructionContext{ .interpreter = &interp };
     opExp(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 1024), interp.stack.popUnsafe());
 }
 
@@ -424,7 +424,7 @@ test "EXP: dynamic gas deduction (1-byte exponent)" {
     interp.stack.pushUnsafe(@as(U, 2));
     var ctx = InstructionContext{ .interpreter = &interp };
     opExp(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(u64, 950), interp.gas.remaining); // 1000 - 50
 }
 
@@ -436,7 +436,7 @@ test "EXP: out of gas (dynamic word cost)" {
     interp.stack.pushUnsafe(@as(U, 2));
     var ctx = InstructionContext{ .interpreter = &interp };
     opExp(&ctx);
-    try expect(!interp.bytecode.continue_execution);
+    try expect(!interp.bytecode.isNotEnd());
     try expectEqual(.out_of_gas, interp.result);
 }
 

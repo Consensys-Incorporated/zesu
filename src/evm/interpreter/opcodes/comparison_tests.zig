@@ -24,7 +24,7 @@ test "LT: 5 < 10" {
     interp.stack.pushUnsafe(@as(U, 5)); // left operand (top → µs[0])
     var ctx = InstructionContext{ .interpreter = &interp };
     opLt(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 1), interp.stack.popUnsafe());
 }
 

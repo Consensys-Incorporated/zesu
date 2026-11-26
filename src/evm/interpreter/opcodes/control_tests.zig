@@ -23,7 +23,7 @@ test "STOP: halts execution with .stop" {
     var interp = Interpreter.defaultExt();
     var ctx = InstructionContext{ .interpreter = &interp };
     opStop(&ctx);
-    try expect(!interp.bytecode.continue_execution);
+    try expect(!interp.bytecode.isNotEnd());
     try expectEqual(.stop, interp.result);
 }
 
@@ -33,7 +33,7 @@ test "JUMPDEST: no-op, does not halt" {
     var interp = Interpreter.defaultExt();
     var ctx = InstructionContext{ .interpreter = &interp };
     opJumpdest(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
 }
 
 // --- PC tests ---
@@ -43,7 +43,7 @@ test "PC: push program counter" {
     interp.bytecode.pc = 43; // simulate step() having advanced PC past opcode
     var ctx = InstructionContext{ .interpreter = &interp };
     opPc(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 42), interp.stack.popUnsafe()); // pc - 1
 }
 
@@ -73,7 +73,7 @@ test "GAS: push remaining gas" {
     interp.gas = Gas.new(1000);
     var ctx = InstructionContext{ .interpreter = &interp };
     opGas(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 1000), interp.stack.popUnsafe());
 }
 
@@ -97,7 +97,7 @@ test "JUMP: valid jump to JUMPDEST" {
     interp.stack.pushUnsafe(@as(U, 5));
     var ctx = InstructionContext{ .interpreter = &interp };
     opJump(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 5), interp.bytecode.pc);
 }
 
@@ -144,7 +144,7 @@ test "JUMPI: condition true => jump" {
     interp.stack.pushUnsafe(@as(U, 5)); // destination
     var ctx = InstructionContext{ .interpreter = &interp };
     opJumpi(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 5), interp.bytecode.pc);
 }
 
@@ -158,7 +158,7 @@ test "JUMPI: condition false => no jump" {
     interp.stack.pushUnsafe(@as(U, 5)); // destination (not taken)
     var ctx = InstructionContext{ .interpreter = &interp };
     opJumpi(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 10), interp.bytecode.pc); // PC unchanged
 }
 

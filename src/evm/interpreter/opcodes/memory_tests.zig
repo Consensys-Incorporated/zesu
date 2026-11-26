@@ -25,7 +25,7 @@ test "MLOAD: load from offset 0" {
     interp.stack.pushUnsafe(@as(U, 0));
     var ctx = InstructionContext{ .interpreter = &interp };
     opMload(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     // Load 32 bytes of 0x42 as big-endian U256
     var expected: U = 0;
     var i: u8 = 0;
@@ -39,7 +39,7 @@ test "MLOAD: auto-expands memory" {
     interp.stack.pushUnsafe(@as(U, 32)); // load from offset 32
     var ctx = InstructionContext{ .interpreter = &interp };
     opMload(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 64), interp.memory.size());
 }
 
@@ -81,7 +81,7 @@ test "MSTORE: store 32 bytes" {
     interp.stack.pushUnsafe(@as(U, 0)); // offset
     var ctx = InstructionContext{ .interpreter = &interp };
     opMstore(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 32), interp.memory.size());
     // Verify big-endian storage
     try expectEqual(@as(u8, 0x01), interp.memory.buffer.items[24]);
@@ -131,7 +131,7 @@ test "MSTORE8: store lowest byte" {
     interp.stack.pushUnsafe(@as(U, 10)); // offset 10
     var ctx = InstructionContext{ .interpreter = &interp };
     opMstore8(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(u8, 0x45), interp.memory.buffer.items[10]);
 }
 
@@ -162,7 +162,7 @@ test "MSIZE: empty memory = 0" {
     defer interp.memory.deinit();
     var ctx = InstructionContext{ .interpreter = &interp };
     opMsize(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 0), interp.stack.popUnsafe());
 }
 
@@ -199,7 +199,7 @@ test "MCOPY: basic copy" {
     interp.stack.pushUnsafe(@as(U, 32)); // dest
     var ctx = InstructionContext{ .interpreter = &interp };
     opMcopy(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(u8, 0xAB), interp.memory.buffer.items[32]);
     try expectEqual(@as(u8, 0xAB), interp.memory.buffer.items[63]);
 }
@@ -215,7 +215,7 @@ test "MCOPY: overlapping regions (forward)" {
     interp.stack.pushUnsafe(@as(U, 0)); // dest
     var ctx = InstructionContext{ .interpreter = &interp };
     opMcopy(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     // dest[0] should be original src[5] = 5
     try expectEqual(@as(u8, 5), interp.memory.buffer.items[0]);
 }

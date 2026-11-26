@@ -42,7 +42,7 @@ test "ADDRESS: pushes executing contract address" {
 
     environment.opAddress(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     const got = interp.stack.popUnsafe();
     try expectEqual(host_module.addressToU256(TARGET), got);
 }
@@ -53,7 +53,7 @@ test "CALLER: pushes msg.sender" {
 
     environment.opCaller(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     const got = interp.stack.popUnsafe();
     try expectEqual(host_module.addressToU256(CALLER_ADDR), got);
 }
@@ -65,7 +65,7 @@ test "CALLVALUE: pushes msg.value" {
 
     environment.opCallvalue(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 0xDEADBEEF), interp.stack.popUnsafe());
 }
 
@@ -76,7 +76,7 @@ test "CALLVALUE: zero value" {
 
     environment.opCallvalue(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 0), interp.stack.popUnsafe());
 }
 
@@ -87,7 +87,7 @@ test "CALLDATASIZE: empty calldata returns zero" {
 
     environment.opCalldatasize(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 0), interp.stack.popUnsafe());
 }
 
@@ -99,7 +99,7 @@ test "CALLDATASIZE: non-empty calldata" {
 
     environment.opCalldatasize(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 4), interp.stack.popUnsafe());
 }
 
@@ -114,7 +114,7 @@ test "CALLDATALOAD: reads 32 bytes from calldata at offset 0" {
 
     environment.opCalldataload(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     const expected: U = @as(U, 0xAB) << 248;
     try expectEqual(expected, interp.stack.popUnsafe());
 }
@@ -128,7 +128,7 @@ test "CALLDATALOAD: offset beyond calldata returns zero" {
 
     environment.opCalldataload(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 0), interp.stack.popUnsafe());
 }
 
@@ -142,7 +142,7 @@ test "CALLDATALOAD: partial calldata pads with zeros" {
 
     environment.opCalldataload(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     const expected: U = (@as(U, 0x01) << 248) | (@as(U, 0x02) << 240) |
         (@as(U, 0x03) << 232) | (@as(U, 0x04) << 224);
     try expectEqual(expected, interp.stack.popUnsafe());
@@ -163,7 +163,7 @@ test "COINBASE: pushes block beneficiary" {
 
     environment.opCoinbase(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(host_module.addressToU256(COINBASE_ADDR), interp.stack.popUnsafe());
 }
 
@@ -178,7 +178,7 @@ test "TIMESTAMP: pushes block timestamp" {
 
     environment.opTimestamp(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 1_700_000_000), interp.stack.popUnsafe());
 }
 
@@ -193,7 +193,7 @@ test "NUMBER: pushes block number" {
 
     environment.opNumber(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 19_000_000), interp.stack.popUnsafe());
 }
 
@@ -208,7 +208,7 @@ test "GASLIMIT: pushes block gas limit" {
 
     environment.opGaslimit(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 30_000_000), interp.stack.popUnsafe());
 }
 
@@ -223,7 +223,7 @@ test "BASEFEE: pushes block base fee" {
 
     environment.opBasefee(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 7), interp.stack.popUnsafe());
 }
 
@@ -238,7 +238,7 @@ test "CHAINID: pushes chain id" {
 
     environment.opChainid(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 137), interp.stack.popUnsafe());
 }
 
@@ -253,7 +253,7 @@ test "ORIGIN: pushes transaction origin" {
 
     environment.opOrigin(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(host_module.addressToU256(ORIGIN_ADDR), interp.stack.popUnsafe());
 }
 
@@ -269,7 +269,7 @@ test "GASPRICE: pushes effective gas price for legacy transaction" {
 
     environment.opGasprice(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 20_000_000_000), interp.stack.popUnsafe());
 }
 
@@ -291,7 +291,7 @@ test "DIFFICULTY: pre-merge returns block difficulty" {
 
     environment.opDifficulty(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 0xDEAD), interp.stack.popUnsafe());
 }
 
@@ -309,7 +309,7 @@ test "DIFFICULTY: post-merge with prevrandao returns randao value" {
 
     environment.opDifficulty(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(host_module.hashToU256(RANDAO), interp.stack.popUnsafe());
 }
 
@@ -325,6 +325,6 @@ test "DIFFICULTY: post-merge without prevrandao falls back to difficulty field" 
 
     environment.opDifficulty(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 0xABCD), interp.stack.popUnsafe());
 }

@@ -26,7 +26,7 @@ test "AND: basic" {
     interp.stack.pushUnsafe(@as(U, 0x0F));
     var ctx = InstructionContext{ .interpreter = &interp };
     opAnd(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 0x0F), interp.stack.popUnsafe());
 }
 
