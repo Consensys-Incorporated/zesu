@@ -205,7 +205,7 @@ pub const calcLinearCost = T.calcLinearCost;
 
 /// Convert u64 to address
 pub fn u64ToAddress(value: u64) primitives.Address {
-    var address: primitives.Address = [_]u8{0} ** 20;
+    var address: primitives.Address = @splat(0);
     std.mem.writeInt(u64, address[12..20], value, .big);
     return address;
 }
@@ -229,9 +229,9 @@ pub const Precompiles = struct {
         return Precompiles{
             .inner = std.HashMap(primitives.Address, Precompile, primitives.AddressContext, 80).init(alloc_mod.get()),
             .addresses = std.HashMap(primitives.Address, void, primitives.AddressContext, 80).init(alloc_mod.get()),
-            .optimized_access = [_]?Precompile{null} ** 256,
+            .optimized_access = @splat(null),
             .all_short_addresses = true,
-            .precompile_bitset = .{0} ** 5,
+            .precompile_bitset = @splat(0),
         };
     }
 
@@ -417,7 +417,7 @@ pub const testing = struct {
 
     fn testSecp256k1() !void {
         // Test with invalid input (should return empty result)
-        const invalid_input = [_]u8{0} ** 128;
+        const invalid_input: [128]u8 = @splat(0);
         const result = impls.ecrecover(&invalid_input, 10000);
         switch (result) {
             .success => |output| {

@@ -1,9 +1,6 @@
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("secp256k1.h");
-    @cInclude("secp256k1_recovery.h");
-});
+const c = @import("c_headers");
 
 /// Wrapper for secp256k1 ECDSA signature recovery
 pub const Secp256k1 = struct {

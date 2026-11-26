@@ -26,7 +26,7 @@ pub const OSAKA = main.Precompile.new(
 
 /// Right pad input to specified length
 fn rightPad(comptime len: usize, input: []const u8) [len]u8 {
-    var output: [len]u8 = [_]u8{0} ** len;
+    var output: [len]u8 = @splat(0);
     const copy_len = @min(input.len, len);
     std.mem.copyForwards(u8, output[0..copy_len], input[0..copy_len]);
     return output;
@@ -157,7 +157,7 @@ fn runInner(
     const HEADER_LENGTH: usize = 96;
 
     // Input shorter than the header is zero-extended, never an error.
-    var header: [HEADER_LENGTH]u8 = [_]u8{0} ** HEADER_LENGTH;
+    var header: [HEADER_LENGTH]u8 = @splat(0);
     const header_copy = @min(input.len, HEADER_LENGTH);
     @memcpy(header[0..header_copy], input[0..header_copy]);
 
@@ -187,7 +187,7 @@ fn runInner(
     const exp_start = std.math.add(usize, data_start, base_len) catch
         return main.PrecompileResult{ .err = main.PrecompileError.OutOfGas };
 
-    var exp_highp_bytes: [32]u8 = [_]u8{0} ** 32;
+    var exp_highp_bytes: [32]u8 = @splat(0);
     if (input.len > exp_start) {
         const available = @min(exp_highp_len, input.len - exp_start);
         // Right-align the exp_highp_len-byte value; bytes past the end of input stay zero.

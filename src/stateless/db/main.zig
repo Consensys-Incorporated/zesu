@@ -208,7 +208,7 @@ pub const WitnessDatabase = struct {
             // Detect EIP-7702 delegation pointer: 0xEF 0x01 0x00 + 20-byte address (23 bytes total).
             // Must return Bytecode.eip7702 so that setupCall detects it and loads the delegation target.
             if (code_bytes.len == 23 and code_bytes[0] == 0xEF and code_bytes[1] == 0x01 and code_bytes[2] == 0x00) {
-                var delegation_addr: primitives.Address = [_]u8{0} ** 20;
+                var delegation_addr: primitives.Address = @splat(0);
                 @memcpy(&delegation_addr, code_bytes[3..23]);
                 return bytecode.Bytecode{ .eip7702 = bytecode.Eip7702Bytecode.new(delegation_addr) };
             }

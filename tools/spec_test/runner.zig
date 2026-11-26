@@ -38,10 +38,10 @@ fn stripHex(s: []const u8) []const u8 {
 
 fn hexToAddr(hex: []const u8) !input_mod.Address {
     const src = stripHex(hex);
-    var addr: input_mod.Address = [_]u8{0} ** 20;
+    var addr: input_mod.Address = @splat(0);
     if (src.len == 0) return addr;
     if (src.len > 40) return error.InvalidAddress;
-    var padded: [40]u8 = [_]u8{'0'} ** 40;
+    var padded: [40]u8 = @splat('0');
     @memcpy(padded[40 - src.len ..], src);
     _ = try std.fmt.hexToBytes(&addr, &padded);
     return addr;
@@ -49,10 +49,10 @@ fn hexToAddr(hex: []const u8) !input_mod.Address {
 
 fn hexToHash(hex: []const u8) !input_mod.Hash {
     const src = stripHex(hex);
-    var h: input_mod.Hash = [_]u8{0} ** 32;
+    var h: input_mod.Hash = @splat(0);
     if (src.len == 0) return h;
     if (src.len > 64) return error.InvalidHash;
-    var padded: [64]u8 = [_]u8{'0'} ** 64;
+    var padded: [64]u8 = @splat('0');
     @memcpy(padded[64 - src.len ..], src);
     _ = try std.fmt.hexToBytes(&h, &padded);
     return h;
@@ -213,16 +213,16 @@ fn buildTx(
                 if (al_item != .object) continue;
                 const alo = al_item.object;
                 const entry_addr = if (alo.get("address")) |av|
-                    hexToAddr(jStr(av) orelse "") catch [_]u8{0} ** 20
+                    hexToAddr(jStr(av) orelse "") catch @as([20]u8, @splat(0))
                 else
-                    [_]u8{0} ** 20;
+                    @as([20]u8, @splat(0));
 
                 var keys = std.ArrayListUnmanaged(input_mod.Hash).empty;
                 if (alo.get("storageKeys")) |skv| {
                     if (skv == .array) {
                         for (skv.array.items) |sk_item| {
                             if (jStr(sk_item)) |s| {
-                                try keys.append(alloc, hexToHash(s) catch [_]u8{0} ** 32);
+                                try keys.append(alloc, hexToHash(s) catch @as([32]u8, @splat(0)));
                             }
                         }
                     }
@@ -242,7 +242,7 @@ fn buildTx(
             var hashes = std.ArrayListUnmanaged(input_mod.Hash).empty;
             for (bvhv.array.items) |h_item| {
                 if (jStr(h_item)) |s| {
-                    try hashes.append(alloc, hexToHash(s) catch [_]u8{0} ** 32);
+                    try hashes.append(alloc, hexToHash(s) catch @as([32]u8, @splat(0)));
                 }
             }
             tx.blob_versioned_hashes = try hashes.toOwnedSlice(alloc);
@@ -261,7 +261,7 @@ fn buildTx(
                 const obj = item.object;
                 var ai = input_mod.AuthorizationItem{};
                 if (obj.get("chainId")) |v| ai.chain_id = hexToU256(jStr(v) orelse "0") catch 0;
-                if (obj.get("address")) |v| ai.address = hexToAddr(jStr(v) orelse "") catch [_]u8{0} ** 20;
+                if (obj.get("address")) |v| ai.address = hexToAddr(jStr(v) orelse "") catch @as([20]u8, @splat(0));
                 if (obj.get("nonce")) |v| ai.nonce = hexToU64(jStr(v) orelse "0") catch 0;
                 if (obj.get("signer")) |v| ai.signer = hexToAddr(jStr(v) orelse "") catch null;
                 // EIP-7702 requires low-S: if s > N/2, the authorization is invalid (signer=None).
@@ -507,8 +507,8 @@ pub fn runFixture(
                     continue;
                 };
 
-                const got_state = output_mod.computeStateRoot(ca, result.alloc, &.{}) catch [_]u8{0} ** 32;
-                const got_logs = output_mod.computeLogsHash(ca, result.receipts) catch [_]u8{0} ** 32;
+                const got_state = output_mod.computeStateRoot(ca, result.alloc, &.{}) catch @as([32]u8, @splat(0));
+                const got_logs = output_mod.computeLogsHash(ca, result.receipts) catch @as([32]u8, @splat(0));
 
                 if (expect_exception) {
                     stats.failed += 1;

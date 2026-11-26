@@ -61,7 +61,7 @@ test "floor gas: zero for empty calldata on Prague" {
 // -------------------------------------------------------------------------
 
 test "validateAgainstStateAndDeductCaller: deducts gas_fee and bumps nonce" {
-    const caller: primitives.Address = [_]u8{0xAA} ** 20;
+    const caller: primitives.Address = @splat(0xAA);
     const initial_balance: primitives.U256 = 1_000_000_000_000_000_000; // 1 ETH
 
     var db = database.InMemoryDB.init(std.heap.c_allocator);
@@ -96,7 +96,7 @@ test "validateAgainstStateAndDeductCaller: deducts gas_fee and bumps nonce" {
 }
 
 test "validateAgainstStateAndDeductCaller: insufficient balance returns error" {
-    const caller: primitives.Address = [_]u8{0xBB} ** 20;
+    const caller: primitives.Address = @splat(0xBB);
 
     var db = database.InMemoryDB.init(std.heap.c_allocator);
     defer db.deinit();
@@ -121,7 +121,7 @@ test "validateAgainstStateAndDeductCaller: insufficient balance returns error" {
 }
 
 test "validateAgainstStateAndDeductCaller: nonce mismatch returns error" {
-    const caller: primitives.Address = [_]u8{0xCC} ** 20;
+    const caller: primitives.Address = @splat(0xCC);
 
     var db = database.InMemoryDB.init(std.heap.c_allocator);
     defer db.deinit();
@@ -146,12 +146,12 @@ test "validateAgainstStateAndDeductCaller: nonce mismatch returns error" {
 }
 
 test "validateAgainstStateAndDeductCaller: EIP-3607 rejects account with code" {
-    const caller: primitives.Address = [_]u8{0xDD} ** 20;
+    const caller: primitives.Address = @splat(0xDD);
 
     var db = database.InMemoryDB.init(std.heap.c_allocator);
     defer db.deinit();
     // Give caller a non-empty code_hash (simulating deployed code)
-    const fake_code_hash = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF } ++ [_]u8{0} ** 28;
+    const fake_code_hash = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF } ++ @as([28]u8, @splat(0));
     try db.insertAccount(caller, state.AccountInfo{
         .balance = 1_000_000_000_000_000_000,
         .nonce = 0,

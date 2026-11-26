@@ -23,7 +23,7 @@ const build_options = @import("build_options");
 // consumers that hash from several threads build with -Dkeccak-memo=false, which
 // compiles the memo out. kmemo_len 0 = empty slot.
 const KMEMO_LEN = 1 << 14; // 16384 buckets
-var kmemo_len = [_]u8{0} ** KMEMO_LEN;
+var kmemo_len: [KMEMO_LEN]u8 = @splat(0);
 var kmemo_key: [KMEMO_LEN][32]u8 = undefined;
 var kmemo_val: [KMEMO_LEN][32]u8 = undefined;
 

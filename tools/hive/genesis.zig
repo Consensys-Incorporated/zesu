@@ -134,10 +134,10 @@ pub fn parse(
     const gas_limit = jsonU64(root.get("gasLimit") orelse .{ .integer = 0x1388 }) catch 0x1388;
     const difficulty = jsonU256(root.get("difficulty") orelse .{ .integer = 0 }) catch 0;
     const coinbase = hexToAddr(strVal(root, "coinbase") orelse
-        "0x0000000000000000000000000000000000000000") catch [_]u8{0} ** 20;
+        "0x0000000000000000000000000000000000000000") catch @as([20]u8, @splat(0));
     const extra_data = hexToSlice(arena, strVal(root, "extraData") orelse "0x") catch &.{};
     const mix_hash = hexToHash(strVal(root, "mixHash") orelse
-        "0x0000000000000000000000000000000000000000000000000000000000000000") catch [_]u8{0} ** 32;
+        "0x0000000000000000000000000000000000000000000000000000000000000000") catch @as([32]u8, @splat(0));
 
     // nonce: always 8 bytes big-endian
     const nonce_val = jsonU64(root.get("nonce") orelse .{ .integer = 0 }) catch 0;
@@ -168,11 +168,11 @@ pub fn parse(
     else
         null;
     const parent_beacon_block_root: ?Hash = if (primitives.isEnabledIn(spec, .cancun)) blk: {
-        const v = root.get("parentBeaconBlockRoot") orelse break :blk [_]u8{0} ** 32;
+        const v = root.get("parentBeaconBlockRoot") orelse break :blk @as([32]u8, @splat(0));
         break :blk hexToHash(switch (v) {
             .string => |s| s,
-            else => break :blk [_]u8{0} ** 32,
-        }) catch [_]u8{0} ** 32;
+            else => break :blk @as([32]u8, @splat(0)),
+        }) catch @as([32]u8, @splat(0));
     } else null;
 
     // Prague+: requestsHash
@@ -208,13 +208,13 @@ pub fn parse(
 
     // ── Compute genesis block hash ────────────────────────────────────────────
     const genesis_hash = try computeBlockHash(arena, .{
-        .parent_hash = [_]u8{0} ** 32,
+        .parent_hash = @splat(0),
         .uncle_hash = EMPTY_UNCLE_HASH,
         .coinbase = coinbase,
         .state_root = state_root,
         .txs_root = EMPTY_TRIE_HASH,
         .receipts_root = EMPTY_TRIE_HASH,
-        .logs_bloom = [_]u8{0} ** 256,
+        .logs_bloom = @splat(0),
         .difficulty = difficulty,
         .number = 0,
         .gas_limit = gas_limit,
@@ -318,7 +318,7 @@ fn hexToSlice(arena: std.mem.Allocator, hex: []const u8) ![]u8 {
 
 fn hexToAddr(hex: []const u8) ![20]u8 {
     const s = stripHex(hex);
-    var padded: [40]u8 = [_]u8{'0'} ** 40;
+    var padded: [40]u8 = @splat('0');
     if (s.len > 40) return error.InvalidAddress;
     @memcpy(padded[40 - s.len ..], s);
     var out: [20]u8 = undefined;
@@ -328,7 +328,7 @@ fn hexToAddr(hex: []const u8) ![20]u8 {
 
 fn hexToHash(hex: []const u8) ![32]u8 {
     const s = stripHex(hex);
-    var padded: [64]u8 = [_]u8{'0'} ** 64;
+    var padded: [64]u8 = @splat('0');
     if (s.len > 64) return error.InvalidHash;
     @memcpy(padded[64 - s.len ..], s);
     var out: [32]u8 = undefined;

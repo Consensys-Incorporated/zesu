@@ -192,7 +192,7 @@ pub fn modU256(a: primitives.U256, b: primitives.U256) primitives.U256 {
 inline fn limbShr(a: [4]u64, sh: usize) [4]u64 {
     const w = sh >> 6;
     const s: u6 = @truncate(sh);
-    var r = [_]u64{0} ** 4;
+    var r: [4]u64 = @splat(0);
     for (0..4) |i| {
         if (i + w >= 4) break;
         r[i] = a[i + w] >> s;
@@ -205,7 +205,7 @@ inline fn limbShr(a: [4]u64, sh: usize) [4]u64 {
 inline fn limbLowBits(a: [4]u64, sh: usize) [4]u64 {
     const w = sh >> 6;
     const s: u6 = @truncate(sh);
-    var r = [_]u64{0} ** 4;
+    var r: [4]u64 = @splat(0);
     for (0..4) |i| {
         if (i < w) {
             r[i] = a[i];
@@ -368,7 +368,7 @@ pub inline fn limbLessThan(a: [4]u64, b: [4]u64) bool {
 pub fn mulFull(a: primitives.U256, b: primitives.U256) [8]u64 {
     const al = toLimbs(a);
     const bl = toLimbs(b);
-    var result = [_]u64{0} ** 8;
+    var result: [8]u64 = @splat(0);
 
     inline for (0..4) |i| {
         var carry: u128 = 0;
@@ -395,7 +395,7 @@ pub inline fn limbMod(comptime M: comptime_int, a: [M]u64, b: [4]u64) [4]u64 {
             break;
         }
     }
-    if (n == 0) return [_]u64{0} ** 4; // divisor is zero
+    if (n == 0) return @as([4]u64, @splat(0)); // divisor is zero
 
     // Power-of-two divisor: the remainder is the low k bits of the dividend,
     // whatever M is (see `limbDivMod`).
@@ -425,7 +425,7 @@ pub inline fn limbMod(comptime M: comptime_int, a: [M]u64, b: [4]u64) [4]u64 {
         const d_norm = d << shift;
 
         // Shift entire dividend by `shift` bits
-        var u_shifted: [M + 1]u64 = [_]u64{0} ** (M + 1);
+        var u_shifted: [M + 1]u64 = @splat(0);
         if (shift == 0) {
             for (0..M) |i| u_shifted[i] = a[i];
         } else {
@@ -470,7 +470,7 @@ inline fn knuthMod(comptime M: comptime_int, comptime N: comptime_int, a: [M]u64
     const shift: u6 = @intCast(@clz(b[n - 1]));
 
     // Shift divisor
-    var v = [_]u64{0} ** 4;
+    var v: [4]u64 = @splat(0);
     if (shift == 0) {
         for (0..n) |i| v[i] = b[i];
     } else {
@@ -482,7 +482,7 @@ inline fn knuthMod(comptime M: comptime_int, comptime N: comptime_int, a: [M]u64
     }
 
     // Shift dividend (need M+1 limbs for overflow)
-    var u: [M + 1]u64 = [_]u64{0} ** (M + 1);
+    var u: [M + 1]u64 = @splat(0);
     if (shift == 0) {
         for (0..M) |i| u[i] = a[i];
     } else {
@@ -565,7 +565,7 @@ inline fn knuthMod(comptime M: comptime_int, comptime N: comptime_int, a: [M]u64
     }
 
     // Denormalize remainder
-    var r_limbs = [_]u64{0} ** 4;
+    var r_limbs: [4]u64 = @splat(0);
     if (shift == 0) {
         for (0..n) |i| r_limbs[i] = u[i];
     } else {
@@ -590,7 +590,7 @@ pub const QuotRem = struct { q: [4]u64, r: [4]u64 };
 /// limbs stay in registers and the divisor classification folds against the
 /// caller's operands.
 pub inline fn limbDivMod(a: [4]u64, b: [4]u64) QuotRem {
-    const zero = [_]u64{0} ** 4;
+    const zero: [4]u64 = @splat(0);
 
     var n: usize = 0;
     for (0..4) |i| {
@@ -631,7 +631,7 @@ pub inline fn limbDivMod(a: [4]u64, b: [4]u64) QuotRem {
         const shift: u6 = @intCast(@clz(d));
         const d_norm = d << shift;
 
-        var u_shifted: [5]u64 = [_]u64{0} ** 5;
+        var u_shifted: [5]u64 = @splat(0);
         if (shift == 0) {
             for (0..4) |i| u_shifted[i] = a[i];
         } else {
@@ -665,11 +665,11 @@ pub inline fn limbDivMod(a: [4]u64, b: [4]u64) QuotRem {
 
 /// The Knuth Algorithm D core of `limbDivMod` for an N-limb divisor (2 <= N <= 4).
 inline fn knuthDivMod(comptime N: comptime_int, a: [4]u64, b: [4]u64) QuotRem {
-    const zero = [_]u64{0} ** 4;
+    const zero: [4]u64 = @splat(0);
     const n = N;
     const shift: u6 = @intCast(@clz(b[n - 1]));
 
-    var v = [_]u64{0} ** 4;
+    var v: [4]u64 = @splat(0);
     if (shift == 0) {
         for (0..n) |i| v[i] = b[i];
     } else {
@@ -680,7 +680,7 @@ inline fn knuthDivMod(comptime N: comptime_int, a: [4]u64, b: [4]u64) QuotRem {
         }
     }
 
-    var u: [5]u64 = [_]u64{0} ** 5;
+    var u: [5]u64 = @splat(0);
     if (shift == 0) {
         for (0..4) |i| u[i] = a[i];
     } else {

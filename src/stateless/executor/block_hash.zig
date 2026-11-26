@@ -39,7 +39,7 @@ pub fn validate(
     try fields.append(alloc, try rlp.encodeU64(alloc, ep.timestamp)); // [11]
     try fields.append(alloc, try rlp.encodeBytes(alloc, ep.extra_data)); // [12]
     try fields.append(alloc, try rlp.encodeBytes(alloc, &ep.prev_randao)); // [13]
-    try fields.append(alloc, try rlp.encodeBytes(alloc, &[_]u8{0} ** 8)); // [14] nonce
+    try fields.append(alloc, try rlp.encodeBytes(alloc, &@as([8]u8, @splat(0)))); // [14] nonce
     if (primitives.isEnabledIn(spec, .london)) {
         try fields.append(alloc, try rlp.encodeU64(alloc, ep.base_fee_per_gas)); // [15]
     }

@@ -16,19 +16,19 @@ const ALLOC = std.heap.c_allocator;
 // Helpers
 // ---------------------------------------------------------------------------
 
-const CALLER: primitives.Address = [_]u8{0xAA} ** 20;
-const COINBASE: primitives.Address = [_]u8{0xCB} ** 20;
+const CALLER: primitives.Address = @splat(0xAA);
+const COINBASE: primitives.Address = @splat(0xCB);
 
 /// Address of the IDENTITY precompile (0x04)
 const IDENTITY_ADDR: primitives.Address = blk: {
-    var a = [_]u8{0} ** 20;
+    var a: [20]u8 = @splat(0);
     a[19] = 0x04;
     break :blk a;
 };
 
 /// Address of the SHA256 precompile (0x02)
 const SHA256_ADDR: primitives.Address = blk: {
-    var a = [_]u8{0} ** 20;
+    var a: [20]u8 = @splat(0);
     a[19] = 0x02;
     break :blk a;
 };

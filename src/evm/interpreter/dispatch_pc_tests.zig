@@ -136,8 +136,8 @@ test "inlined env arm: every fork's table still charges G_BASE and runs the shar
 
 fn newEnvInterp(code: []const u8, spec: primitives.SpecId, gas_limit: u64, data: []u8) Interpreter {
     const input = InputsImpl.new(
-        [_]u8{0xAA} ** 20,
-        [_]u8{0xBB} ** 20,
+        @as([20]u8, @splat(0xAA)),
+        @as([20]u8, @splat(0xBB)),
         0x1234,
         data,
         gas_limit,
@@ -188,7 +188,7 @@ test "inlined env arm: dispatch matches the table path on every fork" {
 }
 
 test "inlined env arm: out of gas and stack overflow match the table path" {
-    var flood = [_]u8{0} ** 1025;
+    var flood: [1025]u8 = @splat(0);
     for (env_ops) |e| {
         errdefer std.debug.print("opcode 0x{x:0>2}\n", .{e.op});
         // One unit short of G_BASE.

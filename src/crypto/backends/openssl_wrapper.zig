@@ -1,11 +1,6 @@
 //! OpenSSL wrapper for secp256r1 (P-256) signature verification
 const std = @import("std");
-const c = @cImport({
-    @cInclude("openssl/ec.h");
-    @cInclude("openssl/ecdsa.h");
-    @cInclude("openssl/evp.h");
-    @cInclude("openssl/obj_mac.h");
-});
+const c = @import("c_headers");
 
 /// P-256 (secp256r1) field prime p = 2^256 - 2^224 + 2^192 + 2^96 - 1
 const P256_FIELD_PRIME: [32]u8 = .{

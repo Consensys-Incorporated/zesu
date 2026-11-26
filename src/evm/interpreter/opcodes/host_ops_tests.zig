@@ -22,9 +22,9 @@ const U = primitives.U256;
 const ALLOC = std.heap.page_allocator;
 
 /// Test contract address (interpreter target / msg.this)
-const TARGET: primitives.Address = [_]u8{0xAA} ** 20;
+const TARGET: primitives.Address = @splat(0xAA);
 /// External address for balance / extcode tests
-const OTHER: primitives.Address = [_]u8{0xCC} ** 20;
+const OTHER: primitives.Address = @splat(0xCC);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -507,7 +507,7 @@ test "EXTCODEHASH: no host halts with invalid_opcode" {
 
 test "BLOCKHASH: known block returns hash" {
     const BLOCK_NUM: u64 = 100;
-    const HASH: primitives.Hash = [_]u8{0xAB} ** 32;
+    const HASH: primitives.Hash = @splat(0xAB);
 
     var db = database_mod.InMemoryDB.init(ALLOC);
     try db.insertBlockHash(BLOCK_NUM, HASH);
@@ -581,7 +581,7 @@ test "LOG0: emits log with correct address and empty data" {
 }
 
 test "LOG1: emits log with one topic" {
-    const TOPIC_HASH: primitives.Hash = [_]u8{0x55} ** 32;
+    const TOPIC_HASH: primitives.Hash = @splat(0x55);
     const TOPIC_VAL: U = host_module.hashToU256(TOPIC_HASH);
 
     const db = database_mod.InMemoryDB.init(ALLOC);
@@ -754,6 +754,6 @@ test "u256ToAddress discards bits above 160, u256ToHash round-trips extremes" {
     for ([_]U256{ 0, 1, std.math.maxInt(U256), @as(U256, 1) << 255, @as(U256, 1) << 160 }) |v| {
         try expectEqual(v, host_module.hashToU256(host_module.u256ToHash(v)));
     }
-    try expectEqual(@as(U256, 0), host_module.addressToU256([_]u8{0} ** 20));
-    try expectEqual(@as(U256, (1 << 160) - 1), host_module.addressToU256([_]u8{0xFF} ** 20));
+    try expectEqual(@as(U256, 0), host_module.addressToU256(@as([20]u8, @splat(0))));
+    try expectEqual(@as(U256, (1 << 160) - 1), host_module.addressToU256(@as([20]u8, @splat(0xFF))));
 }

@@ -16,10 +16,10 @@ const expect = std.testing.expect;
 const U = primitives.U256;
 const ALLOC = std.heap.page_allocator;
 
-const TARGET: primitives.Address = [_]u8{0xAA} ** 20;
-const CALLER_ADDR: primitives.Address = [_]u8{0xBB} ** 20;
-const COINBASE_ADDR: primitives.Address = [_]u8{0xCC} ** 20;
-const ORIGIN_ADDR: primitives.Address = [_]u8{0xDD} ** 20;
+const TARGET: primitives.Address = @splat(0xAA);
+const CALLER_ADDR: primitives.Address = @splat(0xBB);
+const COINBASE_ADDR: primitives.Address = @splat(0xCC);
+const ORIGIN_ADDR: primitives.Address = @splat(0xDD);
 
 fn makeInterp() Interpreter {
     var interp = Interpreter.defaultExt();
@@ -120,7 +120,7 @@ test "CALLDATALOAD: reads 32 bytes from calldata at offset 0" {
 }
 
 test "CALLDATALOAD: offset beyond calldata returns zero" {
-    const data = [_]u8{0xFF} ** 4;
+    const data: [4]u8 = @splat(0xFF);
     var interp = makeInterp();
     interp.input.data = @as(primitives.Bytes, @constCast(&data));
     interp.stack.pushUnsafe(100); // offset past end
@@ -296,7 +296,7 @@ test "DIFFICULTY: pre-merge returns block difficulty" {
 }
 
 test "DIFFICULTY: post-merge with prevrandao returns randao value" {
-    const RANDAO: primitives.Hash = [_]u8{0x42} ** 32;
+    const RANDAO: primitives.Hash = @splat(0x42);
     const db = database_mod.InMemoryDB.init(ALLOC);
     var ctx = makeCtx(db); // .prague spec by default (post-merge)
     ctx.block.prevrandao = RANDAO;

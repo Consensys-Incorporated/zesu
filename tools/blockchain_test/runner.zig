@@ -135,14 +135,14 @@ pub fn runFixture(
             },
         };
         const genesis_number = if (genesis_bh.get("number")) |v| json_helpers.jsonU64(v) catch 0 else 0;
-        const genesis_hash = json_helpers.hexToHash(json_helpers.getString(genesis_bh, "hash") orelse "") catch [_]u8{0} ** 32;
+        const genesis_hash = json_helpers.hexToHash(json_helpers.getString(genesis_bh, "hash") orelse "") catch @as([32]u8, @splat(0));
 
         const expected_lastblockhash = blk: {
-            const lv = test_obj.get("lastblockhash") orelse break :blk [_]u8{0} ** 32;
+            const lv = test_obj.get("lastblockhash") orelse break :blk @as([32]u8, @splat(0));
             break :blk json_helpers.hexToHash(switch (lv) {
                 .string => |s| s,
                 else => "",
-            }) catch [_]u8{0} ** 32;
+            }) catch @as([32]u8, @splat(0));
         };
 
         // Chain id and blobSchedule from config.
@@ -238,9 +238,9 @@ pub fn runFixture(
                 .object => |o| o,
                 else => continue,
             };
-            const expected_block_state_root = json_helpers.hexToHash(json_helpers.getString(bh, "stateRoot") orelse "") catch [_]u8{0} ** 32;
-            const expected_block_receipts_root = json_helpers.hexToHash(json_helpers.getString(bh, "receiptTrie") orelse "") catch [_]u8{0} ** 32;
-            const expected_block_hash = json_helpers.hexToHash(json_helpers.getString(bh, "hash") orelse "") catch [_]u8{0} ** 32;
+            const expected_block_state_root = json_helpers.hexToHash(json_helpers.getString(bh, "stateRoot") orelse "") catch @as([32]u8, @splat(0));
+            const expected_block_receipts_root = json_helpers.hexToHash(json_helpers.getString(bh, "receiptTrie") orelse "") catch @as([32]u8, @splat(0));
+            const expected_block_hash = json_helpers.hexToHash(json_helpers.getString(bh, "hash") orelse "") catch @as([32]u8, @splat(0));
             const expected_bal_hash: ?Hash = blk: {
                 const s = json_helpers.getString(bh, "blockAccessListHash") orelse break :blk null;
                 break :blk json_helpers.hexToHash(s) catch null;
@@ -492,9 +492,9 @@ fn buildEnv(
                     .index = if (wo.get("index")) |v| json_helpers.jsonU64(v) catch 0 else 0,
                     .validator_index = if (wo.get("validatorIndex")) |v| json_helpers.jsonU64(v) catch 0 else 0,
                     .address = if (wo.get("address")) |v|
-                        json_helpers.hexToAddr(json_helpers.getString2(v) orelse "") catch [_]u8{0} ** 20
+                        json_helpers.hexToAddr(json_helpers.getString2(v) orelse "") catch @as([20]u8, @splat(0))
                     else
-                        [_]u8{0} ** 20,
+                        @as([20]u8, @splat(0)),
                     .amount = if (wo.get("amount")) |v| json_helpers.jsonU64(v) catch 0 else 0,
                 });
             }

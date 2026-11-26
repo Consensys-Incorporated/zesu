@@ -32,7 +32,7 @@ pub const AccessListItem = struct {
 
     pub fn init(allocator: std.mem.Allocator) AccessListItem {
         return .{
-            .address = [_]u8{0} ** 20,
+            .address = @splat(0),
             .storage_keys = std.ArrayList(primitives.StorageKey).init(allocator),
         };
     }
@@ -147,10 +147,10 @@ pub const TxEnv = struct {
     pub fn default() TxEnv {
         return .{
             .tx_type = 0,
-            .caller = [_]u8{0} ** 20,
+            .caller = @splat(0),
             .gas_limit = primitives.TX_GAS_LIMIT_CAP,
             .gas_price = 0,
-            .kind = TxKind{ .Call = [_]u8{0} ** 20 },
+            .kind = TxKind{ .Call = @splat(0) },
             .value = @as(primitives.U256, 0),
             .data = null,
             .nonce = 0,

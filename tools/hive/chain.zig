@@ -239,16 +239,16 @@ const BlockHeader = struct {
 
 fn decodeHeader(payload: []const u8) !BlockHeader {
     var hdr = BlockHeader{
-        .parent_hash = [_]u8{0} ** 32,
-        .coinbase = [_]u8{0} ** 20,
-        .state_root = [_]u8{0} ** 32,
-        .receipts_root = [_]u8{0} ** 32,
+        .parent_hash = @splat(0),
+        .coinbase = @splat(0),
+        .state_root = @splat(0),
+        .receipts_root = @splat(0),
         .difficulty = 0,
         .number = 0,
         .gas_limit = 0,
         .gas_used = 0,
         .timestamp = 0,
-        .mix_hash = [_]u8{0} ** 32,
+        .mix_hash = @splat(0),
     };
     var rest = payload;
     var idx: usize = 0;
@@ -430,13 +430,13 @@ fn toU256(b: []const u8) u256 {
 }
 
 fn toHash(b: []const u8) Hash {
-    var h: Hash = [_]u8{0} ** 32;
+    var h: Hash = @splat(0);
     if (b.len <= 32) @memcpy(h[32 - b.len ..], b);
     return h;
 }
 
 fn toAddr(b: []const u8) Address {
-    var a: Address = [_]u8{0} ** 20;
+    var a: Address = @splat(0);
     if (b.len <= 20) @memcpy(a[20 - b.len ..], b);
     return a;
 }

@@ -4,9 +4,7 @@
 const std = @import("std");
 const alloc_mod = @import("zesu_allocator");
 
-const c = @cImport({
-    @cInclude("blst.h");
-});
+const c = @import("c_headers");
 
 /// BLS12-381 field prime p (big-endian, 48 bytes):
 /// p = 0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab
@@ -29,7 +27,7 @@ fn isFpCanonical(bytes: *const [48]u8) bool {
 /// Treats all-zero bytes as the point at infinity (valid).
 fn parseG1Affine(bytes: [96]u8, affine: *c.blst_p1_affine) !bool {
     // All-zero bytes = point at infinity (identity element)
-    const zero96 = [_]u8{0} ** 96;
+    const zero96: [96]u8 = @splat(0);
     if (std.mem.eql(u8, &bytes, &zero96)) return true; // is_infinity
 
     // EIP-2537: field elements must be canonical (0 <= x < p)
@@ -61,7 +59,7 @@ pub fn g1Add(a: [96]u8, b: [96]u8) ![96]u8 {
     const b_is_inf = try parseG1Affine(b, &p2_affine);
 
     // Handle infinity (identity element): infinity + P = P
-    if (a_is_inf and b_is_inf) return [_]u8{0} ** 96;
+    if (a_is_inf and b_is_inf) return @as([96]u8, @splat(0));
     if (a_is_inf) {
         var output: [96]u8 = undefined;
         c.blst_bendian_from_fp(output[0..48], &p2_affine.x);
@@ -106,7 +104,7 @@ pub fn g1Msm(pairs: []const G1MsmPair) ![96]u8 {
         return error.InvalidInput;
     }
 
-    const zero96 = [_]u8{0} ** 96;
+    const zero96: [96]u8 = @splat(0);
 
     // Parse points and scalars, filtering out infinity points (they contribute identity)
     var points = try alloc_mod.get().alloc(c.blst_p1_affine, pairs.len);
@@ -151,7 +149,7 @@ pub fn g1Msm(pairs: []const G1MsmPair) ![96]u8 {
     }
 
     // If all points were infinity, result is infinity
-    if (active_count == 0) return [_]u8{0} ** 96;
+    if (active_count == 0) return @as([96]u8, @splat(0));
 
     const scratch_size = c.blst_p1s_mult_pippenger_scratch_sizeof(active_count);
     const alloc_size = if (scratch_size == 0) @as(usize, 8) else scratch_size;
@@ -176,7 +174,7 @@ pub fn g1Msm(pairs: []const G1MsmPair) ![96]u8 {
 /// EIP-2537 G2 input: [Fp2.fp[0] (48B) || Fp2.fp[1] (48B)] for each of x and y.
 /// blst blst_fp2: fp[0] and fp[1] map directly to the input bytes (direct mapping, no swap).
 fn parseG2Affine(bytes: [192]u8, affine: *c.blst_p2_affine) !bool {
-    const zero192 = [_]u8{0} ** 192;
+    const zero192: [192]u8 = @splat(0);
     if (std.mem.eql(u8, &bytes, &zero192)) return true; // is_infinity
 
     // EIP-2537: all four Fp components of Fp2 must be canonical (0 <= x < p)
@@ -210,7 +208,7 @@ pub fn g2Add(a: [192]u8, b: [192]u8) ![192]u8 {
     const b_is_inf = try parseG2Affine(b, &p2_affine);
 
     // Handle infinity (identity element)
-    if (a_is_inf and b_is_inf) return [_]u8{0} ** 192;
+    if (a_is_inf and b_is_inf) return @as([192]u8, @splat(0));
     if (a_is_inf) {
         var output: [192]u8 = undefined;
         c.blst_bendian_from_fp(output[0..48], &p2_affine.x.fp[0]);
@@ -257,7 +255,7 @@ pub fn g2Msm(pairs: []const G2MsmPair) ![192]u8 {
         return error.InvalidInput;
     }
 
-    const zero192 = [_]u8{0} ** 192;
+    const zero192: [192]u8 = @splat(0);
 
     var points = try alloc_mod.get().alloc(c.blst_p2_affine, pairs.len);
     defer alloc_mod.get().free(points);
@@ -301,7 +299,7 @@ pub fn g2Msm(pairs: []const G2MsmPair) ![192]u8 {
         active_count += 1;
     }
 
-    if (active_count == 0) return [_]u8{0} ** 192;
+    if (active_count == 0) return @as([192]u8, @splat(0));
 
     const scratch_size = c.blst_p2s_mult_pippenger_scratch_sizeof(active_count);
     const alloc_size = if (scratch_size == 0) @as(usize, 8) else scratch_size;
@@ -333,8 +331,8 @@ pub fn pairingCheck(pairs: []const PairingPair) !bool {
         return true; // Empty pairing is valid (product of no terms = 1)
     }
 
-    const zero96 = [_]u8{0} ** 96;
-    const zero192 = [_]u8{0} ** 192;
+    const zero96: [96]u8 = @splat(0);
+    const zero192: [192]u8 = @splat(0);
 
     // Parse valid (non-infinity) pairs
     var g1_points = try alloc_mod.get().alloc(c.blst_p1_affine, pairs.len);

@@ -124,7 +124,7 @@ pub const AccountInfo = struct {
     /// EIP-161 empty: zero balance, zero nonce, and code_hash KECCAK_EMPTY or all-zero
     /// (uninitialized). The all-zero test must compare the full hash, not just byte 0.
     pub fn isEmpty(self: Self) bool {
-        const zero_hash = [_]u8{0} ** 32;
+        const zero_hash: [32]u8 = @splat(0);
         const code_empty = self.isEmptyCodeHash() or std.mem.eql(u8, &self.code_hash, &zero_hash);
         return code_empty and self.balance == 0 and self.nonce == 0;
     }

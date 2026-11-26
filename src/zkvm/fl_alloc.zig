@@ -15,7 +15,7 @@ const min_class_bits: usize = 3; // log2(8)
 const num_classes: usize = 29;
 
 /// Intrusive free-list heads, one per size class (0 == empty).
-var free_lists: [num_classes]usize = [_]usize{0} ** num_classes;
+var free_lists: [num_classes]usize = @splat(0);
 
 /// Ceiling log2 of x, returned as usize.  Requires x > 0.
 inline fn ceilLog2(x: usize) usize {

@@ -19,7 +19,7 @@ const min_class_bits: usize = 3; // log2(8)
 const num_classes: usize = 22;
 
 /// Intrusive free-list heads, one per size class (0 == empty).
-var free_lists: [num_classes]usize = [_]usize{0} ** num_classes;
+var free_lists: [num_classes]usize = @splat(0);
 
 /// Size class for `size` bytes alone (ignoring alignment), i.e.
 /// ceilLog2(size) - min_class_bits clamped to >= 0, computed without @clz

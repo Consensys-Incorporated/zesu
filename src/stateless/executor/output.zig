@@ -177,7 +177,7 @@ pub fn sortChanges(alloc: std.mem.Allocator, changes: []mpt.BatchChange) ![]mpt.
         std.sort.insertion(mpt.BatchChange, changes, {}, changeKeyLessThan);
         return changes;
     }
-    var start = [_]u32{0} ** 257;
+    var start: [257]u32 = @splat(0);
     for (changes) |*c| start[@as(usize, c.key[0]) + 1] += 1;
     for (1..257) |i| start[i] += start[i - 1];
     const sorted = try alloc.alloc(mpt.BatchChange, changes.len);

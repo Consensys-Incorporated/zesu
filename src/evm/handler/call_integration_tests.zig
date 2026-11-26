@@ -19,9 +19,9 @@ const ALLOC = std.heap.c_allocator;
 // Helpers
 // ---------------------------------------------------------------------------
 
-const CALLER: primitives.Address = [_]u8{0xAA} ** 20;
-const CALLEE: primitives.Address = [_]u8{0xBB} ** 20;
-const COINBASE: primitives.Address = [_]u8{0xCB} ** 20;
+const CALLER: primitives.Address = @splat(0xAA);
+const CALLEE: primitives.Address = @splat(0xBB);
+const COINBASE: primitives.Address = @splat(0xCB);
 
 fn insertEoa(db: *database.InMemoryDB, addr: primitives.Address, balance: primitives.U256, nonce: u64) !void {
     try db.insertAccount(addr, state.AccountInfo{

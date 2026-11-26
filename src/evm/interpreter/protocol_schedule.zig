@@ -48,7 +48,7 @@ pub fn makeInstructionTable(spec: primitives.SpecId) InstructionTable {
 }
 
 fn makeFrontierTable() InstructionTable {
-    var table = [_]InstructionEntry{InstructionEntry.unknown()} ** 256;
+    var table: [256]InstructionEntry = @splat(InstructionEntry.unknown());
 
     // System
     table[bytecode_mod.STOP] = entry(opcodes.opStop, gas_costs.G_ZERO);

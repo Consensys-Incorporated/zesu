@@ -34,7 +34,7 @@ pub const testing = struct {
 
         var block_env = BlockEnv.default();
         std.debug.assert(block_env.number == @as(primitives.U256, 0));
-        std.debug.assert(std.mem.eql(u8, &block_env.beneficiary, &([_]u8{0} ** 20)));
+        std.debug.assert(std.mem.eql(u8, &block_env.beneficiary, &(@as([20]u8, @splat(0)))));
         std.debug.assert(block_env.timestamp == @as(primitives.U256, 1));
         std.debug.assert(block_env.gas_limit == std.math.maxInt(u64));
         std.debug.assert(block_env.basefee == 0);
@@ -50,7 +50,7 @@ pub const testing = struct {
 
         var tx_env = TxEnv.default();
         std.debug.assert(tx_env.tx_type == 0);
-        std.debug.assert(std.mem.eql(u8, &tx_env.caller, &([_]u8{0} ** 20)));
+        std.debug.assert(std.mem.eql(u8, &tx_env.caller, &(@as([20]u8, @splat(0)))));
         std.debug.assert(tx_env.gas_limit == 30000000); // EIP-7825 cap
         std.debug.assert(tx_env.gas_price == 0);
         std.debug.assert(tx_env.value == @as(primitives.U256, 0));

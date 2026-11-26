@@ -34,7 +34,7 @@ pub inline fn opPushNImpl(ctx: *InstructionContext, comptime n: u8) void {
         return;
     }
     // `bytes()` is the unpadded code, so the immediate may run past the end.
-    var buf: [32]u8 = .{0} ** 32;
+    var buf: [32]u8 = @splat(0);
     const ext = &ctx.interpreter.bytecode;
     const bytes = ext.bytes();
     const pc = ext.pc;

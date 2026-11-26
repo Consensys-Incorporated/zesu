@@ -571,8 +571,8 @@ pub fn Context(comptime DB: type) type {
             // Requests for the current block or future blocks, or blocks older than 256
             // blocks ago, must return zero per the Yellow Paper.
             const current: u64 = @intCast(self.block.number);
-            if (requested_number >= current) return [_]u8{0} ** 32;
-            if (current - requested_number > primitives.BLOCK_HASH_HISTORY) return [_]u8{0} ** 32;
+            if (requested_number >= current) return @as([32]u8, @splat(0));
+            if (current - requested_number > primitives.BLOCK_HASH_HISTORY) return @as([32]u8, @splat(0));
             return self.journaled_state.database.blockHash(requested_number) catch {
                 self.ctx_error = ContextError.database_error;
                 return null;

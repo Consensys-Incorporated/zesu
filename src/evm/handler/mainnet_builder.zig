@@ -251,7 +251,7 @@ pub const MainnetHandler = struct {
                                     // Nonce must match exactly — skip if stale
                                     if (journaled.account.info.nonce != auth.nonce) continue;
 
-                                    const auth_address_is_zero = std.mem.eql(u8, &auth.address, &[_]u8{0} ** 20);
+                                    const auth_address_is_zero = std.mem.eql(u8, &auth.address, &@as([20]u8, @splat(0)));
 
                                     if (is_amsterdam) {
                                         // EIP-2780 devnet-7 set_delegation charges (top frame), computed

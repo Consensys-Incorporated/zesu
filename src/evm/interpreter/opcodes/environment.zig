@@ -61,7 +61,7 @@ pub fn opCalldataload(ctx: *InstructionContext) void {
     const offset = stack.peekUnsafe(0);
     const data = ctx.interpreter.input.data;
 
-    var word: [32]u8 = [_]u8{0} ** 32;
+    var word: [32]u8 = @splat(0);
     if (offset <= std.math.maxInt(usize)) {
         const off: usize = @intCast(offset);
         if (off < data.len) {

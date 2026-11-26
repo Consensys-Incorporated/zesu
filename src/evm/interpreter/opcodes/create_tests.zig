@@ -56,14 +56,14 @@ const U = primitives.U256;
 const ALLOC = std.heap.page_allocator;
 
 /// Caller/target address used in CREATE tests
-const CALLER: primitives.Address = [_]u8{0xCA} ** 20;
+const CALLER: primitives.Address = @splat(0xCA);
 
 // ---------------------------------------------------------------------------
 // Address derivation unit tests (pure computation, no EVM context)
 // ---------------------------------------------------------------------------
 
 test "createAddress: deterministic — same inputs give same address" {
-    const sender = [_]u8{0} ** 20;
+    const sender: [20]u8 = @splat(0);
     const addr = host_module.createAddress(sender, 0);
     const addr2 = host_module.createAddress(sender, 0);
     try expect(std.mem.eql(u8, &addr, &addr2));
@@ -79,23 +79,23 @@ test "createAddress: deterministic — same inputs give same address" {
 }
 
 test "createAddress: nonce=0 vs nonce=1 produce different addresses" {
-    const sender = [_]u8{0x11} ** 20;
+    const sender: [20]u8 = @splat(0x11);
     const addr0 = host_module.createAddress(sender, 0);
     const addr1 = host_module.createAddress(sender, 1);
     try expect(!std.mem.eql(u8, &addr0, &addr1));
 }
 
 test "createAddress: nonce=127 vs nonce=128 (multi-byte RLP) produce different addresses" {
-    const sender = [_]u8{0x22} ** 20;
+    const sender: [20]u8 = @splat(0x22);
     const addr127 = host_module.createAddress(sender, 127);
     const addr128 = host_module.createAddress(sender, 128);
     try expect(!std.mem.eql(u8, &addr127, &addr128));
 }
 
 test "create2Address: same inputs produce same address" {
-    const sender = [_]u8{0x33} ** 20;
+    const sender: [20]u8 = @splat(0x33);
     const salt: U = 0xDEADBEEF;
-    const init_hash: [32]u8 = [_]u8{0xAB} ** 32;
+    const init_hash: [32]u8 = @splat(0xAB);
     const a1 = host_module.create2Address(sender, salt, init_hash);
     const a2 = host_module.create2Address(sender, salt, init_hash);
     try expect(std.mem.eql(u8, &a1, &a2));
@@ -110,8 +110,8 @@ test "create2Address: same inputs produce same address" {
 }
 
 test "create2Address: different salts produce different addresses" {
-    const sender = [_]u8{0x44} ** 20;
-    const init_hash: [32]u8 = [_]u8{0xAB} ** 32;
+    const sender: [20]u8 = @splat(0x44);
+    const init_hash: [32]u8 = @splat(0xAB);
     const a1 = host_module.create2Address(sender, 1, init_hash);
     const a2 = host_module.create2Address(sender, 2, init_hash);
     try expect(!std.mem.eql(u8, &a1, &a2));

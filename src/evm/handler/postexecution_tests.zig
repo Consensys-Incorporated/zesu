@@ -76,8 +76,8 @@ test "Gas.spentSubRefunded: basic arithmetic" {
 // Minimal successful call: STOP (opcode 0x00), no data, no refund.
 // Verifies caller is reimbursed for unused gas and coinbase receives tip.
 test "postExecution: caller reimbursed for unused gas, coinbase receives tip" {
-    const caller: primitives.Address = [_]u8{0xAA} ** 20;
-    const coinbase: primitives.Address = [_]u8{0xCB} ** 20;
+    const caller: primitives.Address = @splat(0xAA);
+    const coinbase: primitives.Address = @splat(0xCB);
     const initial_caller_balance: primitives.U256 = 10_000_000_000_000_000_000; // 10 ETH
 
     var db = database.InMemoryDB.init(std.heap.c_allocator);

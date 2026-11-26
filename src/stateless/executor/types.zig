@@ -43,7 +43,7 @@ pub const BlockHashEntry = struct {
 // ─── Block environment ────────────────────────────────────────────────────────
 
 pub const Env = struct {
-    coinbase: Address = [_]u8{0} ** 20,
+    coinbase: Address = @splat(0),
     gas_limit: u64 = 30_000_000,
     number: u64 = 0,
     timestamp: u64 = 0,
@@ -122,7 +122,7 @@ pub const Receipt = struct {
 /// EIP-7702 authorization item.
 pub const AuthorizationItem = struct {
     chain_id: U256 = 0,
-    address: Address = [_]u8{0} ** 20,
+    address: Address = @splat(0),
     nonce: u64 = 0,
     /// Pre-recovered signer (authority), e.g. from a test fixture. When null, transition
     /// recovers it from the signature.
