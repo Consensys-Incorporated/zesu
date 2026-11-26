@@ -27,7 +27,7 @@ test "POP: remove top item" {
     interp.stack.pushUnsafe(@as(U, 100));
     var ctx = InstructionContext{ .interpreter = &interp };
     opPop(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 1), interp.stack.len());
     try expectEqual(@as(U, 42), interp.stack.peekUnsafe(0));
 }
@@ -45,7 +45,7 @@ test "PUSH0: pushes zero" {
     var interp = Interpreter.defaultExt();
     var ctx = InstructionContext{ .interpreter = &interp };
     opPush0(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 1), interp.stack.len());
     try expectEqual(@as(U, 0), interp.stack.popUnsafe());
 }
@@ -71,7 +71,7 @@ test "PUSH1: read 1 byte immediate" {
     interp.bytecode.pc = 1; // simulates step() having advanced past opcode byte
     var ctx = InstructionContext{ .interpreter = &interp };
     opPush1(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 0x42), interp.stack.popUnsafe());
     try expectEqual(@as(usize, 2), interp.bytecode.pc); // advanced by 1
 }
@@ -138,7 +138,7 @@ test "DUP1: duplicate top item" {
     interp.stack.pushUnsafe(@as(U, 200));
     var ctx = InstructionContext{ .interpreter = &interp };
     opDup1(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 3), interp.stack.len());
     try expectEqual(@as(U, 200), interp.stack.peekUnsafe(0));
     try expectEqual(@as(U, 200), interp.stack.peekUnsafe(1));
@@ -184,7 +184,7 @@ test "SWAP1: swap top two items" {
     interp.stack.pushUnsafe(@as(U, 20));
     var ctx = InstructionContext{ .interpreter = &interp };
     opSwap1(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 10), interp.stack.peekUnsafe(0));
     try expectEqual(@as(U, 20), interp.stack.peekUnsafe(1));
 }
@@ -232,7 +232,7 @@ test "DUPN: valid imm=128 (n=17) duplicates item at depth 17" {
     interp.bytecode.pc = 1;
     var ctx = InstructionContext{ .interpreter = &interp };
     opDupN(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 18), interp.stack.len());
     try expectEqual(@as(U, 0xBEEF), interp.stack.peekUnsafe(0)); // duplicate at top
 }
@@ -289,7 +289,7 @@ test "DUPN: valid boundary imm=0 (n=145) succeeds with sufficient stack" {
     interp.bytecode.pc = 1;
     var ctx = InstructionContext{ .interpreter = &interp };
     opDupN(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 146), interp.stack.len());
     try expectEqual(@as(U, 0xCAFE), interp.stack.peekUnsafe(0));
 }
@@ -324,7 +324,7 @@ test "SWAPN: valid imm=128 (n=17) swaps top with item at depth 17" {
     interp.bytecode.pc = 1;
     var ctx = InstructionContext{ .interpreter = &interp };
     opSwapN(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 18), interp.stack.len());
     try expectEqual(@as(U, 0xDEAD), interp.stack.peekUnsafe(0)); // old depth-17 now on top
     try expectEqual(@as(U, 17), interp.stack.peekUnsafe(17)); // old top now at depth 17
@@ -381,7 +381,7 @@ test "SWAPN: valid boundary imm=90 (n=235) succeeds with sufficient stack" {
     interp.bytecode.pc = 1;
     var ctx = InstructionContext{ .interpreter = &interp };
     opSwapN(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 0xABCD), interp.stack.peekUnsafe(0));
     try expectEqual(@as(U, 235), interp.stack.peekUnsafe(235));
 }
@@ -416,7 +416,7 @@ test "EXCHANGE: valid imm=0 swaps depths 1 and 2" {
     interp.bytecode.pc = 1;
     var ctx = InstructionContext{ .interpreter = &interp };
     opExchange(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     // stack[top-1] and stack[top-15] should be swapped; top unchanged
     try expectEqual(@as(U, 0xBBBB), interp.stack.peekUnsafe(0)); // top unchanged
     try expectEqual(@as(U, 0xAAAA), interp.stack.peekUnsafe(1)); // was depth 15, now depth 1

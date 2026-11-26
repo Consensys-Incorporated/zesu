@@ -164,7 +164,7 @@ test "opCreate: stack underflow with fewer than 3 items" {
     var ic = InstructionContext{ .interpreter = &interp, .host = &host };
     call_ops.opCreate(&ic);
 
-    try expect(!interp.bytecode.continue_execution);
+    try expect(!interp.bytecode.isNotEnd());
     try expectEqual(.stack_underflow, interp.result);
 }
 
@@ -185,7 +185,7 @@ test "opCreate: static context halts with invalid_static" {
     var ic = InstructionContext{ .interpreter = &interp, .host = &host };
     call_ops.opCreate(&ic);
 
-    try expect(!interp.bytecode.continue_execution);
+    try expect(!interp.bytecode.isNotEnd());
     try expectEqual(.invalid_static, interp.result);
 }
 
@@ -206,7 +206,7 @@ test "opCreate2: stack underflow with fewer than 4 items" {
     var ic = InstructionContext{ .interpreter = &interp, .host = &host };
     call_ops.opCreate2(&ic);
 
-    try expect(!interp.bytecode.continue_execution);
+    try expect(!interp.bytecode.isNotEnd());
     try expectEqual(.stack_underflow, interp.result);
 }
 
@@ -237,7 +237,7 @@ test "opCreate: STOP init code deploys empty contract, returns non-zero address"
     call_ops.opCreate(&ic);
     runPendingCreate(&host, &interp, .prague);
 
-    try expect(interp.bytecode.continue_execution); // parent keeps running
+    try expect(interp.bytecode.isNotEnd()); // parent keeps running
     const pushed = interp.stack.popUnsafe();
     try expect(pushed != 0); // non-zero = success
 }

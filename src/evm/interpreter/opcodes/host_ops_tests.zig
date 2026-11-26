@@ -68,7 +68,7 @@ test "SLOAD: slot present in state returns stored value" {
 
     host_ops.opSload(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(VALUE, interp.stack.popUnsafe());
 }
 
@@ -86,7 +86,7 @@ test "SLOAD: slot absent returns zero" {
 
     host_ops.opSload(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 0), interp.stack.popUnsafe());
 }
 
@@ -131,7 +131,7 @@ test "SLOAD: cold access charges COLD_SLOAD gas (Berlin+)" {
 
     host_ops.opSload(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(GAS_LIMIT - gas_costs.COLD_SLOAD, interp.gas.remaining);
 }
 
@@ -153,7 +153,7 @@ test "SLOAD: second access to same slot charges WARM_SLOAD gas" {
     // First access: cold
     interp.stack.pushUnsafe(KEY);
     host_ops.opSload(&ic);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     _ = interp.stack.popUnsafe(); // discard value
 
     const after_cold = interp.gas.remaining;
@@ -162,7 +162,7 @@ test "SLOAD: second access to same slot charges WARM_SLOAD gas" {
     // Second access: warm
     interp.stack.pushUnsafe(KEY);
     host_ops.opSload(&ic);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
 
     try expectEqual(after_cold - gas_costs.WARM_SLOAD, interp.gas.remaining);
 }
@@ -211,7 +211,7 @@ test "SSTORE: writes value verifiable via sload" {
 
     host_ops.opSstore(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 0), interp.stack.len());
 
     // Verify the value was written via sload
@@ -279,7 +279,7 @@ test "TSTORE then TLOAD round-trips a value" {
     interp.stack.pushUnsafe(@as(U, 99)); // value
     interp.stack.pushUnsafe(@as(U, 5)); // key (top)
     host_ops.opTstore(&ic);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
 
     // TLOAD: stack [key (top)]
     interp.stack.pushUnsafe(@as(U, 5));
@@ -348,7 +348,7 @@ test "BALANCE: returns correct balance for known account" {
 
     host_ops.opBalance(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(BAL, interp.stack.popUnsafe());
 }
 
@@ -368,7 +368,7 @@ test "BALANCE: cold access charges COLD_ACCOUNT_ACCESS gas (Berlin+)" {
 
     host_ops.opBalance(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(GAS_LIMIT - gas_costs.COLD_ACCOUNT_ACCESS, interp.gas.remaining);
 }
 
@@ -413,7 +413,7 @@ test "SELFBALANCE: returns balance of executing contract" {
 
     host_ops.opSelfbalance(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(BAL, interp.stack.popUnsafe());
 }
 
@@ -444,7 +444,7 @@ test "EXTCODESIZE: EOA with empty code returns 0" {
 
     host_ops.opExtcodesize(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 0), interp.stack.popUnsafe());
 }
 
@@ -487,7 +487,7 @@ test "EXTCODEHASH: empty account returns 0" {
 
     host_ops.opExtcodehash(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(U, 0), interp.stack.popUnsafe());
 }
 
@@ -523,7 +523,7 @@ test "BLOCKHASH: known block returns hash" {
 
     host_ops.opBlockhash(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(host_module.hashToU256(HASH), interp.stack.popUnsafe());
 }
 
@@ -570,7 +570,7 @@ test "LOG0: emits log with correct address and empty data" {
 
     host_ops.opLog0(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(usize, 0), interp.stack.len());
 
     const logs = ctx.journaled_state.inner.logs.items;
@@ -599,7 +599,7 @@ test "LOG1: emits log with one topic" {
 
     host_ops.opLog1(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
 
     const logs = ctx.journaled_state.inner.logs.items;
     try expectEqual(@as(usize, 1), logs.len);
@@ -642,7 +642,7 @@ test "LOG4: emits log with four topics" {
 
     host_ops.opLog4(&ic);
 
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
 
     const logs = ctx.journaled_state.inner.logs.items;
     try expectEqual(@as(usize, 1), logs.len);

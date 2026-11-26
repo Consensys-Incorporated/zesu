@@ -19,7 +19,7 @@ test "KECCAK256: empty input" {
     interp.stack.pushUnsafe(@as(U, 0)); // offset 0
     var ctx = InstructionContext{ .interpreter = &interp };
     opKeccak256(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     // Keccak256("") = 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
     const expected: U = 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470;
     try expectEqual(expected, interp.stack.popUnsafe());
@@ -34,7 +34,7 @@ test "KECCAK256: single byte" {
     interp.stack.pushUnsafe(@as(U, 0)); // offset 0
     var ctx = InstructionContext{ .interpreter = &interp };
     opKeccak256(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     // Keccak256(0x00) = 0xbc36789e7a1e281436464229828f817d6612f7b477d66591ff96a9e064bcc98a
     const expected: U = 0xbc36789e7a1e281436464229828f817d6612f7b477d66591ff96a9e064bcc98a;
     try expectEqual(expected, interp.stack.popUnsafe());
@@ -66,7 +66,7 @@ test "KECCAK256: dynamic word gas (64 bytes = 2 words = 12 gas)" {
     interp.stack.pushUnsafe(@as(U, 0)); // offset 0
     var ctx = InstructionContext{ .interpreter = &interp };
     opKeccak256(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(u64, 988), interp.gas.remaining); // 1000 - 12
 }
 
@@ -78,7 +78,7 @@ test "KECCAK256: dynamic word gas (100 bytes = ceil(100/32)=4 words = 24 gas)" {
     interp.stack.pushUnsafe(@as(U, 0));
     var ctx = InstructionContext{ .interpreter = &interp };
     opKeccak256(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     try expectEqual(@as(u64, 976), interp.gas.remaining); // 1000 - 24
 }
 
@@ -90,7 +90,7 @@ test "KECCAK256: auto-expands memory" {
     interp.stack.pushUnsafe(@as(U, 0)); // offset 0
     var ctx = InstructionContext{ .interpreter = &interp };
     opKeccak256(&ctx);
-    try expect(interp.bytecode.continue_execution);
+    try expect(interp.bytecode.isNotEnd());
     // Memory should have been expanded to at least 32 bytes
     try expect(interp.memory.size() >= 32);
 }
@@ -104,7 +104,7 @@ test "KECCAK256: out of gas on word cost" {
     interp.stack.pushUnsafe(@as(U, 0));
     var ctx = InstructionContext{ .interpreter = &interp };
     opKeccak256(&ctx);
-    try expect(!interp.bytecode.continue_execution);
+    try expect(!interp.bytecode.isNotEnd());
     try expectEqual(.out_of_gas, interp.result);
 }
 

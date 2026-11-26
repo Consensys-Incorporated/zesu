@@ -187,8 +187,9 @@ pub const RuntimeFlags = struct {
 pub const ExtBytecode = struct {
     inner: bytecode.Bytecode,
     pc: usize,
-    /// Whether execution is still running (false after halt/stop/return)
-    continue_execution: bool,
+    /// 1 while execution runs, 0 after halt/stop/return. A `u8`, not `bool`: Zig 0.17 masks a
+    /// loaded `bool` to its low bit, and `isNotEnd` runs after every table-dispatched opcode.
+    continue_execution: u8,
     /// If true, deinit() will free the bytecode's heap allocations.
     /// CALL frames share bytecode with account state (DB) and must NOT free it.
     /// CREATE init-code frames and test frames own their bytecode.
@@ -199,7 +200,7 @@ pub const ExtBytecode = struct {
         return ExtBytecode{
             .inner = bytecode_data,
             .pc = 0,
-            .continue_execution = true,
+            .continue_execution = 1,
             .owns_bytecode = false,
         };
     }
@@ -210,7 +211,7 @@ pub const ExtBytecode = struct {
         return ExtBytecode{
             .inner = bytecode_data,
             .pc = 0,
-            .continue_execution = true,
+            .continue_execution = 1,
             .owns_bytecode = true,
         };
     }
@@ -219,7 +220,7 @@ pub const ExtBytecode = struct {
         return ExtBytecode{
             .inner = bytecode.Bytecode.new(),
             .pc = 0,
-            .continue_execution = true,
+            .continue_execution = 1,
             .owns_bytecode = false,
         };
     }
@@ -260,7 +261,7 @@ pub const ExtBytecode = struct {
     }
 
     pub fn isNotEnd(self: *const ExtBytecode) bool {
-        return self.continue_execution;
+        return self.continue_execution != 0;
     }
 
     pub fn getBytecode(self: ExtBytecode) bytecode.Bytecode {
@@ -415,7 +416,7 @@ pub const Interpreter = struct {
 
     /// Halt execution with the given result
     pub fn halt(self: *Interpreter, r: InstructionResult) void {
-        self.bytecode.continue_execution = false;
+        self.bytecode.continue_execution = 0;
         self.result = r;
         // EVM spec: all remaining gas is consumed on any error (OOG, invalid opcode, etc.).
         // Revert and success are NOT errors — they preserve remaining gas for refund/return.
