@@ -804,7 +804,7 @@ fn runDispatch(
                 const n = @min(data.len - off, 32);
                 @memcpy(word[0..n], data[off..][0..n]);
             }
-            r.sb[r.sp - 1] = std.mem.readInt(primitives.U256, &word, .big);
+            r.sb[r.sp - 1] = primitives.readBe(primitives.U256, &word);
             continue :sw opcodeAt(code, r.pc);
         },
         0x14 => { // EQ
@@ -878,7 +878,7 @@ fn runDispatch(
             if (r.sp >= 1 and r.gas >= gas_costs.G_VERYLOW and inMemory(self, r.sb[r.sp - 1])) {
                 r.gas -= gas_costs.G_VERYLOW;
                 const off: usize = @intCast(r.sb[r.sp - 1]);
-                r.sb[r.sp - 1] = std.mem.readInt(primitives.U256, self.memory.buffer.items[off..][0..32], .big);
+                r.sb[r.sp - 1] = primitives.readBe(primitives.U256, self.memory.buffer.items[off..][0..32]);
             } else if (!viaSelf(self, &r, gas_costs.G_VERYLOW, opcodes.opMload, .{ctx})) return;
             continue :sw opcodeAt(code, r.pc);
         },
@@ -887,7 +887,7 @@ fn runDispatch(
             if (r.sp >= 2 and r.gas >= gas_costs.G_VERYLOW and inMemory(self, r.sb[r.sp - 1])) {
                 r.gas -= gas_costs.G_VERYLOW;
                 const off: usize = @intCast(r.sb[r.sp - 1]);
-                std.mem.writeInt(primitives.U256, self.memory.buffer.items[off..][0..32], r.sb[r.sp - 2], .big);
+                primitives.writeBe(primitives.U256, self.memory.buffer.items[off..][0..32], r.sb[r.sp - 2]);
                 r.sp -= 2;
             } else if (!viaSelf(self, &r, gas_costs.G_VERYLOW, opcodes.opMstore, .{ctx})) return;
             continue :sw opcodeAt(code, r.pc);

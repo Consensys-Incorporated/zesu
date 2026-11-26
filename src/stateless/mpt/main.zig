@@ -1913,7 +1913,7 @@ fn updEncodeBranch(
 
 fn updRlpU256(alloc: std.mem.Allocator, v: u256) ![]const u8 {
     var buf: [32]u8 = undefined;
-    std.mem.writeInt(u256, &buf, v, .big);
+    primitives.writeBe(u256, &buf, v);
     var start: usize = 0;
     while (start < 32 and buf[start] == 0) start += 1;
     return updRlpBytes(alloc, buf[start..]);

@@ -288,8 +288,8 @@ pub fn recoverSender(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_i
     var sig: [64]u8 = undefined;
     var r_buf: [32]u8 = undefined;
     var s_buf: [32]u8 = undefined;
-    std.mem.writeInt(u256, &r_buf, r, .big);
-    std.mem.writeInt(u256, &s_buf, s, .big);
+    primitives.writeBe(u256, &r_buf, r);
+    primitives.writeBe(u256, &s_buf, s);
     @memcpy(sig[0..32], &r_buf);
     @memcpy(sig[32..64], &s_buf);
 

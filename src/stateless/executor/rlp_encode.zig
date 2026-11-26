@@ -2,6 +2,7 @@
 //! never free intermediates, so pass them an arena. Hot paths instead size the whole
 //! encoding with `listLen`/`strLen`/`uintLen`, allocate once, and fill it with `Writer`.
 const std = @import("std");
+const primitives = @import("primitives");
 const accel = @import("accelerators");
 
 // ─── Core encoders ────────────────────────────────────────────────────────────
@@ -40,7 +41,7 @@ pub fn encodeU64(alloc: std.mem.Allocator, n: u64) ![]u8 {
 pub fn encodeU128(alloc: std.mem.Allocator, n: u128) ![]u8 {
     if (n == 0) return encodeBytes(alloc, &.{});
     var buf: [16]u8 = undefined;
-    std.mem.writeInt(u128, &buf, n, .big);
+    primitives.writeBe(u128, &buf, n);
     return encodeBytes(alloc, trimLeadingZero(&buf));
 }
 
@@ -48,7 +49,7 @@ pub fn encodeU128(alloc: std.mem.Allocator, n: u128) ![]u8 {
 pub fn encodeU256(alloc: std.mem.Allocator, n: u256) ![]u8 {
     if (n == 0) return encodeBytes(alloc, &.{});
     var buf: [32]u8 = undefined;
-    std.mem.writeInt(u256, &buf, n, .big);
+    primitives.writeBe(u256, &buf, n);
     return encodeBytes(alloc, trimLeadingZero(&buf));
 }
 
@@ -168,8 +169,8 @@ pub const Writer = struct {
     }
 
     pub fn uint(w: *Writer, comptime T: type, v: T) void {
-        var be: [@sizeOf(T)]u8 = undefined;
-        std.mem.writeInt(T, &be, v, .big);
+        var be: [@divExact(@bitSizeOf(T), 8)]u8 = undefined;
+        primitives.writeBe(T, &be, v);
         const skip = if (v == 0) be.len else @as(usize, @clz(v)) / 8;
         w.str(be[skip..]);
     }
