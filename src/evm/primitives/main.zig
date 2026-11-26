@@ -13,6 +13,26 @@ pub const U8 = u8;
 pub const StorageKey = U256;
 pub const StorageValue = U256;
 
+/// Big-endian bytes to an unsigned int. Ints wider than 64 bits are read a u64 word at a
+/// time: Zig 0.17 lowers `std.mem.readInt`/`@bitCast` between such an int and a byte array
+/// one byte at a time.
+pub inline fn readBe(comptime T: type, bytes: *const [@divExact(@bitSizeOf(T), 8)]u8) T {
+    const n = bytes.len;
+    comptime std.debug.assert(n <= 8 or n % 8 == 0);
+    if (n <= 8) return std.mem.readInt(T, bytes, .big);
+    var v: T = 0;
+    inline for (0..n / 8) |i| v = (v << 64) | std.mem.readInt(u64, bytes[i * 8 ..][0..8], .big);
+    return v;
+}
+
+/// Unsigned int to big-endian bytes; the inverse of `readBe`.
+pub inline fn writeBe(comptime T: type, bytes: *[@divExact(@bitSizeOf(T), 8)]u8, v: T) void {
+    const n = bytes.len;
+    comptime std.debug.assert(n <= 8 or n % 8 == 0);
+    if (n <= 8) return std.mem.writeInt(T, bytes, v, .big);
+    inline for (0..n / 8) |i| std.mem.writeInt(u64, bytes[i * 8 ..][0..8], @truncate(v >> ((n / 8 - 1 - i) * 64)), .big);
+}
+
 /// Fixed-size block moves through the ZisK DMA chip (plain @memcpy on other targets).
 pub const dma = @import("dma.zig");
 

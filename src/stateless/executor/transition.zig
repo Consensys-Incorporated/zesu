@@ -851,8 +851,8 @@ pub fn transitionWithContext(
                     const auth_hash = tx_signing.authorizationSigningHash(arena, &ai) catch @panic("out of memory");
                     const recid: u8 = if (ai.y_parity == 0) 0 else 1;
                     var auth_sig: [64]u8 = undefined;
-                    std.mem.writeInt(u256, auth_sig[0..32], ai.r, .big);
-                    std.mem.writeInt(u256, auth_sig[32..64], ai.s, .big);
+                    primitives.writeBe(u256, auth_sig[0..32], ai.r);
+                    primitives.writeBe(u256, auth_sig[32..64], ai.s);
                     var auth_pubkey: [64]u8 = undefined;
                     if (!accel.ecrecover(&auth_hash, &auth_sig, recid, &auth_pubkey)) break :blk context_mod.RecoveredAuthority.Invalid;
                     var auth_keccak: [32]u8 = undefined;
@@ -922,7 +922,7 @@ pub fn transitionWithContext(
                     .storage_keys = std.ArrayList(primitives.StorageKey).empty,
                 };
                 for (al_entry.storage_keys) |key| {
-                    const sk = std.mem.readInt(u256, &key, .big);
+                    const sk = primitives.readBe(u256, &key);
                     item.storage_keys.append(alloc_mod.get(), sk) catch @panic("out of memory");
                 }
                 al_items.append(alloc_mod.get(), item) catch @panic("out of memory");

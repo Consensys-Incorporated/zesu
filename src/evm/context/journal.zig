@@ -764,7 +764,8 @@ pub const JournalInner = struct {
         topics[2] = std.mem.zeroes([32]u8);
         @memcpy(topics[2][12..], &to);
         const data = alloc.alloc(u8, 32) catch @panic("out of memory");
-        const amount_bytes: [32]u8 = @bitCast(@byteSwap(amount));
+        var amount_bytes: [32]u8 = undefined;
+        primitives.writeBe(primitives.U256, &amount_bytes, amount);
         @memcpy(data, &amount_bytes);
         self.addLog(.{
             .address = primitives.EIP7708_LOG_ADDRESS,
@@ -781,7 +782,8 @@ pub const JournalInner = struct {
         topics[1] = std.mem.zeroes([32]u8);
         @memcpy(topics[1][12..], &addr);
         const data = alloc.alloc(u8, 32) catch @panic("out of memory");
-        const amount_bytes: [32]u8 = @bitCast(@byteSwap(amount));
+        var amount_bytes: [32]u8 = undefined;
+        primitives.writeBe(primitives.U256, &amount_bytes, amount);
         @memcpy(data, &amount_bytes);
         self.addLog(.{
             .address = primitives.EIP7708_LOG_ADDRESS,

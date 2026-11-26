@@ -304,7 +304,7 @@ pub const WitnessDatabase = struct {
 
 fn u256ToHash(value: u256) primitives.Hash {
     var out: primitives.Hash = undefined;
-    std.mem.writeInt(u256, &out, value, .big);
+    primitives.writeBe(u256, &out, value);
     return out;
 }
 

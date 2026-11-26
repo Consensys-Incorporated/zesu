@@ -1,6 +1,7 @@
 //! Post-execution commitments: state root (witness delta via computeStateRootDelta, or
 //! from scratch via computeStateRoot), receipts/transactions roots and the logs hash.
 const std = @import("std");
+const primitives = @import("primitives");
 
 const types = @import("executor_types");
 const rlp = @import("./rlp_encode.zig");
@@ -245,7 +246,7 @@ fn computeStorageRootBatch(
     var it = account.storage.iterator();
     while (it.next()) |entry| {
         var slot_key: [32]u8 = undefined;
-        std.mem.writeInt(u256, &slot_key, entry.key_ptr.*, .big);
+        primitives.writeBe(u256, &slot_key, entry.key_ptr.*);
         const slot_hash = mpt.keccak256(&slot_key);
         const val: u256 = entry.value_ptr.*;
         const val_enc: ?[]const u8 = if (val == 0) null else blk: {
@@ -271,7 +272,7 @@ fn computeStorageRootScratch(alloc: std.mem.Allocator, account: types.AllocAccou
     while (it.next()) |entry| {
         if (entry.value_ptr.* == 0) continue;
         var slot_key: [32]u8 = undefined;
-        std.mem.writeInt(u256, &slot_key, entry.key_ptr.*, .big);
+        primitives.writeBe(u256, &slot_key, entry.key_ptr.*);
         items[i].key = try alloc.dupe(u8, &mpt_builder.keccak256(&slot_key));
         items[i].value = try rlp.encodeU256(alloc, entry.value_ptr.*);
         i += 1;
@@ -293,7 +294,7 @@ fn computeStorageRoot(
         var it = account.storage.iterator();
         while (it.next()) |entry| {
             var slot_key: [32]u8 = undefined;
-            std.mem.writeInt(u256, &slot_key, entry.key_ptr.*, .big);
+            primitives.writeBe(u256, &slot_key, entry.key_ptr.*);
             try mpt.updateStorageChained(alloc, &root, slot_key, entry.value_ptr.*, pool, &extra);
         }
         return root;
@@ -357,7 +358,7 @@ fn writeUintRlp(out: []u8, n: u256) usize {
     }
     const len = (256 - @as(usize, @clz(n)) + 7) / 8;
     var buf: [32]u8 = undefined;
-    std.mem.writeInt(u256, &buf, n, .big);
+    primitives.writeBe(u256, &buf, n);
     out[0] = @intCast(0x80 + len);
     @memcpy(out[1..][0..len], buf[32 - len ..]);
     return 1 + len;
